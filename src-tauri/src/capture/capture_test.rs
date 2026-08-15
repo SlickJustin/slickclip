@@ -13,7 +13,6 @@ use windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessSt
 use windows_capture::capture::{Context, GraphicsCaptureApiError, GraphicsCaptureApiHandler};
 use windows_capture::encoder::{
     AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
-    VideoSettingsSubType,
 };
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl};
@@ -22,6 +21,7 @@ use windows_capture::settings::{
     GraphicsCaptureItemType, MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
 
+use super::encoder::{resolve_encoder, EncoderChoice, EncoderCodec};
 use super::targets::{
     resolve_target, CaptureTargetRequest, NativeCaptureTarget, ResolvedCaptureTarget,
 };
@@ -40,10 +40,16 @@ pub struct CaptureTestResult {
     borderless_active: bool,
     borderless_status: String,
     bordered_capture_available: Option<bool>,
+    requested_encoder: String,
+    actual_encoder: Option<String>,
 }
 
 impl CaptureTestResult {
-    fn success(path: &Path) -> Self {
+    fn success(
+        path: &Path,
+        requested_encoder: EncoderChoice,
+        actual_encoder: EncoderCodec,
+    ) -> Self {
         Self {
             success: true,
             file_path: Some(path.to_string_lossy().into_owned()),
@@ -51,10 +57,12 @@ impl CaptureTestResult {
             borderless_active: true,
             borderless_status: "active".to_string(),
             bordered_capture_available: None,
+            requested_encoder: requested_encoder.result_name().to_string(),
+            actual_encoder: Some(actual_encoder.display_name().to_string()),
         }
     }
 
-    fn failure(failure: CaptureFailure) -> Self {
+    fn failure(failure: CaptureFailure, requested_encoder: EncoderChoice) -> Self {
         Self {
             success: false,
             file_path: None,
@@ -62,6 +70,8 @@ impl CaptureTestResult {
             borderless_active: false,
             borderless_status: failure.borderless_status,
             bordered_capture_available: failure.bordered_capture_available,
+            requested_encoder: requested_encoder.result_name().to_string(),
+            actual_encoder: None,
         }
     }
 }
@@ -112,6 +122,7 @@ struct CaptureFlags {
     width: u32,
     height: u32,
     permission_granted: Arc<AtomicBool>,
+    encoder: EncoderCodec,
 }
 
 struct CaptureTestHandler {
@@ -169,8 +180,14 @@ impl GraphicsCaptureApiHandler for CaptureTestHandler {
         request_borderless_access().map_err(CaptureHandlerError::Borderless)?;
         ctx.flags.permission_granted.store(true, Ordering::Release);
 
+        let video_sub_type = ctx.flags.encoder.video_sub_type().ok_or_else(|| {
+            CaptureHandlerError::Capture(format!(
+                "{} is not exposed by windows-capture 2.0.1.",
+                ctx.flags.encoder.display_name()
+            ))
+        })?;
         let video_settings = VideoSettingsBuilder::new(ctx.flags.width, ctx.flags.height)
-            .sub_type(VideoSettingsSubType::H264)
+            .sub_type(video_sub_type)
             .frame_rate(60);
 
         let encoder = VideoEncoder::new(
@@ -231,50 +248,71 @@ impl GraphicsCaptureApiHandler for CaptureTestHandler {
 pub async fn run_capture_test(
     app: tauri::AppHandle,
     target: CaptureTargetRequest,
+    encoder: EncoderChoice,
 ) -> CaptureTestResult {
     if CAPTURE_ACTIVE
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return CaptureTestResult::failure(CaptureFailure::before_permission(
-            "A native capture test is already active.",
-        ));
+        return CaptureTestResult::failure(
+            CaptureFailure::before_permission("A native capture test is already active."),
+            encoder,
+        );
     }
 
     let active_guard = ActiveCaptureGuard;
     let videos_dir = match app.path().video_dir() {
         Ok(path) => path,
         Err(error) => {
-            return CaptureTestResult::failure(CaptureFailure::before_permission(format!(
-                "Could not locate the Windows Videos folder: {error}"
-            )));
+            return CaptureTestResult::failure(
+                CaptureFailure::before_permission(format!(
+                    "Could not locate the Windows Videos folder: {error}"
+                )),
+                encoder,
+            );
         }
     };
 
     let worker = tauri::async_runtime::spawn_blocking(move || {
         let _active_guard = active_guard;
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            capture_five_second_test(&app, &videos_dir, &target)
+            capture_five_second_test(&app, &videos_dir, &target, encoder)
         }))
     });
 
     match worker.await {
-        Ok(Ok(Ok(path))) => CaptureTestResult::success(&path),
-        Ok(Ok(Err(error))) => CaptureTestResult::failure(error),
-        Ok(Err(_)) => CaptureTestResult::failure(CaptureFailure::before_permission(
-            "The native capture worker panicked while recording or finalizing the MP4.",
-        )),
-        Err(error) => CaptureTestResult::failure(CaptureFailure::before_permission(format!(
-            "The native capture worker could not complete: {error}"
-        ))),
+        Ok(Ok(Ok(success))) => {
+            CaptureTestResult::success(&success.path, encoder, success.actual_encoder)
+        }
+        Ok(Ok(Err(error))) => CaptureTestResult::failure(error, encoder),
+        Ok(Err(_)) => CaptureTestResult::failure(
+            CaptureFailure::before_permission(
+                "The native capture worker panicked while recording or finalizing the MP4.",
+            ),
+            encoder,
+        ),
+        Err(error) => CaptureTestResult::failure(
+            CaptureFailure::before_permission(format!(
+                "The native capture worker could not complete: {error}"
+            )),
+            encoder,
+        ),
     }
+}
+
+struct CaptureRunSuccess {
+    path: PathBuf,
+    actual_encoder: EncoderCodec,
 }
 
 fn capture_five_second_test(
     app: &tauri::AppHandle,
     videos_dir: &Path,
     target_request: &CaptureTargetRequest,
-) -> Result<PathBuf, CaptureFailure> {
+    encoder_choice: EncoderChoice,
+) -> Result<CaptureRunSuccess, CaptureFailure> {
+    let resolved_encoder =
+        resolve_encoder(encoder_choice).map_err(CaptureFailure::before_permission)?;
     let ResolvedCaptureTarget {
         target,
         width,
@@ -300,6 +338,7 @@ fn capture_five_second_test(
         width,
         height,
         permission_granted: permission_granted.clone(),
+        encoder: resolved_encoder.actual,
     };
 
     let capture_result = match target {
@@ -335,7 +374,10 @@ fn capture_five_second_test(
         ));
     }
 
-    Ok(output_path)
+    Ok(CaptureRunSuccess {
+        path: output_path,
+        actual_encoder: resolved_encoder.actual,
+    })
 }
 
 fn start_target_capture<T>(

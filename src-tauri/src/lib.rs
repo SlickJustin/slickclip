@@ -13,6 +13,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             capture::capture_test::run_capture_test,
+            capture::encoder::get_encoder_capabilities,
             capture::targets::list_capture_monitors,
             capture::targets::list_capture_windows
         ])

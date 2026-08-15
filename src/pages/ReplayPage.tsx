@@ -14,6 +14,30 @@ type CaptureTestResult = {
   borderlessActive: boolean;
   borderlessStatus: string;
   borderedCaptureAvailable: boolean | null;
+  requestedEncoder: string;
+  actualEncoder: string | null;
+};
+
+type EncoderId = "automatic" | "av1" | "hevc" | "h264";
+
+type EncoderInfo = {
+  id: EncoderId;
+  displayName: string;
+  codec: string;
+  available: boolean;
+  reasonUnavailable: string | null;
+  recommended: boolean;
+  preferred: boolean;
+};
+
+type EncoderCapabilitiesResult = {
+  success: boolean;
+  encoders: EncoderInfo[];
+  automaticEncoderId: EncoderId | null;
+  detectionMethod: string;
+  hardwareAccelerationRequested: boolean;
+  hardwareEncodingVerified: boolean;
+  errorMessage: string | null;
 };
 
 type MonitorTarget = {
@@ -64,6 +88,9 @@ export function ReplayPage() {
   const [selectedTarget, setSelectedTarget] = useState<SelectedTarget | null>(null);
   const [targetsLoading, setTargetsLoading] = useState(true);
   const [targetsError, setTargetsError] = useState<string | null>(null);
+  const [captureTestEncoder, setCaptureTestEncoder] = useState<EncoderId>("automatic");
+  const [encoderCapabilities, setEncoderCapabilities] = useState<EncoderCapabilitiesResult | null>(null);
+  const [encodersLoading, setEncodersLoading] = useState(true);
   const [audioSources, setAudioSources] = useState({
     game: true,
     discord: true,
@@ -77,7 +104,29 @@ export function ReplayPage() {
 
   useEffect(() => {
     void refreshAllTargets();
+    void refreshEncoderCapabilities();
   }, []);
+
+  async function refreshEncoderCapabilities() {
+    setEncodersLoading(true);
+
+    try {
+      const result = await invoke<EncoderCapabilitiesResult>("get_encoder_capabilities");
+      setEncoderCapabilities(result);
+    } catch (error) {
+      setEncoderCapabilities({
+        success: false,
+        encoders: [],
+        automaticEncoderId: null,
+        detectionMethod: "Encoder capability detection did not complete.",
+        hardwareAccelerationRequested: true,
+        hardwareEncodingVerified: false,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setEncodersLoading(false);
+    }
+  }
 
   async function refreshAllTargets() {
     setTargetsLoading(true);
@@ -143,7 +192,7 @@ export function ReplayPage() {
     setCaptureTestActive(true);
     setCaptureTestResult(null);
     setCaptureTestStatus("preparing");
-    setCaptureTestMessage("Requesting borderless capture permission...");
+    setCaptureTestMessage("Checking encoder and borderless capture permission...");
 
     let unlisten: UnlistenFn | undefined;
 
@@ -155,6 +204,7 @@ export function ReplayPage() {
 
       const result = await invoke<CaptureTestResult>("run_capture_test", {
         target: selectedTarget,
+        encoder: captureTestEncoder,
       });
       setCaptureTestResult(result);
       if (result.success && result.filePath) {
@@ -172,6 +222,10 @@ export function ReplayPage() {
       setCaptureTestActive(false);
     }
   }
+
+  const selectedEncoderAvailable = encoderCapabilities?.encoders.find(
+    (encoderOption) => encoderOption.id === captureTestEncoder,
+  )?.available ?? false;
 
   return (
     <div className="page page-replay">
@@ -263,6 +317,56 @@ export function ReplayPage() {
           )}
         </div>
 
+        <div className="capture-encoder-section">
+          <div className="capture-encoder-heading">
+            <div>
+              <span className="setting-label">Encoder</span>
+              <small>Automatic resolves on the capture backend using AV1 -&gt; HEVC -&gt; H.264 priority.</small>
+            </div>
+            {encoderCapabilities?.automaticEncoderId && (
+              <span className="capture-encoder-auto-result">
+                Automatic: {formatEncoderId(encoderCapabilities.automaticEncoderId)}
+              </span>
+            )}
+          </div>
+
+          <div className="capture-encoder-options" aria-label="Test capture encoder">
+            {encodersLoading ? (
+              <div className="capture-encoder-loading">Probing Windows video encoders...</div>
+            ) : encoderCapabilities?.encoders.length ? encoderCapabilities.encoders.map((encoderOption) => (
+              <button
+                className={`capture-encoder-option${captureTestEncoder === encoderOption.id ? " capture-encoder-selected" : ""}${encoderOption.available ? "" : " capture-encoder-unavailable"}`}
+                type="button"
+                aria-pressed={captureTestEncoder === encoderOption.id}
+                disabled={captureTestActive || !encoderOption.available}
+                key={encoderOption.id}
+                title={encoderOption.reasonUnavailable ?? undefined}
+                onClick={() => setCaptureTestEncoder(encoderOption.id)}
+              >
+                <span className="capture-encoder-name">
+                  {encoderOption.displayName}
+                  {encoderOption.preferred && <span className="capture-encoder-preferred">Preferred</span>}
+                  {encoderOption.recommended && !encoderOption.preferred && <span className="capture-encoder-preferred">Recommended</span>}
+                </span>
+                <span className={encoderOption.available ? "capture-encoder-available" : "capture-encoder-not-available"}>
+                  {encoderOption.available ? "Available" : "Unavailable"}
+                </span>
+                {encoderOption.reasonUnavailable && <small>{encoderOption.reasonUnavailable}</small>}
+              </button>
+            )) : (
+              <div className="capture-encoder-loading capture-target-load-error">
+                {encoderCapabilities?.errorMessage ?? "Encoder capability information is unavailable."}
+              </div>
+            )}
+          </div>
+
+          {encoderCapabilities && (
+            <p className="capture-encoder-method">
+              {encoderCapabilities.errorMessage ?? `${encoderCapabilities.detectionMethod}. Hardware acceleration is ${encoderCapabilities.hardwareAccelerationRequested ? "requested" : "not requested"}, but hardware encoding is ${encoderCapabilities.hardwareEncodingVerified ? "verified" : "not distinguishable from system/software encoding through this API"}.`}
+            </p>
+          )}
+        </div>
+
         <div className="native-capture-test-footer">
           <div
             className={`capture-test-result capture-test-${captureTestStatus}`}
@@ -283,13 +387,18 @@ export function ReplayPage() {
                 {captureTestResult.filePath && (
                   <code>{captureTestResult.filePath}</code>
                 )}
+                {captureTestResult.success && captureTestResult.actualEncoder && (
+                  <span className="capture-test-encoder-result">
+                    Requested: {captureTestResult.requestedEncoder} / Used: {captureTestResult.actualEncoder}
+                  </span>
+                )}
               </div>
             )}
           </div>
           <button
             className="primary-button capture-test-button"
             type="button"
-            disabled={captureTestActive || !selectedTarget || targetsLoading}
+            disabled={captureTestActive || !selectedTarget || targetsLoading || encodersLoading || !selectedEncoderAvailable}
             onClick={recordCaptureTest}
           >
             {captureTestStatus === "recording" ? "Recording test..." : captureTestActive ? "Preparing capture..." : "Record 5 Second Test"}
@@ -403,6 +512,17 @@ function formatBorderlessStatus(status: string) {
   };
 
   return labels[status] ?? status.split("_").join(" ");
+}
+
+function formatEncoderId(encoder: EncoderId) {
+  const labels: Record<EncoderId, string> = {
+    automatic: "Automatic",
+    av1: "AV1",
+    hevc: "HEVC",
+    h264: "H.264",
+  };
+
+  return labels[encoder];
 }
 
 type SelectSettingProps = {
