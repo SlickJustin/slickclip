@@ -4,8 +4,9 @@ mod state;
 
 use tauri::State;
 
-pub use buffer::{ReplayBufferManager, ReplayBufferStartRequest};
-pub use state::{ReplayBufferStatus, ReplayCommandResult};
+pub use buffer::{ReplayBufferManager, ReplayBufferStartRequest, ReplaySaveSnapshot};
+pub use segment::CompletedSegment;
+pub use state::{ReplayBufferStatus, ReplayCommandResult, ReplayLifecycleState};
 
 #[tauri::command]
 pub async fn start_replay_buffer(

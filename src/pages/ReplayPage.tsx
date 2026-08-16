@@ -13,6 +13,35 @@ type CaptureTestResult = {
   actualEncoder: string | null;
 };
 
+type ContinuousBaselineResult = {
+  success: boolean;
+  errorMessage: string | null;
+  filePath: string | null;
+  requestedEncoder: string;
+  actualEncoder: string | null;
+  frameRate: number;
+  width: number;
+  height: number;
+  expectedFrameIntervalMs: number;
+  totalWallDurationMs: number;
+  framesObserved: number;
+  firstSourceTimestamp100ns: number | null;
+  lastSourceTimestamp100ns: number | null;
+  averageConsecutiveDeltaMs: number | null;
+  worstConsecutiveDeltaMs: number | null;
+  intervalsOverTwoExpected: number;
+  estimatedFramesMissed: number;
+  averageCallbackDurationMs: number | null;
+  worstCallbackDurationMs: number | null;
+  averageSendFrameDurationMs: number | null;
+  worstSendFrameDurationMs: number | null;
+  sendFrameOver16_67Ms: number;
+  sendFrameOver33_33Ms: number;
+  sendFrameOver50Ms: number;
+  sendFrameOver100Ms: number;
+  finalizationDurationMs: number | null;
+};
+
 type EncoderId = "automatic" | "av1" | "hevc" | "h264";
 
 type EncoderInfo = {
@@ -72,13 +101,26 @@ type CompletedSegment = {
   startTimestampMs: number;
   endTimestampMs: number;
   actualDurationMs: number;
+  firstFrameTimestamp100ns: number;
+  lastFrameTimestamp100ns: number;
+  nextSegmentFirstFrameTimestamp100ns: number | null;
+  sourceFrameGapMs: number | null;
+  frameCount: number;
+  encoderCreationTimeMs: number;
+  encoderCreationStartedMs: number;
+  encoderCreationCompletedMs: number;
+  rotationRequestedMs: number | null;
+  firstFrameSubmittedMs: number | null;
+  lastFrameSubmittedMs: number | null;
+  nextFirstFrameSubmittedMs: number | null;
   codec: string;
   width: number;
   height: number;
+  frameRate: number;
   fileSize: number;
   finalized: boolean;
   finalizationTimeMs: number;
-  rotationGapMs: number;
+  rotationGapMs: number | null;
 };
 
 type ReplayBufferStatus = {
@@ -103,12 +145,89 @@ type ReplayBufferStatus = {
   lastSegmentDurationSeconds: number | null;
   lastRotationGapMs: number | null;
   lastFinalizeTimeMs: number | null;
+  normalFrameIntervalMs: number | null;
+  lastSourceFrameGapMs: number | null;
+  worstSourceFrameGapMs: number | null;
+  averageSourceFrameGapMs: number | null;
+  lastEncoderCreationMs: number | null;
+  worstEncoderCreationMs: number | null;
+  averageEncoderCreationMs: number | null;
+  rotationCount: number;
+  framesObserved: number;
+  lastEstimatedFramesMissed: number | null;
+  estimatedFramesMissedTotal: number;
+  materialSourceGapCount: number;
+  encoderPreparationInFlight: boolean;
+  preparedEncoderReady: boolean;
+  nextEncoderState: string;
+  averageCallbackDurationMs: number | null;
+  worstCallbackDurationMs: number | null;
+  averageSendFrameDurationMs: number | null;
+  worstSendFrameDurationMs: number | null;
+  sendFrameOver16_67Ms: number;
+  sendFrameOver33_33Ms: number;
+  sendFrameOver50Ms: number;
+  sendFrameOver100Ms: number;
+  averageCallbackLockWaitMs: number | null;
+  worstCallbackLockWaitMs: number | null;
+  averageRotationEvaluationMs: number | null;
+  worstRotationEvaluationMs: number | null;
+  averageSwapDurationMs: number | null;
+  worstSwapDurationMs: number | null;
+  averageCallbackStateUpdateMs: number | null;
+  worstCallbackStateUpdateMs: number | null;
+  averageCallbackFilesystemMs: number | null;
+  worstCallbackFilesystemMs: number | null;
+  callbackFilesystemOperationCount: number;
+  rotationLifecycle: {
+    activeSequenceNumber: number | null;
+    nextSequenceNumber: number | null;
+    activeSegmentFirstFrameMs: number | null;
+    prewarmRequestedMs: number | null;
+    encoderCreationStartedMs: number | null;
+    encoderCreationCompletedMs: number | null;
+    preparedReadyMs: number | null;
+    rotationRequestedMs: number | null;
+    swapStartedMs: number | null;
+    oldSegmentQueuedMs: number | null;
+    swapCompletedMs: number | null;
+    followingFrameArrivedMs: number | null;
+  };
   recentSegments: CompletedSegment[];
 };
 
 type ReplayCommandResult = {
   success: boolean;
   status: ReplayBufferStatus;
+  errorMessage: string | null;
+};
+
+type SaveJobState =
+  | "idle"
+  | "preparing"
+  | "finalizingCurrentSegment"
+  | "assembling"
+  | "completed"
+  | "error";
+
+type SaveReplayStatus = {
+  state: SaveJobState;
+  requestedDurationSeconds: number;
+  actualSavedDurationSeconds: number | null;
+  saveRequestTimestampMs: number | null;
+  selectedSegmentCount: number;
+  selectedSegmentSequenceNumbers: number[];
+  actualEarliestTimestampMs: number | null;
+  actualLatestTimestampMs: number | null;
+  outputPath: string | null;
+  fileSize: number | null;
+  codec: string | null;
+  errorMessage: string | null;
+};
+
+type SaveReplayCommandResult = {
+  success: boolean;
+  status: SaveReplayStatus;
   errorMessage: string | null;
 };
 
@@ -142,7 +261,70 @@ const initialReplayStatus: ReplayBufferStatus = {
   lastSegmentDurationSeconds: null,
   lastRotationGapMs: null,
   lastFinalizeTimeMs: null,
+  normalFrameIntervalMs: null,
+  lastSourceFrameGapMs: null,
+  worstSourceFrameGapMs: null,
+  averageSourceFrameGapMs: null,
+  lastEncoderCreationMs: null,
+  worstEncoderCreationMs: null,
+  averageEncoderCreationMs: null,
+  rotationCount: 0,
+  framesObserved: 0,
+  lastEstimatedFramesMissed: null,
+  estimatedFramesMissedTotal: 0,
+  materialSourceGapCount: 0,
+  encoderPreparationInFlight: false,
+  preparedEncoderReady: false,
+  nextEncoderState: "not_active",
+  averageCallbackDurationMs: null,
+  worstCallbackDurationMs: null,
+  averageSendFrameDurationMs: null,
+  worstSendFrameDurationMs: null,
+  sendFrameOver16_67Ms: 0,
+  sendFrameOver33_33Ms: 0,
+  sendFrameOver50Ms: 0,
+  sendFrameOver100Ms: 0,
+  averageCallbackLockWaitMs: null,
+  worstCallbackLockWaitMs: null,
+  averageRotationEvaluationMs: null,
+  worstRotationEvaluationMs: null,
+  averageSwapDurationMs: null,
+  worstSwapDurationMs: null,
+  averageCallbackStateUpdateMs: null,
+  worstCallbackStateUpdateMs: null,
+  averageCallbackFilesystemMs: null,
+  worstCallbackFilesystemMs: null,
+  callbackFilesystemOperationCount: 0,
+  rotationLifecycle: {
+    activeSequenceNumber: null,
+    nextSequenceNumber: null,
+    activeSegmentFirstFrameMs: null,
+    prewarmRequestedMs: null,
+    encoderCreationStartedMs: null,
+    encoderCreationCompletedMs: null,
+    preparedReadyMs: null,
+    rotationRequestedMs: null,
+    swapStartedMs: null,
+    oldSegmentQueuedMs: null,
+    swapCompletedMs: null,
+    followingFrameArrivedMs: null,
+  },
   recentSegments: [],
+};
+
+const initialSaveReplayStatus: SaveReplayStatus = {
+  state: "idle",
+  requestedDurationSeconds: 0,
+  actualSavedDurationSeconds: null,
+  saveRequestTimestampMs: null,
+  selectedSegmentCount: 0,
+  selectedSegmentSequenceNumbers: [],
+  actualEarliestTimestampMs: null,
+  actualLatestTimestampMs: null,
+  outputPath: null,
+  fileSize: null,
+  codec: null,
+  errorMessage: null,
 };
 
 export function ReplayPage() {
@@ -152,12 +334,16 @@ export function ReplayPage() {
   const [replayStatus, setReplayStatus] = useState<ReplayBufferStatus>(initialReplayStatus);
   const [replayCommandActive, setReplayCommandActive] = useState(false);
   const [replayCommandError, setReplayCommandError] = useState<string | null>(null);
+  const [saveReplayStatus, setSaveReplayStatus] = useState<SaveReplayStatus>(initialSaveReplayStatus);
+  const [saveReplayCommandError, setSaveReplayCommandError] = useState<string | null>(null);
   const [captureTestActive, setCaptureTestActive] = useState(false);
   const [captureTestStatus, setCaptureTestStatus] = useState<CaptureTestStatus>("idle");
   const [captureTestResult, setCaptureTestResult] = useState<CaptureTestResult | null>(null);
   const [captureTestMessage, setCaptureTestMessage] = useState(
     "Select a capture target to record a temporary video-only proof.",
   );
+  const [baselineActive, setBaselineActive] = useState(false);
+  const [baselineResult, setBaselineResult] = useState<ContinuousBaselineResult | null>(null);
   const [targetTab, setTargetTab] = useState<TargetTab>("monitor");
   const [monitors, setMonitors] = useState<MonitorTarget[]>([]);
   const [windows, setWindows] = useState<WindowTarget[]>([]);
@@ -171,6 +357,7 @@ export function ReplayPage() {
     void refreshAllTargets();
     void refreshEncoderCapabilities();
     void refreshReplayStatus();
+    void refreshSaveReplayStatus();
   }, []);
 
   useEffect(() => {
@@ -179,6 +366,13 @@ export function ReplayPage() {
     const timer = window.setInterval(() => void refreshReplayStatus(), 1_000);
     return () => window.clearInterval(timer);
   }, [replayStatus.state]);
+
+  useEffect(() => {
+    if (!isSaveJobActive(saveReplayStatus.state)) return;
+
+    const timer = window.setInterval(() => void refreshSaveReplayStatus(), 750);
+    return () => window.clearInterval(timer);
+  }, [saveReplayStatus.state]);
 
   async function refreshEncoderCapabilities() {
     setEncodersLoading(true);
@@ -213,8 +407,36 @@ export function ReplayPage() {
     }
   }
 
+  async function refreshSaveReplayStatus() {
+    try {
+      const status = await invoke<SaveReplayStatus>("get_save_replay_status");
+      setSaveReplayStatus(status);
+      if (status.state === "error") {
+        setSaveReplayCommandError(status.errorMessage ?? "Save Replay failed without an error message.");
+      }
+    } catch (error) {
+      setSaveReplayCommandError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function saveReplay() {
+    if (isSaveJobActive(saveReplayStatus.state)) return;
+
+    setSaveReplayCommandError(null);
+    try {
+      const result = await invoke<SaveReplayCommandResult>("save_replay");
+      setSaveReplayStatus(result.status);
+      if (!result.success) {
+        setSaveReplayCommandError(result.errorMessage ?? "Save Replay could not start.");
+      }
+    } catch (error) {
+      setSaveReplayCommandError(error instanceof Error ? error.message : String(error));
+      await refreshSaveReplayStatus();
+    }
+  }
+
   async function startReplayBuffer() {
-    if (!selectedTarget || replayCommandActive || isReplayActive(replayStatus.state)) return;
+    if (!selectedTarget || baselineActive || replayCommandActive || isReplayActive(replayStatus.state)) return;
 
     setReplayCommandActive(true);
     setReplayCommandError(null);
@@ -311,14 +533,14 @@ export function ReplayPage() {
   }
 
   function changeTargetTab(tab: TargetTab) {
-    if (isReplayActive(replayStatus.state)) return;
+    if (baselineActive || isReplayActive(replayStatus.state)) return;
     setTargetTab(tab);
     setSelectedTarget(null);
     setTargetsError(null);
   }
 
   async function recordCaptureTest() {
-    if (captureTestActive || !selectedTarget) return;
+    if (captureTestActive || baselineActive || !selectedTarget) return;
 
     setCaptureTestActive(true);
     setCaptureTestResult(null);
@@ -354,6 +576,52 @@ export function ReplayPage() {
     }
   }
 
+  async function runContinuousBaseline() {
+    if (!selectedTarget || baselineActive || isReplayActive(replayStatus.state)) return;
+
+    setBaselineActive(true);
+    setBaselineResult(null);
+    try {
+      const result = await invoke<ContinuousBaselineResult>("run_continuous_baseline", {
+        target: selectedTarget,
+        encoder: replayEncoder,
+        frameRate,
+      });
+      setBaselineResult(result);
+    } catch (error) {
+      setBaselineResult({
+        success: false,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        filePath: null,
+        requestedEncoder: formatEncoderId(replayEncoder),
+        actualEncoder: null,
+        frameRate,
+        width: 0,
+        height: 0,
+        expectedFrameIntervalMs: 1_000 / frameRate,
+        totalWallDurationMs: 0,
+        framesObserved: 0,
+        firstSourceTimestamp100ns: null,
+        lastSourceTimestamp100ns: null,
+        averageConsecutiveDeltaMs: null,
+        worstConsecutiveDeltaMs: null,
+        intervalsOverTwoExpected: 0,
+        estimatedFramesMissed: 0,
+        averageCallbackDurationMs: null,
+        worstCallbackDurationMs: null,
+        averageSendFrameDurationMs: null,
+        worstSendFrameDurationMs: null,
+        sendFrameOver16_67Ms: 0,
+        sendFrameOver33_33Ms: 0,
+        sendFrameOver50Ms: 0,
+        sendFrameOver100Ms: 0,
+        finalizationDurationMs: null,
+      });
+    } finally {
+      setBaselineActive(false);
+    }
+  }
+
   const selectedEncoderAvailable = encoderCapabilities?.encoders.find(
     (encoderOption) => encoderOption.id === captureTestEncoder,
   )?.available ?? false;
@@ -362,6 +630,11 @@ export function ReplayPage() {
     (encoderOption) => encoderOption.id === replayEncoder,
   )?.available ?? false;
   const replayActive = isReplayActive(replayStatus.state);
+  const saveJobActive = isSaveJobActive(saveReplayStatus.state);
+  const saveReplayAvailable =
+    replayStatus.state === "running" &&
+    replayStatus.completedSegmentCount > 0 &&
+    !saveJobActive;
   const selectedTargetLabel = getSelectedTargetLabel(selectedTarget, monitors, windows);
 
   return (
@@ -539,7 +812,7 @@ export function ReplayPage() {
           <button
             className="primary-button capture-test-button"
             type="button"
-            disabled={captureTestActive || replayActive || !selectedTarget || targetsLoading || encodersLoading || !selectedEncoderAvailable}
+            disabled={captureTestActive || baselineActive || replayActive || !selectedTarget || targetsLoading || encodersLoading || !selectedEncoderAvailable}
             onClick={recordCaptureTest}
           >
             {captureTestStatus === "recording" ? "Recording test..." : captureTestActive ? "Preparing capture..." : "Record 5 Second Test"}
@@ -575,6 +848,7 @@ export function ReplayPage() {
           aria-pressed={replayActive}
           disabled={
             replayCommandActive ||
+            baselineActive ||
             replayStatus.state === "stopping" ||
             (!replayActive && (!selectedTarget || encodersLoading || !replayEncoderAvailable))
           }
@@ -655,13 +929,87 @@ export function ReplayPage() {
             <dl className="diagnostic-grid">
               <Diagnostic label="Expected segment" value={`${replayStatus.expectedSegmentDurationSeconds.toFixed(2)} s`} />
               <Diagnostic label="Last segment" value={formatOptionalMetric(replayStatus.lastSegmentDurationSeconds, "s")} />
-              <Diagnostic label="Last rotation gap" value={formatOptionalMetric(replayStatus.lastRotationGapMs, "ms")} />
+              <Diagnostic label="Normal frame interval" value={formatOptionalMetric(replayStatus.normalFrameIntervalMs, "ms")} />
+              <Diagnostic label="Last source frame gap" value={formatOptionalMetric(replayStatus.lastSourceFrameGapMs, "ms")} />
+              <Diagnostic label="Worst source frame gap" value={formatOptionalMetric(replayStatus.worstSourceFrameGapMs, "ms")} />
+              <Diagnostic label="Average source frame gap" value={formatOptionalMetric(replayStatus.averageSourceFrameGapMs, "ms")} />
+              <Diagnostic label="Last encoder creation" value={formatOptionalMetric(replayStatus.lastEncoderCreationMs, "ms")} />
+              <Diagnostic label="Worst encoder creation" value={formatOptionalMetric(replayStatus.worstEncoderCreationMs, "ms")} />
+              <Diagnostic label="Average encoder creation" value={formatOptionalMetric(replayStatus.averageEncoderCreationMs, "ms")} />
               <Diagnostic label="Last finalize time" value={formatOptionalMetric(replayStatus.lastFinalizeTimeMs, "ms")} />
+              <Diagnostic label="Rotation count" value={String(replayStatus.rotationCount)} />
+              <Diagnostic label="Frames observed" value={String(replayStatus.framesObserved)} />
+              <Diagnostic label="Last estimated missed" value={formatOptionalCount(replayStatus.lastEstimatedFramesMissed)} />
+              <Diagnostic label="Estimated missed total" value={String(replayStatus.estimatedFramesMissedTotal)} />
+              <Diagnostic label="Material boundary gaps" value={String(replayStatus.materialSourceGapCount)} />
+              <Diagnostic label="Next encoder" value={formatEncoderPreparation(replayStatus)} />
+              <Diagnostic label="Callback avg / worst" value={formatMetricPair(replayStatus.averageCallbackDurationMs, replayStatus.worstCallbackDurationMs)} />
+              <Diagnostic label="send_frame avg / worst" value={formatMetricPair(replayStatus.averageSendFrameDurationMs, replayStatus.worstSendFrameDurationMs)} />
+              <Diagnostic label="Callback lock avg / worst" value={formatMetricPair(replayStatus.averageCallbackLockWaitMs, replayStatus.worstCallbackLockWaitMs)} />
+              <Diagnostic label="Rotation eval avg / worst" value={formatMetricPair(replayStatus.averageRotationEvaluationMs, replayStatus.worstRotationEvaluationMs)} />
+              <Diagnostic label="Swap avg / worst" value={formatMetricPair(replayStatus.averageSwapDurationMs, replayStatus.worstSwapDurationMs)} />
+              <Diagnostic label="State update avg / worst" value={formatMetricPair(replayStatus.averageCallbackStateUpdateMs, replayStatus.worstCallbackStateUpdateMs)} />
+              <Diagnostic label="Callback filesystem avg / worst" value={formatMetricPair(replayStatus.averageCallbackFilesystemMs, replayStatus.worstCallbackFilesystemMs)} />
+              <Diagnostic label="Callback filesystem ops" value={String(replayStatus.callbackFilesystemOperationCount)} />
+              <Diagnostic label="send_frame > 16.67 / 33.33 ms" value={`${replayStatus.sendFrameOver16_67Ms} / ${replayStatus.sendFrameOver33_33Ms}`} />
+              <Diagnostic label="send_frame > 50 / 100 ms" value={`${replayStatus.sendFrameOver50Ms} / ${replayStatus.sendFrameOver100Ms}`} />
               <Diagnostic label="Pending finalizations" value={String(replayStatus.pendingFinalizations)} />
               <Diagnostic label="Dropped segments" value={String(replayStatus.droppedSegments)} />
               <Diagnostic label="Video format" value={replayStatus.width ? `${replayStatus.width} × ${replayStatus.height} @ ${replayStatus.frameRate} FPS` : "—"} />
               <Diagnostic label="Session" value={replayStatus.sessionId ?? "—"} />
             </dl>
+            <div className="rotation-lifecycle">
+              <span className="setting-label">Current rotation lifecycle (session-relative ms)</span>
+              <code>{formatRotationLifecycle(replayStatus)}</code>
+            </div>
+            <div className="continuous-baseline">
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={
+                  baselineActive ||
+                  captureTestActive ||
+                  replayActive ||
+                  !selectedTarget ||
+                  encodersLoading ||
+                  !replayEncoderAvailable
+                }
+                onClick={runContinuousBaseline}
+              >
+                {baselineActive ? "Running 20 Second Baseline..." : "Run 20 Second Continuous Baseline"}
+              </button>
+              <small>
+                Uses the selected target, {frameRate} FPS, and the Replay Buffer encoder. No rotations,
+                prewarming, FFmpeg, or save work runs during capture.
+              </small>
+              {baselineResult && (
+                <div className={`baseline-result ${baselineResult.success ? "baseline-result-success" : "baseline-result-error"}`} role="status">
+                  <strong>{baselineResult.success ? "Continuous baseline completed" : "Continuous baseline failed"}</strong>
+                  {baselineResult.errorMessage && <span>{baselineResult.errorMessage}</span>}
+                  {baselineResult.success && (
+                    <>
+                      <dl className="diagnostic-grid baseline-diagnostic-grid">
+                        <Diagnostic label="Wall duration" value={`${(baselineResult.totalWallDurationMs / 1_000).toFixed(2)} s`} />
+                        <Diagnostic label="Frames observed" value={String(baselineResult.framesObserved)} />
+                        <Diagnostic label="Expected interval" value={`${baselineResult.expectedFrameIntervalMs.toFixed(2)} ms`} />
+                        <Diagnostic label="Delta avg / worst" value={formatMetricPair(baselineResult.averageConsecutiveDeltaMs, baselineResult.worstConsecutiveDeltaMs)} />
+                        <Diagnostic label="Intervals > 2× expected" value={String(baselineResult.intervalsOverTwoExpected)} />
+                        <Diagnostic label="Estimated missed" value={String(baselineResult.estimatedFramesMissed)} />
+                        <Diagnostic label="Callback avg / worst" value={formatMetricPair(baselineResult.averageCallbackDurationMs, baselineResult.worstCallbackDurationMs)} />
+                        <Diagnostic label="send_frame avg / worst" value={formatMetricPair(baselineResult.averageSendFrameDurationMs, baselineResult.worstSendFrameDurationMs)} />
+                        <Diagnostic label="send_frame > 16.67 / 33.33 ms" value={`${baselineResult.sendFrameOver16_67Ms} / ${baselineResult.sendFrameOver33_33Ms}`} />
+                        <Diagnostic label="send_frame > 50 / 100 ms" value={`${baselineResult.sendFrameOver50Ms} / ${baselineResult.sendFrameOver100Ms}`} />
+                        <Diagnostic label="First source timestamp" value={formatOptionalCount(baselineResult.firstSourceTimestamp100ns)} />
+                        <Diagnostic label="Last source timestamp" value={formatOptionalCount(baselineResult.lastSourceTimestamp100ns)} />
+                        <Diagnostic label="Finalize after capture" value={formatOptionalMetric(baselineResult.finalizationDurationMs, "ms")} />
+                        <Diagnostic label="Video format" value={`${baselineResult.width} × ${baselineResult.height} @ ${baselineResult.frameRate} FPS`} />
+                      </dl>
+                      {baselineResult.filePath && <code className="baseline-output-path">{baselineResult.filePath}</code>}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="recent-segments">
               <span className="setting-label">Recent finalized segments</span>
               {replayStatus.recentSegments.length ? (
@@ -669,6 +1017,9 @@ export function ReplayPage() {
                   <div className="recent-segment-row" key={segment.sequenceNumber}>
                     <code>#{String(segment.sequenceNumber).padStart(6, "0")}</code>
                     <span>{(segment.actualDurationMs / 1_000).toFixed(2)} s</span>
+                    <span>{segment.frameCount} frames</span>
+                    <span>{segment.sourceFrameGapMs === null ? "final" : `${segment.sourceFrameGapMs.toFixed(2)} ms gap`}</span>
+                    <span>{segment.encoderCreationTimeMs.toFixed(2)} ms create</span>
                     <span>{formatBytes(segment.fileSize)}</span>
                   </div>
                 ))
@@ -685,11 +1036,50 @@ export function ReplayPage() {
                 <h2 id="save-heading">Save Replay</h2>
               </div>
             </div>
-            <p className="save-stage-note">The rolling video segments stay temporary during this stage.</p>
-            <button className="save-replay-button" type="button" disabled title="Available in Stage 7">
-              SAVE REPLAY
+            <div
+              className={`save-replay-status save-replay-status-${saveReplayStatus.state}`}
+              role="status"
+              aria-live="polite"
+            >
+              <strong>{formatSaveJobMessage(saveReplayStatus.state)}</strong>
+              {(saveReplayCommandError || saveReplayStatus.errorMessage) && (
+                <span className="save-replay-error">
+                  {saveReplayCommandError ?? saveReplayStatus.errorMessage}
+                </span>
+              )}
+              {saveReplayStatus.outputPath && (
+                <code>{saveReplayStatus.outputPath}</code>
+              )}
+              {saveReplayStatus.actualSavedDurationSeconds !== null && (
+                <div className="saved-replay-details">
+                  <span>{formatReplayClipDuration(saveReplayStatus.actualSavedDurationSeconds)}</span>
+                  <span>{saveReplayStatus.selectedSegmentCount} segments</span>
+                  <span>{saveReplayStatus.codec ?? "Unknown codec"}</span>
+                  {saveReplayStatus.fileSize !== null && (
+                    <span>{formatBytes(saveReplayStatus.fileSize)}</span>
+                  )}
+                </div>
+              )}
+              {saveReplayStatus.state === "completed" &&
+                saveReplayStatus.actualSavedDurationSeconds !== null &&
+                saveReplayStatus.actualSavedDurationSeconds + 0.05 < saveReplayStatus.requestedDurationSeconds && (
+                  <small>
+                    The buffer had less than {formatDuration(saveReplayStatus.requestedDurationSeconds)} available.
+                  </small>
+                )}
+            </div>
+            <button
+              className="save-replay-button"
+              type="button"
+              disabled={!saveReplayAvailable}
+              title={saveReplayAvailable ? undefined : saveReplayDisabledReason(replayStatus, saveReplayStatus)}
+              onClick={saveReplay}
+            >
+              Save Replay
             </button>
-            <span className="disabled-reason">Save Replay will be enabled in the next stage.</span>
+            {!saveReplayAvailable && !saveJobActive && saveReplayStatus.state !== "completed" && (
+              <span className="disabled-reason">{saveReplayDisabledReason(replayStatus, saveReplayStatus)}</span>
+            )}
           </section>
         </div>
       </div>
@@ -726,6 +1116,40 @@ function formatEncoderId(encoder: EncoderId) {
 
 function isReplayActive(state: ReplayLifecycleState) {
   return state === "starting" || state === "running" || state === "stopping";
+}
+
+function isSaveJobActive(state: SaveJobState) {
+  return state === "preparing" || state === "finalizingCurrentSegment" || state === "assembling";
+}
+
+function formatSaveJobMessage(state: SaveJobState) {
+  const messages: Record<SaveJobState, string> = {
+    idle: "Ready to save available replay video.",
+    preparing: "Preparing replay...",
+    finalizingCurrentSegment: "Finalizing current segment...",
+    assembling: "Saving replay...",
+    completed: "Replay saved",
+    error: "Replay save failed",
+  };
+  return messages[state];
+}
+
+function saveReplayDisabledReason(
+  replay: ReplayBufferStatus,
+  save: SaveReplayStatus,
+) {
+  if (isSaveJobActive(save.state)) return "A replay is already being saved.";
+  if (replay.state !== "running") return "Start the Replay Buffer before saving.";
+  if (replay.completedSegmentCount === 0) return "Waiting for the first finalized segment.";
+  return "Save Replay is temporarily unavailable.";
+}
+
+function formatReplayClipDuration(seconds: number) {
+  if (seconds < 60) return `${seconds.toFixed(1)} second replay`;
+  const totalSeconds = Math.round(seconds);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainder = totalSeconds % 60;
+  return `${minutes}:${String(remainder).padStart(2, "0")} replay`;
 }
 
 function isEncoderAvailable(capabilities: EncoderCapabilitiesResult | null, id: EncoderId) {
@@ -766,6 +1190,46 @@ function formatBytes(bytes: number) {
 
 function formatOptionalMetric(value: number | null, unit: string) {
   return value === null ? "—" : `${value.toFixed(2)} ${unit}`;
+}
+
+function formatOptionalCount(value: number | null) {
+  return value === null ? "—" : String(value);
+}
+
+function formatEncoderPreparation(status: ReplayBufferStatus) {
+  const labels: Record<string, string> = {
+    not_active: "Not active",
+    starting: "Capture starting",
+    stopping: "Capture stopping",
+    waiting_for_prewarm_point: "Waiting for prewarm point",
+    preparing: "Preparing",
+    ready: "Ready",
+    rotation_due_waiting_for_encoder: "Rotation due; waiting for encoder",
+    error: "Unavailable after error",
+  };
+  return labels[status.nextEncoderState] ?? status.nextEncoderState.split("_").join(" ");
+}
+
+function formatMetricPair(average: number | null, worst: number | null) {
+  if (average === null || worst === null) return "—";
+  return `${average.toFixed(3)} / ${worst.toFixed(3)} ms`;
+}
+
+function formatRotationLifecycle(status: ReplayBufferStatus) {
+  const trace = status.rotationLifecycle;
+  const metric = (value: number | null) => value === null ? "—" : value.toFixed(2);
+  return [
+    `active #${trace.activeSequenceNumber ?? "—"}`,
+    `first ${metric(trace.activeSegmentFirstFrameMs)}`,
+    `next #${trace.nextSequenceNumber ?? "—"}`,
+    `prewarm ${metric(trace.prewarmRequestedMs)}`,
+    `create ${metric(trace.encoderCreationStartedMs)}→${metric(trace.encoderCreationCompletedMs)}`,
+    `ready ${metric(trace.preparedReadyMs)}`,
+    `due ${metric(trace.rotationRequestedMs)}`,
+    `swap ${metric(trace.swapStartedMs)}→${metric(trace.swapCompletedMs)}`,
+    `queued ${metric(trace.oldSegmentQueuedMs)}`,
+    `following ${metric(trace.followingFrameArrivedMs)}`,
+  ].join(" · ");
 }
 
 function Diagnostic({ label, value }: { label: string; value: string }) {

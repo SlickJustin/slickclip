@@ -881,6 +881,61 @@ input:disabled {
   margin-top: 13px;
 }
 
+.rotation-lifecycle,
+.continuous-baseline {
+  display: grid;
+  gap: 8px;
+  margin-top: 13px;
+}
+
+.rotation-lifecycle code,
+.baseline-output-path {
+  overflow-wrap: anywhere;
+  color: #9f95b2;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 9px;
+  line-height: 1.55;
+  white-space: normal;
+}
+
+.continuous-baseline > .secondary-button {
+  justify-self: start;
+}
+
+.continuous-baseline > small,
+.baseline-result > span {
+  color: #79737f;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.baseline-result {
+  display: grid;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid #302c35;
+  border-radius: 6px;
+  background: #19171d;
+}
+
+.baseline-result strong {
+  color: #c8c2ce;
+  font-size: 11px;
+}
+
+.baseline-result-success strong {
+  color: #9bcbaa;
+}
+
+.baseline-result-error strong,
+.baseline-result-error span {
+  color: #df9b9b;
+}
+
+.baseline-diagnostic-grid {
+  margin-top: 2px;
+}
+
 .recent-segments > p {
   margin: 8px 0 0;
   color: #706a76;
@@ -889,7 +944,7 @@ input:disabled {
 
 .recent-segment-row {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr repeat(5, auto);
   gap: 14px;
   margin-top: 5px;
   padding: 6px 8px;
@@ -1089,6 +1144,77 @@ kbd,
   background: #26242b;
   font-size: 11px;
   letter-spacing: 0.8px;
+}
+
+.save-replay-button:not(:disabled) {
+  border-color: #8065e7;
+  color: #fff;
+  background: var(--accent);
+}
+
+.save-replay-button:not(:disabled):hover {
+  background: var(--accent-hover);
+}
+
+.save-replay-status {
+  display: flex;
+  min-height: 74px;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 13px;
+  padding: 10px 11px;
+  border: 1px solid #302c35;
+  border-radius: 6px;
+  color: #837d89;
+  background: #19171d;
+  font-size: 10px;
+}
+
+.save-replay-status strong {
+  color: #aaa3b1;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.save-replay-status-preparing strong,
+.save-replay-status-finalizingCurrentSegment strong,
+.save-replay-status-assembling strong {
+  color: #b8a9ee;
+}
+
+.save-replay-status-completed strong {
+  color: #9bcbaa;
+}
+
+.save-replay-status-error strong,
+.save-replay-error {
+  color: #df9b9b;
+}
+
+.save-replay-status code {
+  overflow-wrap: anywhere;
+  color: #a7a0ad;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 9px;
+}
+
+.save-replay-status small {
+  color: #8f8798;
+  font-size: 9px;
+}
+
+.saved-replay-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.saved-replay-details span {
+  padding: 3px 5px;
+  border-radius: 4px;
+  color: #b6add0;
+  background: #282230;
+  font-size: 8px;
 }
 
 .disabled-reason {

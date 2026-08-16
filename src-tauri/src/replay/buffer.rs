@@ -1,9 +1,11 @@
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +19,7 @@ use windows_capture::settings::{
 };
 
 use crate::capture::capture_test::ensure_borderless_capture_access;
+use crate::capture::continuous_baseline::is_continuous_baseline_active;
 use crate::capture::encoder::{
     resolve_encoder, EncoderChoice, EncoderCodec, VideoEncoderBackend, WindowsCaptureFileBackend,
 };
@@ -25,12 +28,110 @@ use crate::capture::targets::{
 };
 
 use super::segment::{CompletedSegment, SegmentRing};
-use super::state::{ReplayBufferStatus, ReplayCommandResult, ReplayLifecycleState};
+use super::state::{
+    ReplayBufferStatus, ReplayCommandResult, ReplayLifecycleState, RotationLifecycleTrace,
+};
 
 pub const SEGMENT_DURATION: Duration = Duration::from_secs(2);
 const RECENT_SEGMENT_LIMIT: usize = 5;
+// Development telemetry heuristic only; this is not a production failure policy.
+const DIAGNOSTIC_MATERIAL_GAP_INTERVALS: f64 = 2.0;
 const ALLOWED_REPLAY_DURATIONS: [u32; 5] = [30, 60, 120, 180, 300];
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static IN_REPLAY_FRAME_CALLBACK: Cell<bool> = const { Cell::new(false) };
+}
+
+#[derive(Default)]
+struct AtomicDurationStats {
+    count: AtomicU64,
+    total_ns: AtomicU64,
+    worst_ns: AtomicU64,
+}
+
+impl AtomicDurationStats {
+    fn record(&self, duration: Duration) {
+        let nanos = duration.as_nanos().min(u128::from(u64::MAX)) as u64;
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.total_ns.fetch_add(nanos, Ordering::Relaxed);
+        self.worst_ns.fetch_max(nanos, Ordering::Relaxed);
+    }
+
+    fn reset(&self) {
+        self.count.store(0, Ordering::Relaxed);
+        self.total_ns.store(0, Ordering::Relaxed);
+        self.worst_ns.store(0, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> (Option<f64>, Option<f64>) {
+        let count = self.count.load(Ordering::Relaxed);
+        if count == 0 {
+            return (None, None);
+        }
+        let total_ns = self.total_ns.load(Ordering::Relaxed);
+        let worst_ns = self.worst_ns.load(Ordering::Relaxed);
+        (
+            Some(total_ns as f64 / count as f64 / 1_000_000.0),
+            Some(worst_ns as f64 / 1_000_000.0),
+        )
+    }
+}
+
+#[derive(Default)]
+struct ReplayCallbackTelemetry {
+    callback: AtomicDurationStats,
+    send_frame: AtomicDurationStats,
+    lock_wait: AtomicDurationStats,
+    rotation_evaluation: AtomicDurationStats,
+    swap: AtomicDurationStats,
+    state_update: AtomicDurationStats,
+    filesystem: AtomicDurationStats,
+    filesystem_operation_count: AtomicU64,
+    send_over_16_67_ms: AtomicU64,
+    send_over_33_33_ms: AtomicU64,
+    send_over_50_ms: AtomicU64,
+    send_over_100_ms: AtomicU64,
+}
+
+impl ReplayCallbackTelemetry {
+    fn reset(&self) {
+        self.callback.reset();
+        self.send_frame.reset();
+        self.lock_wait.reset();
+        self.rotation_evaluation.reset();
+        self.swap.reset();
+        self.state_update.reset();
+        self.filesystem.reset();
+        self.filesystem_operation_count.store(0, Ordering::Relaxed);
+        self.send_over_16_67_ms.store(0, Ordering::Relaxed);
+        self.send_over_33_33_ms.store(0, Ordering::Relaxed);
+        self.send_over_50_ms.store(0, Ordering::Relaxed);
+        self.send_over_100_ms.store(0, Ordering::Relaxed);
+    }
+
+    fn record_send_frame(&self, duration: Duration) {
+        self.send_frame.record(duration);
+        let duration_ms = duration.as_secs_f64() * 1_000.0;
+        self.send_over_16_67_ms
+            .fetch_add(u64::from(duration_ms > 16.67), Ordering::Relaxed);
+        self.send_over_33_33_ms
+            .fetch_add(u64::from(duration_ms > 33.33), Ordering::Relaxed);
+        self.send_over_50_ms
+            .fetch_add(u64::from(duration_ms > 50.0), Ordering::Relaxed);
+        self.send_over_100_ms
+            .fetch_add(u64::from(duration_ms > 100.0), Ordering::Relaxed);
+    }
+}
+
+#[derive(Default)]
+struct CallbackPhaseDurations {
+    rotation_evaluation: Duration,
+    swap: Duration,
+    state_update: Duration,
+    filesystem: Duration,
+    filesystem_operation_count: u64,
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +140,24 @@ pub struct ReplayBufferStartRequest {
     pub encoder: EncoderChoice,
     pub replay_duration_seconds: u32,
     pub frame_rate: u32,
+}
+
+pub struct ReplaySaveSnapshot {
+    pub save_request_timestamp_ms: u64,
+    pub requested_duration_seconds: u32,
+    pub segments: Vec<CompletedSegment>,
+    _pins: SegmentPinGuard,
+}
+
+struct SegmentPinGuard {
+    shared: Arc<SharedReplay>,
+    sequence_numbers: Vec<u64>,
+}
+
+impl Drop for SegmentPinGuard {
+    fn drop(&mut self) {
+        self.shared.release_pins(&self.sequence_numbers);
+    }
 }
 
 struct ReplayInner {
@@ -60,6 +179,25 @@ struct ReplayInner {
     last_segment_duration_ms: Option<u64>,
     last_rotation_gap_ms: Option<f64>,
     last_finalize_time_ms: Option<f64>,
+    last_source_frame_gap_ms: Option<f64>,
+    worst_source_frame_gap_ms: Option<f64>,
+    total_source_frame_gap_ms: f64,
+    last_encoder_creation_ms: Option<f64>,
+    worst_encoder_creation_ms: Option<f64>,
+    total_encoder_creation_ms: f64,
+    rotation_count: u64,
+    last_estimated_frames_missed: Option<u64>,
+    estimated_frames_missed_total: u64,
+    material_source_gap_count: u64,
+    encoder_preparation_in_flight: bool,
+    prepared_encoder_ready: bool,
+    next_encoder_state: String,
+    rotation_lifecycle: RotationLifecycleTrace,
+    pins: HashMap<u64, usize>,
+    deferred_deletions: HashMap<u64, PathBuf>,
+    next_rotation_request_id: u64,
+    pending_rotation_request_id: Option<u64>,
+    acknowledged_rotation: Option<(u64, u64)>,
 }
 
 impl ReplayInner {
@@ -83,10 +221,46 @@ impl ReplayInner {
             last_segment_duration_ms: None,
             last_rotation_gap_ms: None,
             last_finalize_time_ms: None,
+            last_source_frame_gap_ms: None,
+            worst_source_frame_gap_ms: None,
+            total_source_frame_gap_ms: 0.0,
+            last_encoder_creation_ms: None,
+            worst_encoder_creation_ms: None,
+            total_encoder_creation_ms: 0.0,
+            rotation_count: 0,
+            last_estimated_frames_missed: None,
+            estimated_frames_missed_total: 0,
+            material_source_gap_count: 0,
+            encoder_preparation_in_flight: false,
+            prepared_encoder_ready: false,
+            next_encoder_state: "not_active".to_string(),
+            rotation_lifecycle: RotationLifecycleTrace::default(),
+            pins: HashMap::new(),
+            deferred_deletions: HashMap::new(),
+            next_rotation_request_id: 0,
+            pending_rotation_request_id: None,
+            acknowledged_rotation: None,
         }
     }
 
-    fn snapshot(&self) -> ReplayBufferStatus {
+    fn snapshot(
+        &self,
+        frames_observed: u64,
+        callback_telemetry: &ReplayCallbackTelemetry,
+    ) -> ReplayBufferStatus {
+        let (average_callback_duration_ms, worst_callback_duration_ms) =
+            callback_telemetry.callback.snapshot();
+        let (average_send_frame_duration_ms, worst_send_frame_duration_ms) =
+            callback_telemetry.send_frame.snapshot();
+        let (average_callback_lock_wait_ms, worst_callback_lock_wait_ms) =
+            callback_telemetry.lock_wait.snapshot();
+        let (average_rotation_evaluation_ms, worst_rotation_evaluation_ms) =
+            callback_telemetry.rotation_evaluation.snapshot();
+        let (average_swap_duration_ms, worst_swap_duration_ms) = callback_telemetry.swap.snapshot();
+        let (average_callback_state_update_ms, worst_callback_state_update_ms) =
+            callback_telemetry.state_update.snapshot();
+        let (average_callback_filesystem_ms, worst_callback_filesystem_ms) =
+            callback_telemetry.filesystem.snapshot();
         ReplayBufferStatus {
             state: self.state,
             error_message: self.error_message.clone(),
@@ -114,6 +288,50 @@ impl ReplayInner {
                 .map(|duration| duration as f64 / 1_000.0),
             last_rotation_gap_ms: self.last_rotation_gap_ms,
             last_finalize_time_ms: self.last_finalize_time_ms,
+            normal_frame_interval_ms: (self.frame_rate > 0)
+                .then(|| 1_000.0 / f64::from(self.frame_rate)),
+            last_source_frame_gap_ms: self.last_source_frame_gap_ms,
+            worst_source_frame_gap_ms: self.worst_source_frame_gap_ms,
+            average_source_frame_gap_ms: (self.rotation_count > 0)
+                .then(|| self.total_source_frame_gap_ms / self.rotation_count as f64),
+            last_encoder_creation_ms: self.last_encoder_creation_ms,
+            worst_encoder_creation_ms: self.worst_encoder_creation_ms,
+            average_encoder_creation_ms: (self.rotation_count > 0)
+                .then(|| self.total_encoder_creation_ms / self.rotation_count as f64),
+            rotation_count: self.rotation_count,
+            frames_observed,
+            last_estimated_frames_missed: self.last_estimated_frames_missed,
+            estimated_frames_missed_total: self.estimated_frames_missed_total,
+            material_source_gap_count: self.material_source_gap_count,
+            encoder_preparation_in_flight: self.encoder_preparation_in_flight,
+            prepared_encoder_ready: self.prepared_encoder_ready,
+            next_encoder_state: self.next_encoder_state.clone(),
+            average_callback_duration_ms,
+            worst_callback_duration_ms,
+            average_send_frame_duration_ms,
+            worst_send_frame_duration_ms,
+            send_frame_over_16_67_ms: callback_telemetry
+                .send_over_16_67_ms
+                .load(Ordering::Relaxed),
+            send_frame_over_33_33_ms: callback_telemetry
+                .send_over_33_33_ms
+                .load(Ordering::Relaxed),
+            send_frame_over_50_ms: callback_telemetry.send_over_50_ms.load(Ordering::Relaxed),
+            send_frame_over_100_ms: callback_telemetry.send_over_100_ms.load(Ordering::Relaxed),
+            average_callback_lock_wait_ms,
+            worst_callback_lock_wait_ms,
+            average_rotation_evaluation_ms,
+            worst_rotation_evaluation_ms,
+            average_swap_duration_ms,
+            worst_swap_duration_ms,
+            average_callback_state_update_ms,
+            worst_callback_state_update_ms,
+            average_callback_filesystem_ms,
+            worst_callback_filesystem_ms,
+            callback_filesystem_operation_count: callback_telemetry
+                .filesystem_operation_count
+                .load(Ordering::Relaxed),
+            rotation_lifecycle: self.rotation_lifecycle.clone(),
             recent_segments: self.ring.recent(RECENT_SEGMENT_LIMIT),
         }
     }
@@ -121,29 +339,48 @@ impl ReplayInner {
 
 struct SharedReplay {
     inner: Mutex<ReplayInner>,
+    changed: Condvar,
     stop_requested: AtomicBool,
+    frames_observed: AtomicU64,
+    callback_telemetry: ReplayCallbackTelemetry,
 }
 
 impl SharedReplay {
     fn new() -> Self {
         Self {
             inner: Mutex::new(ReplayInner::stopped()),
+            changed: Condvar::new(),
             stop_requested: AtomicBool::new(false),
+            frames_observed: AtomicU64::new(0),
+            callback_telemetry: ReplayCallbackTelemetry::default(),
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, ReplayInner> {
-        self.inner
+        let started = Instant::now();
+        let guard = self
+            .inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        IN_REPLAY_FRAME_CALLBACK.with(|in_callback| {
+            if in_callback.get() {
+                self.callback_telemetry.lock_wait.record(started.elapsed());
+            }
+        });
+        guard
     }
 
     fn snapshot(&self) -> ReplayBufferStatus {
-        self.lock().snapshot()
+        self.lock().snapshot(
+            self.frames_observed.load(Ordering::Relaxed),
+            &self.callback_telemetry,
+        )
     }
 
     fn begin(&self, request: &ReplayBufferStartRequest) {
         self.stop_requested.store(false, Ordering::Release);
+        self.frames_observed.store(0, Ordering::Relaxed);
+        self.callback_telemetry.reset();
         let mut inner = self.lock();
         *inner = ReplayInner {
             state: ReplayLifecycleState::Starting,
@@ -164,7 +401,27 @@ impl SharedReplay {
             last_segment_duration_ms: None,
             last_rotation_gap_ms: None,
             last_finalize_time_ms: None,
+            last_source_frame_gap_ms: None,
+            worst_source_frame_gap_ms: None,
+            total_source_frame_gap_ms: 0.0,
+            last_encoder_creation_ms: None,
+            worst_encoder_creation_ms: None,
+            total_encoder_creation_ms: 0.0,
+            rotation_count: 0,
+            last_estimated_frames_missed: None,
+            estimated_frames_missed_total: 0,
+            material_source_gap_count: 0,
+            encoder_preparation_in_flight: false,
+            prepared_encoder_ready: false,
+            next_encoder_state: "starting".to_string(),
+            rotation_lifecycle: RotationLifecycleTrace::default(),
+            pins: HashMap::new(),
+            deferred_deletions: HashMap::new(),
+            next_rotation_request_id: 0,
+            pending_rotation_request_id: None,
+            acknowledged_rotation: None,
         };
+        self.changed.notify_all();
     }
 
     fn configure(
@@ -183,13 +440,16 @@ impl SharedReplay {
         inner.height = height;
         inner.session_id = Some(session_id);
         inner.session_directory = Some(session_directory);
+        self.changed.notify_all();
     }
 
     fn mark_running(&self) {
         let mut inner = self.lock();
         if inner.state != ReplayLifecycleState::Error {
             inner.state = ReplayLifecycleState::Running;
+            inner.next_encoder_state = "waiting_for_prewarm_point".to_string();
         }
+        self.changed.notify_all();
     }
 
     fn request_stop(&self) {
@@ -200,7 +460,9 @@ impl SharedReplay {
             ReplayLifecycleState::Starting | ReplayLifecycleState::Running
         ) {
             inner.state = ReplayLifecycleState::Stopping;
+            inner.next_encoder_state = "stopping".to_string();
         }
+        self.changed.notify_all();
     }
 
     fn should_stop(&self) -> bool {
@@ -213,6 +475,8 @@ impl SharedReplay {
             inner.state = ReplayLifecycleState::Stopped;
             inner.error_message = None;
         }
+        inner.next_encoder_state = "not_active".to_string();
+        self.changed.notify_all();
     }
 
     fn mark_error(&self, error: impl Into<String>) {
@@ -220,14 +484,92 @@ impl SharedReplay {
         let mut inner = self.lock();
         inner.state = ReplayLifecycleState::Error;
         inner.error_message = Some(error.into());
+        inner.next_encoder_state = "error".to_string();
+        self.changed.notify_all();
     }
 
-    fn record_rotation_gap(&self, gap_ms: f64) {
-        self.lock().last_rotation_gap_ms = Some(gap_ms);
+    fn frame_observed(&self) {
+        self.frames_observed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn set_encoder_preparation_state(&self, in_flight: bool, ready: bool) {
+        let mut inner = self.lock();
+        inner.encoder_preparation_in_flight = in_flight;
+        inner.prepared_encoder_ready = ready;
+        inner.next_encoder_state = if in_flight {
+            "preparing"
+        } else if ready {
+            "ready"
+        } else if inner.state == ReplayLifecycleState::Running {
+            "waiting_for_prewarm_point"
+        } else {
+            "not_active"
+        }
+        .to_string();
+        self.changed.notify_all();
+    }
+
+    fn set_rotation_due_waiting(&self) {
+        self.lock().next_encoder_state = "rotation_due_waiting_for_encoder".to_string();
+        self.changed.notify_all();
+    }
+
+    fn publish_rotation_lifecycle(&self, trace: &RotationLifecycleTrace) {
+        self.lock().rotation_lifecycle = trace.clone();
+        self.changed.notify_all();
+    }
+
+    fn record_rotation(&self, diagnostics: RotationDiagnostics) {
+        let mut inner = self.lock();
+        inner.last_rotation_gap_ms = Some(diagnostics.encoder_creation_ms);
+        inner.last_source_frame_gap_ms = Some(diagnostics.source_frame_gap_ms);
+        inner.worst_source_frame_gap_ms = Some(
+            inner
+                .worst_source_frame_gap_ms
+                .unwrap_or(0.0)
+                .max(diagnostics.source_frame_gap_ms),
+        );
+        inner.total_source_frame_gap_ms += diagnostics.source_frame_gap_ms;
+        inner.last_encoder_creation_ms = Some(diagnostics.encoder_creation_ms);
+        inner.worst_encoder_creation_ms = Some(
+            inner
+                .worst_encoder_creation_ms
+                .unwrap_or(0.0)
+                .max(diagnostics.encoder_creation_ms),
+        );
+        inner.total_encoder_creation_ms += diagnostics.encoder_creation_ms;
+        inner.rotation_count += 1;
+        inner.last_estimated_frames_missed = Some(diagnostics.estimated_frames_missed);
+        inner.estimated_frames_missed_total = inner
+            .estimated_frames_missed_total
+            .saturating_add(diagnostics.estimated_frames_missed);
+        if diagnostics.material_source_gap {
+            inner.material_source_gap_count += 1;
+        }
+        inner.encoder_preparation_in_flight = false;
+        inner.prepared_encoder_ready = false;
+        inner.next_encoder_state = "waiting_for_prewarm_point".to_string();
+        self.changed.notify_all();
+    }
+
+    fn record_callback_phases(&self, callback_duration: Duration, phases: CallbackPhaseDurations) {
+        self.callback_telemetry.callback.record(callback_duration);
+        self.callback_telemetry
+            .rotation_evaluation
+            .record(phases.rotation_evaluation);
+        self.callback_telemetry.swap.record(phases.swap);
+        self.callback_telemetry
+            .state_update
+            .record(phases.state_update);
+        self.callback_telemetry.filesystem.record(phases.filesystem);
+        self.callback_telemetry
+            .filesystem_operation_count
+            .fetch_add(phases.filesystem_operation_count, Ordering::Relaxed);
     }
 
     fn segment_submitted(&self) {
         self.lock().pending_finalizations += 1;
+        self.changed.notify_all();
     }
 
     fn complete_segment(&self, segment: CompletedSegment) {
@@ -236,9 +578,24 @@ impl SharedReplay {
             inner.pending_finalizations = inner.pending_finalizations.saturating_sub(1);
             inner.last_segment_duration_ms = Some(segment.actual_duration_ms);
             inner.last_finalize_time_ms = Some(segment.finalization_time_ms);
-            let evicted = inner.ring.push(segment);
+            let evicted = inner
+                .ring
+                .push(segment)
+                .into_iter()
+                .filter_map(|segment| {
+                    if inner.pins.contains_key(&segment.sequence_number) {
+                        inner
+                            .deferred_deletions
+                            .insert(segment.sequence_number, PathBuf::from(&segment.file_path));
+                        None
+                    } else {
+                        Some(PathBuf::from(segment.file_path))
+                    }
+                })
+                .collect::<Vec<_>>();
             (evicted, inner.session_directory.clone())
         };
+        self.changed.notify_all();
 
         for path in evicted {
             if !path_is_inside_session(&path, session_directory.as_deref()) {
@@ -266,6 +623,7 @@ impl SharedReplay {
         }
         let _ = fs::remove_file(path);
         self.mark_error(error);
+        self.changed.notify_all();
     }
 
     fn discard_empty_segment(&self, path: &Path) {
@@ -275,6 +633,156 @@ impl SharedReplay {
             inner.dropped_segments += 1;
         }
         let _ = fs::remove_file(path);
+        self.changed.notify_all();
+    }
+
+    fn request_save_rotation(&self) -> Result<(u64, u64), String> {
+        let mut inner = self.lock();
+        if inner.state != ReplayLifecycleState::Running {
+            return Err("Save Replay requires a running replay buffer.".to_string());
+        }
+        if inner.ring.len() == 0 {
+            return Err("No finalized replay video is available yet.".to_string());
+        }
+
+        inner.next_rotation_request_id = inner.next_rotation_request_id.saturating_add(1);
+        let request_id = inner.next_rotation_request_id;
+        inner.pending_rotation_request_id = Some(request_id);
+        inner.acknowledged_rotation = None;
+        let requested_at = unix_timestamp_ms();
+        self.changed.notify_all();
+        Ok((request_id, requested_at))
+    }
+
+    fn pending_rotation_request(&self) -> Option<u64> {
+        self.lock().pending_rotation_request_id
+    }
+
+    fn acknowledge_rotation(&self, request_id: u64, sequence_number: u64) {
+        let mut inner = self.lock();
+        if inner.pending_rotation_request_id == Some(request_id) {
+            inner.pending_rotation_request_id = None;
+            inner.acknowledged_rotation = Some((request_id, sequence_number));
+        }
+        self.changed.notify_all();
+    }
+
+    fn wait_for_save_boundary(&self, request_id: u64, timeout: Duration) -> Result<u64, String> {
+        let deadline = Instant::now() + timeout;
+        let mut inner = self.lock();
+
+        loop {
+            if let Some((acknowledged_id, sequence_number)) = inner.acknowledged_rotation {
+                if acknowledged_id == request_id && inner.ring.contains_sequence(sequence_number) {
+                    return Ok(sequence_number);
+                }
+            }
+            if inner.state == ReplayLifecycleState::Error {
+                if inner.pending_rotation_request_id == Some(request_id) {
+                    inner.pending_rotation_request_id = None;
+                }
+                return Err(inner.error_message.clone().unwrap_or_else(|| {
+                    "The replay buffer failed while finalizing the save boundary.".to_string()
+                }));
+            }
+            if inner.state != ReplayLifecycleState::Running {
+                if inner.pending_rotation_request_id == Some(request_id) {
+                    inner.pending_rotation_request_id = None;
+                }
+                return Err(format!(
+                    "The replay buffer entered {:?} before the save boundary finalized.",
+                    inner.state
+                ));
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                if inner.pending_rotation_request_id == Some(request_id) {
+                    inner.pending_rotation_request_id = None;
+                }
+                return Err(
+                    "Timed out waiting for the current replay segment to finalize.".to_string(),
+                );
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let (next_inner, _) = self
+                .changed
+                .wait_timeout(inner, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inner = next_inner;
+        }
+    }
+
+    fn pin_snapshot(
+        self: &Arc<Self>,
+        final_sequence_number: u64,
+        save_request_timestamp_ms: u64,
+    ) -> Result<ReplaySaveSnapshot, String> {
+        let (segments, requested_duration_seconds, sequence_numbers) = {
+            let mut inner = self.lock();
+            let requested_duration_seconds = inner.replay_duration_seconds;
+            let segments = inner.ring.select_suffix_through(
+                final_sequence_number,
+                u64::from(requested_duration_seconds) * 1_000,
+            );
+            if segments.is_empty() {
+                return Err("No finalized replay segments were available to save.".to_string());
+            }
+
+            let sequence_numbers = segments
+                .iter()
+                .map(|segment| segment.sequence_number)
+                .collect::<Vec<_>>();
+            for sequence_number in &sequence_numbers {
+                *inner.pins.entry(*sequence_number).or_insert(0) += 1;
+            }
+            (segments, requested_duration_seconds, sequence_numbers)
+        };
+
+        Ok(ReplaySaveSnapshot {
+            save_request_timestamp_ms,
+            requested_duration_seconds,
+            segments,
+            _pins: SegmentPinGuard {
+                shared: Arc::clone(self),
+                sequence_numbers,
+            },
+        })
+    }
+
+    fn release_pins(&self, sequence_numbers: &[u64]) {
+        let (paths, session_directory) = {
+            let mut inner = self.lock();
+            let mut paths = Vec::new();
+            for sequence_number in sequence_numbers {
+                let remove_pin = match inner.pins.get_mut(sequence_number) {
+                    Some(count) if *count > 1 => {
+                        *count -= 1;
+                        false
+                    }
+                    Some(_) => true,
+                    None => false,
+                };
+                if remove_pin {
+                    inner.pins.remove(sequence_number);
+                    if let Some(path) = inner.deferred_deletions.remove(sequence_number) {
+                        paths.push(path);
+                    }
+                }
+            }
+            (paths, inner.session_directory.clone())
+        };
+
+        for path in paths {
+            if path_is_inside_session(&path, session_directory.as_deref()) {
+                let _ = fs::remove_file(path);
+            }
+        }
+        self.changed.notify_all();
+    }
+
+    fn has_pins(&self) -> bool {
+        !self.lock().pins.is_empty()
     }
 }
 
@@ -307,6 +815,12 @@ impl ReplayBufferManager {
     }
 
     pub fn start(&self, request: ReplayBufferStartRequest) -> ReplayCommandResult {
+        if is_continuous_baseline_active() {
+            return ReplayCommandResult::failure(
+                self.status(),
+                "Wait for the continuous-capture baseline to finish before starting the Replay Buffer.",
+            );
+        }
         if let Err(error) = validate_start_request(&request) {
             return ReplayCommandResult::failure(self.status(), error);
         }
@@ -326,6 +840,12 @@ impl ReplayBufferManager {
             return ReplayCommandResult::failure(
                 current,
                 "A replay-buffer session is already starting, running, or stopping.",
+            );
+        }
+        if self.shared.has_pins() {
+            return ReplayCommandResult::failure(
+                current,
+                "A replay is still being saved. Wait for it to finish before starting a new buffer session.",
             );
         }
 
@@ -399,6 +919,15 @@ impl ReplayBufferManager {
                     .unwrap_or_else(|| "The replay buffer did not stop cleanly.".to_string()),
             )
         }
+    }
+
+    pub fn snapshot_for_save(&self) -> Result<ReplaySaveSnapshot, String> {
+        let (request_id, requested_at) = self.shared.request_save_rotation()?;
+        let final_sequence_number = self
+            .shared
+            .wait_for_save_boundary(request_id, Duration::from_secs(15))?;
+        self.shared
+            .pin_snapshot(final_sequence_number, requested_at)
     }
 
     pub fn shutdown_and_cleanup(&self) {
@@ -497,6 +1026,7 @@ fn run_replay_session(
     }
 }
 
+#[derive(Clone)]
 struct ReplayCaptureFlags {
     shared: Arc<SharedReplay>,
     session_directory: PathBuf,
@@ -515,13 +1045,24 @@ struct ActiveSegment {
     last_frame_timestamp: Option<i64>,
     start_timestamp_ms: Option<u64>,
     frame_count: u64,
+    encoder_creation_time_ms: f64,
+    encoder_creation_started_ms: f64,
+    encoder_creation_completed_ms: f64,
+    first_frame_submitted_ms: Option<f64>,
+    last_frame_submitted_ms: Option<f64>,
 }
 
 impl ActiveSegment {
-    fn create(flags: &ReplayCaptureFlags, sequence_number: u64) -> Result<Self, String> {
+    fn create(
+        flags: &ReplayCaptureFlags,
+        sequence_number: u64,
+        session_started: Instant,
+    ) -> Result<Self, String> {
         let path = flags
             .session_directory
             .join(format!("segment-{sequence_number:06}.mp4"));
+        let creation_started = Instant::now();
+        let encoder_creation_started_ms = session_started.elapsed().as_secs_f64() * 1_000.0;
         let backend = WindowsCaptureFileBackend::create(
             &path,
             flags.codec,
@@ -530,6 +1071,8 @@ impl ActiveSegment {
             flags.frame_rate,
         )
         .map_err(|error| format!("Could not initialize replay segment encoder: {error}"))?;
+        let encoder_creation_time_ms = creation_started.elapsed().as_secs_f64() * 1_000.0;
+        let encoder_creation_completed_ms = session_started.elapsed().as_secs_f64() * 1_000.0;
 
         Ok(Self {
             sequence_number,
@@ -540,6 +1083,11 @@ impl ActiveSegment {
             last_frame_timestamp: None,
             start_timestamp_ms: None,
             frame_count: 0,
+            encoder_creation_time_ms,
+            encoder_creation_started_ms,
+            encoder_creation_completed_ms,
+            first_frame_submitted_ms: None,
+            last_frame_submitted_ms: None,
         })
     }
 
@@ -548,29 +1096,53 @@ impl ActiveSegment {
             .is_some_and(|started| now.duration_since(started) >= SEGMENT_DURATION)
     }
 
-    fn encode_frame(&mut self, frame: &mut Frame<'_>) -> Result<(), String> {
+    fn has_frames(&self) -> bool {
+        self.frame_count > 0
+    }
+
+    fn discard(self) {
+        let path = self.path.clone();
+        drop(self.backend);
+        let _ = fs::remove_file(path);
+    }
+
+    fn should_prepare(&self, now: Instant) -> bool {
+        self.first_frame_instant
+            .is_some_and(|started| now.duration_since(started) >= SEGMENT_DURATION / 2)
+    }
+
+    fn encode_frame(
+        &mut self,
+        frame: &mut Frame<'_>,
+        session_started: Instant,
+    ) -> Result<Duration, String> {
         let timestamp = frame
             .timestamp()
             .map_err(|error| format!("Could not read replay frame timestamp: {error}"))?
             .Duration;
+        let send_started = Instant::now();
         self.backend
             .encode_frame(frame)
             .map_err(|error| format!("Replay encoder rejected a captured frame: {error}"))?;
+        let send_duration = send_started.elapsed();
+        let submitted_ms = session_started.elapsed().as_secs_f64() * 1_000.0;
 
         if self.first_frame_instant.is_none() {
             self.first_frame_instant = Some(Instant::now());
             self.first_frame_timestamp = Some(timestamp);
             self.start_timestamp_ms = Some(unix_timestamp_ms());
+            self.first_frame_submitted_ms = Some(submitted_ms);
         }
         self.last_frame_timestamp = Some(timestamp);
+        self.last_frame_submitted_ms = Some(submitted_ms);
         self.frame_count += 1;
-        Ok(())
+        Ok(send_duration)
     }
 
     fn into_finalize_job(
         self,
         flags: &ReplayCaptureFlags,
-        rotation_gap_ms: Option<f64>,
+        boundary: Option<SegmentBoundaryTiming>,
     ) -> FinalizeJob {
         let frame_duration_100ns = 10_000_000 / i64::from(flags.frame_rate);
         let actual_duration_100ns = match (self.first_frame_timestamp, self.last_frame_timestamp) {
@@ -592,10 +1164,36 @@ impl ActiveSegment {
             codec: flags.codec,
             width: flags.width,
             height: flags.height,
-            rotation_gap_ms,
+            frame_rate: flags.frame_rate,
+            rotation_gap_ms: boundary
+                .as_ref()
+                .map(|timing| timing.encoder_creation_time_ms),
             frame_count: self.frame_count,
+            first_frame_timestamp_100ns: self.first_frame_timestamp.unwrap_or(0),
+            last_frame_timestamp_100ns: self.last_frame_timestamp.unwrap_or(0),
+            next_segment_first_frame_timestamp_100ns: boundary
+                .as_ref()
+                .map(|timing| timing.next_first_frame_timestamp_100ns),
+            source_frame_gap_ms: boundary.as_ref().map(|timing| timing.source_frame_gap_ms),
+            encoder_creation_time_ms: self.encoder_creation_time_ms,
+            encoder_creation_started_ms: self.encoder_creation_started_ms,
+            encoder_creation_completed_ms: self.encoder_creation_completed_ms,
+            rotation_requested_ms: boundary.as_ref().map(|timing| timing.rotation_requested_ms),
+            first_frame_submitted_ms: self.first_frame_submitted_ms,
+            last_frame_submitted_ms: self.last_frame_submitted_ms,
+            next_first_frame_submitted_ms: boundary
+                .as_ref()
+                .map(|timing| timing.next_first_frame_submitted_ms),
         }
     }
+}
+
+struct SegmentBoundaryTiming {
+    next_first_frame_timestamp_100ns: i64,
+    source_frame_gap_ms: f64,
+    encoder_creation_time_ms: f64,
+    rotation_requested_ms: f64,
+    next_first_frame_submitted_ms: f64,
 }
 
 struct FinalizeJob {
@@ -608,8 +1206,20 @@ struct FinalizeJob {
     codec: EncoderCodec,
     width: u32,
     height: u32,
+    frame_rate: u32,
     rotation_gap_ms: Option<f64>,
     frame_count: u64,
+    first_frame_timestamp_100ns: i64,
+    last_frame_timestamp_100ns: i64,
+    next_segment_first_frame_timestamp_100ns: Option<i64>,
+    source_frame_gap_ms: Option<f64>,
+    encoder_creation_time_ms: f64,
+    encoder_creation_started_ms: f64,
+    encoder_creation_completed_ms: f64,
+    rotation_requested_ms: Option<f64>,
+    first_frame_submitted_ms: Option<f64>,
+    last_frame_submitted_ms: Option<f64>,
+    next_first_frame_submitted_ms: Option<f64>,
 }
 
 struct FinalizerWorker {
@@ -725,9 +1335,22 @@ fn finalize_segments(receiver: mpsc::Receiver<FinalizeJob>, shared: Arc<SharedRe
             start_timestamp_ms: job.start_timestamp_ms,
             end_timestamp_ms: job.end_timestamp_ms,
             actual_duration_ms: job.actual_duration_ms,
+            first_frame_timestamp_100ns: job.first_frame_timestamp_100ns,
+            last_frame_timestamp_100ns: job.last_frame_timestamp_100ns,
+            next_segment_first_frame_timestamp_100ns: job.next_segment_first_frame_timestamp_100ns,
+            source_frame_gap_ms: job.source_frame_gap_ms,
+            frame_count: job.frame_count,
+            encoder_creation_time_ms: job.encoder_creation_time_ms,
+            encoder_creation_started_ms: job.encoder_creation_started_ms,
+            encoder_creation_completed_ms: job.encoder_creation_completed_ms,
+            rotation_requested_ms: job.rotation_requested_ms,
+            first_frame_submitted_ms: job.first_frame_submitted_ms,
+            last_frame_submitted_ms: job.last_frame_submitted_ms,
+            next_first_frame_submitted_ms: job.next_first_frame_submitted_ms,
             codec: job.codec.display_name().to_string(),
             width: job.width,
             height: job.height,
+            frame_rate: job.frame_rate,
             file_size,
             finalized: true,
             finalization_time_ms: finalization_started.elapsed().as_secs_f64() * 1_000.0,
@@ -736,33 +1359,358 @@ fn finalize_segments(receiver: mpsc::Receiver<FinalizeJob>, shared: Arc<SharedRe
     }
 }
 
+struct EncoderPrewarmer {
+    sender: Option<mpsc::Sender<u64>>,
+    receiver: mpsc::Receiver<Result<ActiveSegment, String>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl EncoderPrewarmer {
+    fn new(flags: ReplayCaptureFlags, session_started: Instant) -> Result<Self, String> {
+        let (request_sender, request_receiver) = mpsc::channel::<u64>();
+        let (result_sender, result_receiver) = mpsc::channel::<Result<ActiveSegment, String>>();
+        let thread = thread::Builder::new()
+            .name("justin-replay-encoder-prewarm".to_string())
+            .spawn(move || {
+                for sequence_number in request_receiver {
+                    let result = ActiveSegment::create(&flags, sequence_number, session_started);
+                    if let Err(error) = result_sender.send(result) {
+                        if let Ok(segment) = error.0 {
+                            segment.discard();
+                        }
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| format!("Could not start the encoder prewarm worker: {error}"))?;
+
+        Ok(Self {
+            sender: Some(request_sender),
+            receiver: result_receiver,
+            thread: Some(thread),
+        })
+    }
+
+    fn request(&self, sequence_number: u64) -> Result<(), String> {
+        self.sender
+            .as_ref()
+            .ok_or_else(|| "The encoder prewarm worker is closed.".to_string())?
+            .send(sequence_number)
+            .map_err(|error| format!("Could not request encoder prewarming: {error}"))
+    }
+
+    fn try_take(&self) -> Result<Option<ActiveSegment>, String> {
+        match self.receiver.try_recv() {
+            Ok(Ok(segment)) => Ok(Some(segment)),
+            Ok(Err(error)) => Err(error),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("The encoder prewarm worker stopped unexpectedly.".to_string())
+            }
+        }
+    }
+
+    fn shutdown(mut self) {
+        self.sender.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        while let Ok(result) = self.receiver.try_recv() {
+            if let Ok(segment) = result {
+                segment.discard();
+            }
+        }
+    }
+}
+
+struct RotationDiagnostics {
+    source_frame_gap_ms: f64,
+    encoder_creation_ms: f64,
+    estimated_frames_missed: u64,
+    material_source_gap: bool,
+}
+
+fn calculate_rotation_diagnostics(
+    previous_timestamp_100ns: i64,
+    next_timestamp_100ns: i64,
+    frame_rate: u32,
+    encoder_creation_ms: f64,
+) -> RotationDiagnostics {
+    let source_frame_gap_ms =
+        (i128::from(next_timestamp_100ns) - i128::from(previous_timestamp_100ns)) as f64 / 10_000.0;
+    let expected_frame_interval_ms = 1_000.0 / f64::from(frame_rate.max(1));
+    let estimated_intervals = if source_frame_gap_ms > 0.0 {
+        (source_frame_gap_ms / expected_frame_interval_ms).round() as u64
+    } else {
+        0
+    };
+    RotationDiagnostics {
+        source_frame_gap_ms,
+        encoder_creation_ms,
+        estimated_frames_missed: estimated_intervals.saturating_sub(1),
+        material_source_gap: source_frame_gap_ms
+            > expected_frame_interval_ms * DIAGNOSTIC_MATERIAL_GAP_INTERVALS,
+    }
+}
+
 struct ReplayCaptureHandler {
     flags: ReplayCaptureFlags,
     active: Option<ActiveSegment>,
     finalizer: Option<FinalizerWorker>,
+    prewarmer: Option<EncoderPrewarmer>,
+    prepared: Option<ActiveSegment>,
+    preparation_in_flight: bool,
     next_sequence: u64,
+    session_started: Instant,
+    rotation_requested_ms: Option<f64>,
+    rotation_lifecycle: RotationLifecycleTrace,
+    awaiting_following_frame: bool,
     finished: bool,
 }
 
 impl ReplayCaptureHandler {
-    fn rotate(&mut self) -> Result<(), ReplayHandlerError> {
-        let rotation_started = Instant::now();
-        let next = ActiveSegment::create(&self.flags, self.next_sequence)
+    fn elapsed_ms(&self) -> f64 {
+        self.session_started.elapsed().as_secs_f64() * 1_000.0
+    }
+
+    fn publish_lifecycle(&self, phases: &mut CallbackPhaseDurations) {
+        let started = Instant::now();
+        self.flags
+            .shared
+            .publish_rotation_lifecycle(&self.rotation_lifecycle);
+        phases.state_update += started.elapsed();
+    }
+
+    fn ensure_preparation(
+        &mut self,
+        phases: &mut CallbackPhaseDurations,
+    ) -> Result<(), ReplayHandlerError> {
+        if self.prepared.is_some() || self.preparation_in_flight {
+            return Ok(());
+        }
+        let active_sequence_number = self.active.as_ref().map(|active| active.sequence_number);
+        if self.rotation_lifecycle.active_sequence_number != active_sequence_number {
+            self.rotation_lifecycle = RotationLifecycleTrace {
+                active_sequence_number,
+                active_segment_first_frame_ms: self
+                    .active
+                    .as_ref()
+                    .and_then(|active| active.first_frame_submitted_ms),
+                rotation_requested_ms: self.rotation_requested_ms,
+                ..RotationLifecycleTrace::default()
+            };
+        }
+        let requested_sequence = self.next_sequence;
+        self.prewarmer
+            .as_ref()
+            .ok_or_else(|| ReplayHandlerError::new("The encoder prewarm worker is unavailable."))?
+            .request(self.next_sequence)
             .map_err(ReplayHandlerError::new)?;
-        let rotation_gap_ms = rotation_started.elapsed().as_secs_f64() * 1_000.0;
-        self.flags.shared.record_rotation_gap(rotation_gap_ms);
         self.next_sequence += 1;
+        self.preparation_in_flight = true;
+        self.rotation_lifecycle.next_sequence_number = Some(requested_sequence);
+        self.rotation_lifecycle.prewarm_requested_ms = Some(self.elapsed_ms());
+        let state_started = Instant::now();
+        self.flags.shared.set_encoder_preparation_state(true, false);
+        phases.state_update += state_started.elapsed();
+        if self.rotation_requested_ms.is_some() {
+            let state_started = Instant::now();
+            self.flags.shared.set_rotation_due_waiting();
+            phases.state_update += state_started.elapsed();
+        }
+        self.publish_lifecycle(phases);
+        Ok(())
+    }
+
+    fn poll_preparation(
+        &mut self,
+        phases: &mut CallbackPhaseDurations,
+    ) -> Result<(), ReplayHandlerError> {
+        if !self.preparation_in_flight {
+            return Ok(());
+        }
+        let prepared = self
+            .prewarmer
+            .as_ref()
+            .ok_or_else(|| ReplayHandlerError::new("The encoder prewarm worker is unavailable."))?
+            .try_take()
+            .map_err(ReplayHandlerError::new)?;
+        if let Some(prepared) = prepared {
+            self.rotation_lifecycle.encoder_creation_started_ms =
+                Some(prepared.encoder_creation_started_ms);
+            self.rotation_lifecycle.encoder_creation_completed_ms =
+                Some(prepared.encoder_creation_completed_ms);
+            self.rotation_lifecycle.prepared_ready_ms = Some(self.elapsed_ms());
+            self.prepared = Some(prepared);
+            self.preparation_in_flight = false;
+            let state_started = Instant::now();
+            self.flags.shared.set_encoder_preparation_state(false, true);
+            phases.state_update += state_started.elapsed();
+            self.publish_lifecycle(phases);
+        }
+        Ok(())
+    }
+
+    fn mark_rotation_requested(&mut self, phases: &mut CallbackPhaseDurations) {
+        if self.rotation_requested_ms.is_none() {
+            let requested_ms = self.elapsed_ms();
+            self.rotation_requested_ms = Some(requested_ms);
+            self.rotation_lifecycle.rotation_requested_ms = Some(requested_ms);
+            if self.prepared.is_none() {
+                let state_started = Instant::now();
+                self.flags.shared.set_rotation_due_waiting();
+                phases.state_update += state_started.elapsed();
+            }
+            self.publish_lifecycle(phases);
+        }
+    }
+
+    fn rotate_on_frame(
+        &mut self,
+        frame: &mut Frame<'_>,
+        phases: &mut CallbackPhaseDurations,
+    ) -> Result<u64, ReplayHandlerError> {
+        self.rotation_lifecycle.swap_started_ms = Some(self.elapsed_ms());
+        let mut next = self
+            .prepared
+            .take()
+            .ok_or_else(|| ReplayHandlerError::new("The prepared replay encoder is missing."))?;
+        let previous_last_timestamp = self
+            .active
+            .as_ref()
+            .and_then(|segment| segment.last_frame_timestamp)
+            .ok_or_else(|| ReplayHandlerError::new("The active replay segment has no frames."))?;
+        let send_duration = next
+            .encode_frame(frame, self.session_started)
+            .map_err(ReplayHandlerError::new)?;
+        self.flags
+            .shared
+            .callback_telemetry
+            .record_send_frame(send_duration);
+        let next_first_timestamp = next.first_frame_timestamp.ok_or_else(|| {
+            ReplayHandlerError::new("The prepared encoder did not accept its first frame.")
+        })?;
+        let next_first_submitted_ms = next.first_frame_submitted_ms.ok_or_else(|| {
+            ReplayHandlerError::new("The prepared encoder has no first-frame submission time.")
+        })?;
+        let encoder_creation_time_ms = next.encoder_creation_time_ms;
+        let diagnostics = calculate_rotation_diagnostics(
+            previous_last_timestamp,
+            next_first_timestamp,
+            self.flags.frame_rate,
+            encoder_creation_time_ms,
+        );
+        let boundary = SegmentBoundaryTiming {
+            next_first_frame_timestamp_100ns: next_first_timestamp,
+            source_frame_gap_ms: diagnostics.source_frame_gap_ms,
+            encoder_creation_time_ms,
+            rotation_requested_ms: self
+                .rotation_requested_ms
+                .unwrap_or_else(|| self.session_started.elapsed().as_secs_f64() * 1_000.0),
+            next_first_frame_submitted_ms: next_first_submitted_ms,
+        };
 
         let previous = self
             .active
             .replace(next)
             .ok_or_else(|| ReplayHandlerError::new("The active replay segment is missing."))?;
-        let job = previous.into_finalize_job(&self.flags, Some(rotation_gap_ms));
-        self.finalizer
+        let previous_sequence_number = previous.sequence_number;
+        let job = previous.into_finalize_job(&self.flags, Some(boundary));
+        let state_started = Instant::now();
+        let submit_result = self
+            .finalizer
             .as_mut()
             .ok_or_else(|| ReplayHandlerError::new("The replay finalizer is unavailable."))?
-            .submit(job)
-            .map_err(ReplayHandlerError::new)
+            .submit(job);
+        if submit_result.is_err() {
+            phases.filesystem += state_started.elapsed();
+            phases.filesystem_operation_count += 1;
+        }
+        submit_result.map_err(ReplayHandlerError::new)?;
+        phases.state_update += state_started.elapsed();
+        self.rotation_lifecycle.old_segment_queued_ms = Some(self.elapsed_ms());
+        let state_started = Instant::now();
+        self.flags.shared.record_rotation(diagnostics);
+        phases.state_update += state_started.elapsed();
+        self.rotation_lifecycle.swap_completed_ms = Some(self.elapsed_ms());
+        self.publish_lifecycle(phases);
+        self.awaiting_following_frame = true;
+        self.rotation_requested_ms = None;
+        Ok(previous_sequence_number)
+    }
+
+    fn process_frame(
+        &mut self,
+        frame: &mut Frame<'_>,
+        phases: &mut CallbackPhaseDurations,
+    ) -> Result<(), ReplayHandlerError> {
+        let state_started = Instant::now();
+        self.flags.shared.frame_observed();
+        phases.state_update += state_started.elapsed();
+
+        if self.awaiting_following_frame {
+            self.rotation_lifecycle.following_frame_arrived_ms = Some(self.elapsed_ms());
+            self.awaiting_following_frame = false;
+            self.publish_lifecycle(phases);
+        }
+
+        let evaluation_started = Instant::now();
+        self.poll_preparation(phases)?;
+        let pending_save_rotation = self.flags.shared.pending_rotation_request();
+        let active_has_frames = self.active.as_ref().is_some_and(ActiveSegment::has_frames);
+        let nominal_rotation_due = self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.should_rotate(Instant::now()))
+            && active_has_frames;
+        let save_rotation_due = pending_save_rotation.filter(|_| active_has_frames);
+
+        if nominal_rotation_due || save_rotation_due.is_some() {
+            self.mark_rotation_requested(phases);
+            self.ensure_preparation(phases)?;
+            self.poll_preparation(phases)?;
+            if self.prepared.is_some() {
+                phases.rotation_evaluation += evaluation_started.elapsed();
+                let swap_started = Instant::now();
+                let sequence_number = self.rotate_on_frame(frame, phases)?;
+                phases.swap += swap_started.elapsed();
+                if let Some(request_id) = save_rotation_due {
+                    let state_started = Instant::now();
+                    self.flags
+                        .shared
+                        .acknowledge_rotation(request_id, sequence_number);
+                    phases.state_update += state_started.elapsed();
+                }
+                return Ok(());
+            }
+        } else if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.should_prepare(Instant::now()))
+        {
+            self.ensure_preparation(phases)?;
+        }
+        phases.rotation_evaluation += evaluation_started.elapsed();
+
+        let was_empty = !self.active.as_ref().is_some_and(ActiveSegment::has_frames);
+        let send_duration = self
+            .active
+            .as_mut()
+            .ok_or_else(|| ReplayHandlerError::new("The active replay segment is missing."))?
+            .encode_frame(frame, self.session_started)
+            .map_err(ReplayHandlerError::new)?;
+        self.flags
+            .shared
+            .callback_telemetry
+            .record_send_frame(send_duration);
+        if was_empty {
+            self.rotation_lifecycle.active_segment_first_frame_ms = self
+                .active
+                .as_ref()
+                .and_then(|active| active.first_frame_submitted_ms);
+            self.publish_lifecycle(phases);
+        }
+        Ok(())
     }
 
     fn finish_session(&mut self) -> Result<(), ReplayHandlerError> {
@@ -770,6 +1718,17 @@ impl ReplayCaptureHandler {
             return Ok(());
         }
         self.finished = true;
+
+        if let Some(prepared) = self.prepared.take() {
+            prepared.discard();
+        }
+        if let Some(prewarmer) = self.prewarmer.take() {
+            prewarmer.shutdown();
+        }
+        self.preparation_in_flight = false;
+        self.flags
+            .shared
+            .set_encoder_preparation_state(false, false);
 
         if let Some(active) = self.active.take() {
             let job = active.into_finalize_job(&self.flags, None);
@@ -820,16 +1779,34 @@ impl GraphicsCaptureApiHandler for ReplayCaptureHandler {
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         ensure_borderless_capture_access().map_err(ReplayHandlerError::new)?;
+        let session_started = Instant::now();
         let finalizer =
             FinalizerWorker::new(Arc::clone(&ctx.flags.shared)).map_err(ReplayHandlerError::new)?;
-        let active = ActiveSegment::create(&ctx.flags, 1).map_err(ReplayHandlerError::new)?;
+        let active = ActiveSegment::create(&ctx.flags, 1, session_started)
+            .map_err(ReplayHandlerError::new)?;
+        let prewarmer = EncoderPrewarmer::new(ctx.flags.clone(), session_started)
+            .map_err(ReplayHandlerError::new)?;
+        let rotation_lifecycle = RotationLifecycleTrace {
+            active_sequence_number: Some(active.sequence_number),
+            ..RotationLifecycleTrace::default()
+        };
+        ctx.flags
+            .shared
+            .publish_rotation_lifecycle(&rotation_lifecycle);
         ctx.flags.shared.mark_running();
 
         Ok(Self {
             flags: ctx.flags,
             active: Some(active),
             finalizer: Some(finalizer),
+            prewarmer: Some(prewarmer),
+            prepared: None,
+            preparation_in_flight: false,
             next_sequence: 2,
+            session_started,
+            rotation_requested_ms: None,
+            rotation_lifecycle,
+            awaiting_following_frame: false,
             finished: false,
         })
     }
@@ -839,19 +1816,15 @@ impl GraphicsCaptureApiHandler for ReplayCaptureHandler {
         frame: &mut Frame,
         _capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|active| active.should_rotate(Instant::now()))
-        {
-            self.rotate()?;
-        }
-
-        self.active
-            .as_mut()
-            .ok_or_else(|| ReplayHandlerError::new("The active replay segment is missing."))?
-            .encode_frame(frame)
-            .map_err(ReplayHandlerError::new)
+        let callback_started = Instant::now();
+        let mut phases = CallbackPhaseDurations::default();
+        IN_REPLAY_FRAME_CALLBACK.with(|in_callback| in_callback.set(true));
+        let result = self.process_frame(frame, &mut phases);
+        IN_REPLAY_FRAME_CALLBACK.with(|in_callback| in_callback.set(false));
+        self.flags
+            .shared
+            .record_callback_phases(callback_started.elapsed(), phases);
+        result
     }
 
     fn on_closed(&mut self) -> Result<(), Self::Error> {
@@ -968,9 +1941,17 @@ fn unix_timestamp_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_start_request, ReplayBufferStartRequest, SharedReplay};
-    use crate::capture::encoder::EncoderChoice;
+    use std::fs;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use super::{
+        calculate_rotation_diagnostics, validate_start_request, ReplayBufferStartRequest,
+        SharedReplay,
+    };
+    use crate::capture::encoder::{EncoderChoice, EncoderCodec};
     use crate::capture::targets::{CaptureTargetRequest, CaptureTargetType};
+    use crate::replay::segment::CompletedSegment;
     use crate::replay::state::ReplayLifecycleState;
 
     fn request(duration: u32, frame_rate: u32) -> ReplayBufferStartRequest {
@@ -985,6 +1966,36 @@ mod tests {
         }
     }
 
+    fn completed_segment(path: &Path, sequence_number: u64) -> CompletedSegment {
+        CompletedSegment {
+            sequence_number,
+            file_path: path.to_string_lossy().into_owned(),
+            start_timestamp_ms: sequence_number * 2_000,
+            end_timestamp_ms: (sequence_number + 1) * 2_000,
+            actual_duration_ms: 2_000,
+            first_frame_timestamp_100ns: 0,
+            last_frame_timestamp_100ns: 20_000_000,
+            next_segment_first_frame_timestamp_100ns: None,
+            source_frame_gap_ms: None,
+            frame_count: 120,
+            encoder_creation_time_ms: 10.0,
+            encoder_creation_started_ms: 0.0,
+            encoder_creation_completed_ms: 10.0,
+            rotation_requested_ms: None,
+            first_frame_submitted_ms: Some(0.0),
+            last_frame_submitted_ms: Some(2_000.0),
+            next_first_frame_submitted_ms: None,
+            codec: "H.264".to_string(),
+            width: 1920,
+            height: 1080,
+            frame_rate: 60,
+            file_size: 4,
+            finalized: true,
+            finalization_time_ms: 10.0,
+            rotation_gap_ms: Some(2.0),
+        }
+    }
+
     #[test]
     fn accepts_only_supported_replay_durations() {
         for duration in [30, 60, 120, 180, 300] {
@@ -996,6 +2007,23 @@ mod tests {
     #[test]
     fn rejects_unsupported_frame_rate() {
         assert!(validate_start_request(&request(30, 144)).is_err());
+    }
+
+    #[test]
+    fn normal_boundary_interval_reports_no_missed_frames() {
+        let diagnostics = calculate_rotation_diagnostics(10_000_000, 10_166_667, 60, 175.0);
+        assert!((diagnostics.source_frame_gap_ms - 16.6667).abs() < 0.001);
+        assert_eq!(diagnostics.estimated_frames_missed, 0);
+        assert!(!diagnostics.material_source_gap);
+        assert_eq!(diagnostics.encoder_creation_ms, 175.0);
+    }
+
+    #[test]
+    fn material_boundary_interval_estimates_missed_frames() {
+        let diagnostics = calculate_rotation_diagnostics(10_000_000, 11_833_333, 60, 175.0);
+        assert!((diagnostics.source_frame_gap_ms - 183.3333).abs() < 0.001);
+        assert_eq!(diagnostics.estimated_frames_missed, 10);
+        assert!(diagnostics.material_source_gap);
     }
 
     #[test]
@@ -1014,5 +2042,47 @@ mod tests {
 
         shared.mark_stopped();
         assert_eq!(shared.snapshot().state, ReplayLifecycleState::Stopped);
+    }
+
+    #[test]
+    fn pinned_evicted_segment_is_deleted_only_after_unpin() {
+        let directory =
+            std::env::temp_dir().join(format!("justin-replay-pin-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+
+        let shared = Arc::new(SharedReplay::new());
+        shared.begin(&request(30, 60));
+        {
+            let mut inner = shared.lock();
+            inner.replay_duration_seconds = 5;
+            inner.ring = super::SegmentRing::new(5);
+        }
+        shared.configure(
+            "Test display".to_string(),
+            EncoderCodec::H264,
+            1920,
+            1080,
+            "test-session".to_string(),
+            directory.clone(),
+        );
+        shared.mark_running();
+
+        for sequence in 1..=4 {
+            let path = directory.join(format!("segment-{sequence:06}.mp4"));
+            fs::write(&path, b"test").unwrap();
+            if sequence <= 3 {
+                shared.complete_segment(completed_segment(&path, sequence));
+            }
+        }
+
+        let snapshot = shared.pin_snapshot(3, 123).unwrap();
+        let first_path = directory.join("segment-000001.mp4");
+        shared.complete_segment(completed_segment(&directory.join("segment-000004.mp4"), 4));
+        assert!(first_path.exists());
+
+        drop(snapshot);
+        assert!(!first_path.exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 }

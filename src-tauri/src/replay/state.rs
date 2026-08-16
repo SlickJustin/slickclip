@@ -2,6 +2,23 @@ use serde::Serialize;
 
 use super::segment::CompletedSegment;
 
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RotationLifecycleTrace {
+    pub active_sequence_number: Option<u64>,
+    pub next_sequence_number: Option<u64>,
+    pub active_segment_first_frame_ms: Option<f64>,
+    pub prewarm_requested_ms: Option<f64>,
+    pub encoder_creation_started_ms: Option<f64>,
+    pub encoder_creation_completed_ms: Option<f64>,
+    pub prepared_ready_ms: Option<f64>,
+    pub rotation_requested_ms: Option<f64>,
+    pub swap_started_ms: Option<f64>,
+    pub old_segment_queued_ms: Option<f64>,
+    pub swap_completed_ms: Option<f64>,
+    pub following_frame_arrived_ms: Option<f64>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReplayLifecycleState {
@@ -46,6 +63,41 @@ pub struct ReplayBufferStatus {
     pub last_segment_duration_seconds: Option<f64>,
     pub last_rotation_gap_ms: Option<f64>,
     pub last_finalize_time_ms: Option<f64>,
+    pub normal_frame_interval_ms: Option<f64>,
+    pub last_source_frame_gap_ms: Option<f64>,
+    pub worst_source_frame_gap_ms: Option<f64>,
+    pub average_source_frame_gap_ms: Option<f64>,
+    pub last_encoder_creation_ms: Option<f64>,
+    pub worst_encoder_creation_ms: Option<f64>,
+    pub average_encoder_creation_ms: Option<f64>,
+    pub rotation_count: u64,
+    pub frames_observed: u64,
+    pub last_estimated_frames_missed: Option<u64>,
+    pub estimated_frames_missed_total: u64,
+    pub material_source_gap_count: u64,
+    pub encoder_preparation_in_flight: bool,
+    pub prepared_encoder_ready: bool,
+    pub next_encoder_state: String,
+    pub average_callback_duration_ms: Option<f64>,
+    pub worst_callback_duration_ms: Option<f64>,
+    pub average_send_frame_duration_ms: Option<f64>,
+    pub worst_send_frame_duration_ms: Option<f64>,
+    pub send_frame_over_16_67_ms: u64,
+    pub send_frame_over_33_33_ms: u64,
+    pub send_frame_over_50_ms: u64,
+    pub send_frame_over_100_ms: u64,
+    pub average_callback_lock_wait_ms: Option<f64>,
+    pub worst_callback_lock_wait_ms: Option<f64>,
+    pub average_rotation_evaluation_ms: Option<f64>,
+    pub worst_rotation_evaluation_ms: Option<f64>,
+    pub average_swap_duration_ms: Option<f64>,
+    pub worst_swap_duration_ms: Option<f64>,
+    pub average_callback_state_update_ms: Option<f64>,
+    pub worst_callback_state_update_ms: Option<f64>,
+    pub average_callback_filesystem_ms: Option<f64>,
+    pub worst_callback_filesystem_ms: Option<f64>,
+    pub callback_filesystem_operation_count: u64,
+    pub rotation_lifecycle: RotationLifecycleTrace,
     pub recent_segments: Vec<CompletedSegment>,
 }
 

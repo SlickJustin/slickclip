@@ -1,7 +1,5 @@
-use std::collections::VecDeque;
-use std::path::PathBuf;
-
 use serde::Serialize;
+use std::collections::VecDeque;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,9 +9,22 @@ pub struct CompletedSegment {
     pub start_timestamp_ms: u64,
     pub end_timestamp_ms: u64,
     pub actual_duration_ms: u64,
+    pub first_frame_timestamp_100ns: i64,
+    pub last_frame_timestamp_100ns: i64,
+    pub next_segment_first_frame_timestamp_100ns: Option<i64>,
+    pub source_frame_gap_ms: Option<f64>,
+    pub frame_count: u64,
+    pub encoder_creation_time_ms: f64,
+    pub encoder_creation_started_ms: f64,
+    pub encoder_creation_completed_ms: f64,
+    pub rotation_requested_ms: Option<f64>,
+    pub first_frame_submitted_ms: Option<f64>,
+    pub last_frame_submitted_ms: Option<f64>,
+    pub next_first_frame_submitted_ms: Option<f64>,
     pub codec: String,
     pub width: u32,
     pub height: u32,
+    pub frame_rate: u32,
     pub file_size: u64,
     pub finalized: bool,
     pub finalization_time_ms: f64,
@@ -33,7 +44,7 @@ impl SegmentRing {
         }
     }
 
-    pub fn push(&mut self, segment: CompletedSegment) -> Vec<PathBuf> {
+    pub fn push(&mut self, segment: CompletedSegment) -> Vec<CompletedSegment> {
         self.segments.push_back(segment);
         let mut evicted = Vec::new();
 
@@ -49,7 +60,7 @@ impl SegmentRing {
             }
 
             if let Some(removed) = self.segments.pop_front() {
-                evicted.push(PathBuf::from(removed.file_path));
+                evicted.push(removed);
             }
         }
 
@@ -74,6 +85,37 @@ impl SegmentRing {
     pub fn recent(&self, limit: usize) -> Vec<CompletedSegment> {
         self.segments.iter().rev().take(limit).cloned().collect()
     }
+
+    pub fn contains_sequence(&self, sequence_number: u64) -> bool {
+        self.segments
+            .iter()
+            .any(|segment| segment.sequence_number == sequence_number)
+    }
+
+    pub fn select_suffix_through(
+        &self,
+        final_sequence_number: u64,
+        requested_duration_ms: u64,
+    ) -> Vec<CompletedSegment> {
+        let mut selected = Vec::new();
+        let mut duration_ms = 0_u64;
+
+        for segment in self
+            .segments
+            .iter()
+            .rev()
+            .filter(|segment| segment.sequence_number <= final_sequence_number)
+        {
+            selected.push(segment.clone());
+            duration_ms = duration_ms.saturating_add(segment.actual_duration_ms);
+            if duration_ms >= requested_duration_ms {
+                break;
+            }
+        }
+
+        selected.reverse();
+        selected
+    }
 }
 
 #[cfg(test)]
@@ -87,9 +129,22 @@ mod tests {
             start_timestamp_ms: sequence_number * duration_ms,
             end_timestamp_ms: (sequence_number + 1) * duration_ms,
             actual_duration_ms: duration_ms,
+            first_frame_timestamp_100ns: 0,
+            last_frame_timestamp_100ns: i64::try_from(duration_ms * 10_000).unwrap(),
+            next_segment_first_frame_timestamp_100ns: None,
+            source_frame_gap_ms: None,
+            frame_count: duration_ms / 16,
+            encoder_creation_time_ms: 10.0,
+            encoder_creation_started_ms: 0.0,
+            encoder_creation_completed_ms: 10.0,
+            rotation_requested_ms: None,
+            first_frame_submitted_ms: Some(0.0),
+            last_frame_submitted_ms: Some(duration_ms as f64),
+            next_first_frame_submitted_ms: None,
             codec: "H.264".to_string(),
             width: 1920,
             height: 1080,
+            frame_rate: 60,
             file_size: 1_000,
             finalized: true,
             finalization_time_ms: 10.0,
@@ -108,7 +163,7 @@ mod tests {
         assert_eq!(ring.len(), 3);
         assert_eq!(ring.total_duration_ms(), 6_000);
         assert_eq!(evicted.len(), 1);
-        assert_eq!(evicted[0].to_string_lossy(), "segment-000001.mp4");
+        assert_eq!(evicted[0].file_path, "segment-000001.mp4");
     }
 
     #[test]
@@ -120,5 +175,38 @@ mod tests {
 
         assert_eq!(ring.len(), 8);
         assert_eq!(ring.total_duration_ms(), 16_000);
+    }
+
+    #[test]
+    fn selection_is_chronological_and_includes_the_boundary_segment() {
+        let mut ring = SegmentRing::new(30);
+        for sequence in 1..=8 {
+            ring.push(segment(sequence, 2_000));
+        }
+
+        let selected = ring.select_suffix_through(7, 5_000);
+        let sequences = selected
+            .iter()
+            .map(|segment| segment.sequence_number)
+            .collect::<Vec<_>>();
+        assert_eq!(sequences, vec![5, 6, 7]);
+    }
+
+    #[test]
+    fn selection_uses_all_available_segments_for_a_partial_buffer() {
+        let mut ring = SegmentRing::new(120);
+        for sequence in 1..=4 {
+            ring.push(segment(sequence, 2_000));
+        }
+
+        let selected = ring.select_suffix_through(4, 120_000);
+        assert_eq!(selected.len(), 4);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|segment| segment.actual_duration_ms)
+                .sum::<u64>(),
+            8_000
+        );
     }
 }
