@@ -11,9 +11,6 @@ use tauri::{Emitter, Manager};
 use windows::Graphics::Capture::{GraphicsCaptureAccess, GraphicsCaptureAccessKind};
 use windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus;
 use windows_capture::capture::{Context, GraphicsCaptureApiError, GraphicsCaptureApiHandler};
-use windows_capture::encoder::{
-    AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
-};
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl};
 use windows_capture::settings::{
@@ -21,7 +18,9 @@ use windows_capture::settings::{
     GraphicsCaptureItemType, MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
 
-use super::encoder::{resolve_encoder, EncoderChoice, EncoderCodec};
+use super::encoder::{
+    resolve_encoder, EncoderChoice, EncoderCodec, VideoEncoderBackend, WindowsCaptureFileBackend,
+};
 use super::targets::{
     resolve_target, CaptureTargetRequest, NativeCaptureTarget, ResolvedCaptureTarget,
 };
@@ -127,7 +126,7 @@ struct CaptureFlags {
 
 struct CaptureTestHandler {
     app: tauri::AppHandle,
-    encoder: Option<VideoEncoder>,
+    encoder: Option<Box<dyn VideoEncoderBackend>>,
     frame_count: u64,
     recording_started: bool,
     started_at: Instant,
@@ -180,21 +179,12 @@ impl GraphicsCaptureApiHandler for CaptureTestHandler {
         request_borderless_access().map_err(CaptureHandlerError::Borderless)?;
         ctx.flags.permission_granted.store(true, Ordering::Release);
 
-        let video_sub_type = ctx.flags.encoder.video_sub_type().ok_or_else(|| {
-            CaptureHandlerError::Capture(format!(
-                "{} is not exposed by windows-capture 2.0.1.",
-                ctx.flags.encoder.display_name()
-            ))
-        })?;
-        let video_settings = VideoSettingsBuilder::new(ctx.flags.width, ctx.flags.height)
-            .sub_type(video_sub_type)
-            .frame_rate(60);
-
-        let encoder = VideoEncoder::new(
-            video_settings,
-            AudioSettingsBuilder::new().disabled(true),
-            ContainerSettingsBuilder::new(),
+        let encoder = WindowsCaptureFileBackend::create(
             &ctx.flags.output_path,
+            ctx.flags.encoder,
+            ctx.flags.width,
+            ctx.flags.height,
+            60,
         )
         .map_err(|error| {
             CaptureHandlerError::Capture(format!("The MP4 encoder could not initialize: {error}"))
@@ -220,7 +210,7 @@ impl GraphicsCaptureApiHandler for CaptureTestHandler {
         }
 
         if let Some(encoder) = self.encoder.as_mut() {
-            encoder.send_frame(frame).map_err(|error| {
+            encoder.encode_frame(frame).map_err(|error| {
                 CaptureHandlerError::Capture(format!(
                     "The MP4 encoder rejected a video frame: {error}"
                 ))

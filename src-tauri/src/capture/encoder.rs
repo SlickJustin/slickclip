@@ -1,4 +1,7 @@
-use serde::{Deserialize, Serialize};
+pub(crate) mod types;
+mod windows_capture_backend;
+
+use serde::Serialize;
 use windows::core::Interface;
 use windows::Storage::Streams::InMemoryRandomAccessStream;
 use windows::Win32::Foundation::S_FALSE;
@@ -9,90 +12,12 @@ use windows_capture::encoder::{
     VideoSettingsSubType,
 };
 
+pub use types::{EncoderChoice, EncoderCodec, VideoEncoderBackend};
+pub use windows_capture_backend::WindowsCaptureFileBackend;
+
 const PROBE_WIDTH: u32 = 1920;
 const PROBE_HEIGHT: u32 = 1080;
 const PROBE_FRAME_RATE: u32 = 60;
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EncoderChoice {
-    Automatic,
-    Av1,
-    Hevc,
-    H264,
-}
-
-impl EncoderChoice {
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Automatic => "automatic",
-            Self::Av1 => "av1",
-            Self::Hevc => "hevc",
-            Self::H264 => "h264",
-        }
-    }
-
-    pub const fn result_name(self) -> &'static str {
-        match self {
-            Self::Automatic => "Automatic",
-            Self::Av1 => "AV1",
-            Self::Hevc => "HEVC",
-            Self::H264 => "H.264",
-        }
-    }
-
-    const fn codec(self) -> &'static str {
-        match self {
-            Self::Automatic => "Automatic",
-            Self::Av1 => "AV1",
-            Self::Hevc => "HEVC",
-            Self::H264 => "H.264",
-        }
-    }
-
-    const fn display_name(self) -> &'static str {
-        match self {
-            Self::Automatic => "Automatic",
-            Self::Av1 => "AV1",
-            Self::Hevc => "HEVC / H.265",
-            Self::H264 => "H.264 / AVC",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum EncoderCodec {
-    Av1,
-    Hevc,
-    H264,
-}
-
-impl EncoderCodec {
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Av1 => "av1",
-            Self::Hevc => "hevc",
-            Self::H264 => "h264",
-        }
-    }
-
-    pub const fn video_sub_type(self) -> Option<VideoSettingsSubType> {
-        match self {
-            // windows-capture 2.0.1 has no AV1 VideoSettingsSubType.
-            Self::Av1 => None,
-            Self::Hevc => Some(VideoSettingsSubType::HEVC),
-            Self::H264 => Some(VideoSettingsSubType::H264),
-        }
-    }
-
-    pub const fn display_name(self) -> &'static str {
-        match self {
-            Self::Av1 => "AV1",
-            Self::Hevc => "HEVC",
-            Self::H264 => "H.264",
-        }
-    }
-}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -211,7 +136,7 @@ fn detect_encoder_capabilities() -> Result<EncoderDetection, String> {
     let automatic = EncoderInfo {
         id: EncoderChoice::Automatic.id().to_string(),
         display_name: EncoderChoice::Automatic.display_name().to_string(),
-        codec: EncoderChoice::Automatic.codec().to_string(),
+        codec: EncoderChoice::Automatic.codec_name().to_string(),
         available: preferred.is_some(),
         reason_unavailable: preferred
             .is_none()
@@ -293,7 +218,7 @@ fn available_info(choice: EncoderChoice) -> EncoderInfo {
     EncoderInfo {
         id: choice.id().to_string(),
         display_name: choice.display_name().to_string(),
-        codec: choice.codec().to_string(),
+        codec: choice.codec_name().to_string(),
         available: true,
         reason_unavailable: None,
         recommended: false,
@@ -305,7 +230,7 @@ fn unavailable_info(choice: EncoderChoice, reason: impl Into<String>) -> Encoder
     EncoderInfo {
         id: choice.id().to_string(),
         display_name: choice.display_name().to_string(),
-        codec: choice.codec().to_string(),
+        codec: choice.codec_name().to_string(),
         available: false,
         reason_unavailable: Some(reason.into()),
         recommended: false,
@@ -318,7 +243,7 @@ fn unavailable_encoder_list(reason: &str) -> Vec<EncoderInfo> {
         EncoderInfo {
             id: EncoderChoice::Automatic.id().to_string(),
             display_name: EncoderChoice::Automatic.display_name().to_string(),
-            codec: EncoderChoice::Automatic.codec().to_string(),
+            codec: EncoderChoice::Automatic.codec_name().to_string(),
             available: false,
             reason_unavailable: Some(reason.to_string()),
             recommended: true,
