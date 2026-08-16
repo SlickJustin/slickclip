@@ -1,11 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { Toggle } from "../components/Toggle";
-
-type CaptureMode = "Game" | "Desktop" | "Window";
-
-const captureModes: CaptureMode[] = ["Game", "Desktop", "Window"];
 
 type CaptureTestResult = {
   success: boolean;
@@ -69,13 +64,94 @@ type TargetTab = "monitor" | "window";
 type SelectedTarget = { targetType: TargetTab; id: string };
 type CaptureTestStatus = "idle" | "preparing" | "recording" | "success" | "error";
 
+type ReplayLifecycleState = "stopped" | "starting" | "running" | "stopping" | "error";
+
+type CompletedSegment = {
+  sequenceNumber: number;
+  filePath: string;
+  startTimestampMs: number;
+  endTimestampMs: number;
+  actualDurationMs: number;
+  codec: string;
+  width: number;
+  height: number;
+  fileSize: number;
+  finalized: boolean;
+  finalizationTimeMs: number;
+  rotationGapMs: number;
+};
+
+type ReplayBufferStatus = {
+  state: ReplayLifecycleState;
+  errorMessage: string | null;
+  targetId: string | null;
+  targetLabel: string | null;
+  requestedEncoder: string | null;
+  actualEncoder: string | null;
+  replayDurationSeconds: number;
+  expectedSegmentDurationSeconds: number;
+  frameRate: number;
+  width: number;
+  height: number;
+  sessionId: string | null;
+  sessionDirectory: string | null;
+  completedSegmentCount: number;
+  retainedDurationSeconds: number;
+  retainedBytes: number;
+  pendingFinalizations: number;
+  droppedSegments: number;
+  lastSegmentDurationSeconds: number | null;
+  lastRotationGapMs: number | null;
+  lastFinalizeTimeMs: number | null;
+  recentSegments: CompletedSegment[];
+};
+
+type ReplayCommandResult = {
+  success: boolean;
+  status: ReplayBufferStatus;
+  errorMessage: string | null;
+};
+
+const replayDurationOptions = [
+  { label: "30 Seconds", value: 30 },
+  { label: "1 Minute", value: 60 },
+  { label: "2 Minutes", value: 120 },
+  { label: "3 Minutes", value: 180 },
+  { label: "5 Minutes", value: 300 },
+];
+
+const initialReplayStatus: ReplayBufferStatus = {
+  state: "stopped",
+  errorMessage: null,
+  targetId: null,
+  targetLabel: null,
+  requestedEncoder: null,
+  actualEncoder: null,
+  replayDurationSeconds: 0,
+  expectedSegmentDurationSeconds: 2,
+  frameRate: 0,
+  width: 0,
+  height: 0,
+  sessionId: null,
+  sessionDirectory: null,
+  completedSegmentCount: 0,
+  retainedDurationSeconds: 0,
+  retainedBytes: 0,
+  pendingFinalizations: 0,
+  droppedSegments: 0,
+  lastSegmentDurationSeconds: null,
+  lastRotationGapMs: null,
+  lastFinalizeTimeMs: null,
+  recentSegments: [],
+};
+
 export function ReplayPage() {
-  const [demoRunning, setDemoRunning] = useState(false);
-  const [captureMode, setCaptureMode] = useState<CaptureMode>("Game");
-  const [clipLength, setClipLength] = useState("2 Minutes");
-  const [resolution, setResolution] = useState("1440p");
-  const [frameRate, setFrameRate] = useState("60 FPS");
-  const [encoder, setEncoder] = useState("Automatic");
+  const [replayDuration, setReplayDuration] = useState(120);
+  const [frameRate, setFrameRate] = useState(60);
+  const [replayEncoder, setReplayEncoder] = useState<Exclude<EncoderId, "av1">>("automatic");
+  const [replayStatus, setReplayStatus] = useState<ReplayBufferStatus>(initialReplayStatus);
+  const [replayCommandActive, setReplayCommandActive] = useState(false);
+  const [replayCommandError, setReplayCommandError] = useState<string | null>(null);
   const [captureTestActive, setCaptureTestActive] = useState(false);
   const [captureTestStatus, setCaptureTestStatus] = useState<CaptureTestStatus>("idle");
   const [captureTestResult, setCaptureTestResult] = useState<CaptureTestResult | null>(null);
@@ -91,21 +167,18 @@ export function ReplayPage() {
   const [captureTestEncoder, setCaptureTestEncoder] = useState<EncoderId>("automatic");
   const [encoderCapabilities, setEncoderCapabilities] = useState<EncoderCapabilitiesResult | null>(null);
   const [encodersLoading, setEncodersLoading] = useState(true);
-  const [audioSources, setAudioSources] = useState({
-    game: true,
-    discord: true,
-    microphone: true,
-    other: false,
-  });
-
-  function setAudioSource(source: keyof typeof audioSources, enabled: boolean) {
-    setAudioSources((current) => ({ ...current, [source]: enabled }));
-  }
-
   useEffect(() => {
     void refreshAllTargets();
     void refreshEncoderCapabilities();
+    void refreshReplayStatus();
   }, []);
+
+  useEffect(() => {
+    if (!isReplayActive(replayStatus.state)) return;
+
+    const timer = window.setInterval(() => void refreshReplayStatus(), 1_000);
+    return () => window.clearInterval(timer);
+  }, [replayStatus.state]);
 
   async function refreshEncoderCapabilities() {
     setEncodersLoading(true);
@@ -125,6 +198,63 @@ export function ReplayPage() {
       });
     } finally {
       setEncodersLoading(false);
+    }
+  }
+
+  async function refreshReplayStatus() {
+    try {
+      const status = await invoke<ReplayBufferStatus>("get_replay_buffer_status");
+      setReplayStatus(status);
+      if (status.state === "error") {
+        setReplayCommandError(status.errorMessage ?? "The replay buffer entered an unknown error state.");
+      }
+    } catch (error) {
+      setReplayCommandError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function startReplayBuffer() {
+    if (!selectedTarget || replayCommandActive || isReplayActive(replayStatus.state)) return;
+
+    setReplayCommandActive(true);
+    setReplayCommandError(null);
+    try {
+      const result = await invoke<ReplayCommandResult>("start_replay_buffer", {
+        request: {
+          target: selectedTarget,
+          encoder: replayEncoder,
+          replayDurationSeconds: replayDuration,
+          frameRate,
+        },
+      });
+      setReplayStatus(result.status);
+      if (!result.success) {
+        setReplayCommandError(result.errorMessage ?? "The replay buffer could not start.");
+      }
+    } catch (error) {
+      setReplayCommandError(error instanceof Error ? error.message : String(error));
+      await refreshReplayStatus();
+    } finally {
+      setReplayCommandActive(false);
+    }
+  }
+
+  async function stopReplayBuffer() {
+    if (replayCommandActive || !isReplayActive(replayStatus.state)) return;
+
+    setReplayCommandActive(true);
+    setReplayCommandError(null);
+    try {
+      const result = await invoke<ReplayCommandResult>("stop_replay_buffer");
+      setReplayStatus(result.status);
+      if (!result.success) {
+        setReplayCommandError(result.errorMessage ?? "The replay buffer did not stop cleanly.");
+      }
+    } catch (error) {
+      setReplayCommandError(error instanceof Error ? error.message : String(error));
+      await refreshReplayStatus();
+    } finally {
+      setReplayCommandActive(false);
     }
   }
 
@@ -181,6 +311,7 @@ export function ReplayPage() {
   }
 
   function changeTargetTab(tab: TargetTab) {
+    if (isReplayActive(replayStatus.state)) return;
     setTargetTab(tab);
     setSelectedTarget(null);
     setTargetsError(null);
@@ -227,6 +358,12 @@ export function ReplayPage() {
     (encoderOption) => encoderOption.id === captureTestEncoder,
   )?.available ?? false;
 
+  const replayEncoderAvailable = encoderCapabilities?.encoders.find(
+    (encoderOption) => encoderOption.id === replayEncoder,
+  )?.available ?? false;
+  const replayActive = isReplayActive(replayStatus.state);
+  const selectedTargetLabel = getSelectedTargetLabel(selectedTarget, monitors, windows);
+
   return (
     <div className="page page-replay">
       <header className="page-header">
@@ -234,7 +371,7 @@ export function ReplayPage() {
           <h1>Replay</h1>
           <p>Capture the moments you actually want to keep.</p>
         </div>
-        <span className="demo-badge">UI DEMO</span>
+        <span className="demo-badge">VIDEO BUFFER</span>
       </header>
 
       <section className="native-capture-test" aria-labelledby="native-capture-test-heading">
@@ -247,7 +384,7 @@ export function ReplayPage() {
           <button
             className="secondary-button capture-target-refresh"
             type="button"
-            disabled={targetsLoading || captureTestActive}
+            disabled={targetsLoading || captureTestActive || replayActive}
             onClick={refreshVisibleTargets}
           >
             {targetsLoading ? "Refreshing..." : "Refresh"}
@@ -259,6 +396,7 @@ export function ReplayPage() {
             className={targetTab === "monitor" ? "capture-target-tab-active" : ""}
             type="button"
             aria-pressed={targetTab === "monitor"}
+            disabled={replayActive}
             onClick={() => changeTargetTab("monitor")}
           >
             Displays <span>{monitors.length}</span>
@@ -267,6 +405,7 @@ export function ReplayPage() {
             className={targetTab === "window" ? "capture-target-tab-active" : ""}
             type="button"
             aria-pressed={targetTab === "window"}
+            disabled={replayActive}
             onClick={() => changeTargetTab("window")}
           >
             Windows <span>{windows.length}</span>
@@ -284,6 +423,7 @@ export function ReplayPage() {
                 className={`capture-target-card${selectedTarget?.id === monitor.id ? " capture-target-selected" : ""}`}
                 type="button"
                 aria-pressed={selectedTarget?.id === monitor.id}
+                disabled={replayActive}
                 key={monitor.id}
                 onClick={() => setSelectedTarget({ targetType: "monitor", id: monitor.id })}
               >
@@ -305,6 +445,7 @@ export function ReplayPage() {
               className={`capture-window-row${selectedTarget?.id === window.id ? " capture-target-selected" : ""}`}
               type="button"
               aria-pressed={selectedTarget?.id === window.id}
+              disabled={replayActive}
               key={window.id}
               onClick={() => setSelectedTarget({ targetType: "window", id: window.id })}
             >
@@ -338,7 +479,7 @@ export function ReplayPage() {
                 className={`capture-encoder-option${captureTestEncoder === encoderOption.id ? " capture-encoder-selected" : ""}${encoderOption.available ? "" : " capture-encoder-unavailable"}`}
                 type="button"
                 aria-pressed={captureTestEncoder === encoderOption.id}
-                disabled={captureTestActive || !encoderOption.available}
+                disabled={captureTestActive || replayActive || !encoderOption.available}
                 key={encoderOption.id}
                 title={encoderOption.reasonUnavailable ?? undefined}
                 onClick={() => setCaptureTestEncoder(encoderOption.id)}
@@ -398,7 +539,7 @@ export function ReplayPage() {
           <button
             className="primary-button capture-test-button"
             type="button"
-            disabled={captureTestActive || !selectedTarget || targetsLoading || encodersLoading || !selectedEncoderAvailable}
+            disabled={captureTestActive || replayActive || !selectedTarget || targetsLoading || encodersLoading || !selectedEncoderAvailable}
             onClick={recordCaptureTest}
           >
             {captureTestStatus === "recording" ? "Recording test..." : captureTestActive ? "Preparing capture..." : "Record 5 Second Test"}
@@ -410,19 +551,42 @@ export function ReplayPage() {
         <div className="status-card-copy">
           <span className="eyebrow">CAPTURE STATUS</span>
           <h2 id="buffer-heading">Replay Buffer</h2>
-          <div className="offline-status">
+          <div className={`replay-state replay-state-${replayStatus.state}`}>
             <span className="status-dot" aria-hidden="true" />
-            Status: OFFLINE
+            Status: {formatReplayState(replayStatus.state)}
           </div>
-          <p>Capture engine not connected. This control is a temporary interface preview.</p>
+          <div className="replay-status-summary">
+            <span>Target <strong>{replayStatus.targetLabel ?? selectedTargetLabel ?? "Not selected"}</strong></span>
+            <span>Encoder <strong>{replayStatus.actualEncoder ?? "—"}</strong></span>
+            <span>Window <strong>{formatDuration(replayStatus.replayDurationSeconds || replayDuration)}</strong></span>
+            <span>Retained <strong>{replayStatus.retainedDurationSeconds.toFixed(1)} s</strong></span>
+            <span>Segments <strong>{replayStatus.completedSegmentCount}</strong></span>
+            <span>Buffer <strong>{formatBytes(replayStatus.retainedBytes)}</strong></span>
+          </div>
+          {(replayCommandError || replayStatus.errorMessage) && (
+            <p className="replay-buffer-error" role="alert">
+              {replayCommandError ?? replayStatus.errorMessage}
+            </p>
+          )}
         </div>
         <button
-          className={`primary-button buffer-button${demoRunning ? " stop-button" : ""}`}
+          className={`primary-button buffer-button${replayActive ? " stop-button" : ""}`}
           type="button"
-          aria-pressed={demoRunning}
-          onClick={() => setDemoRunning((running) => !running)}
+          aria-pressed={replayActive}
+          disabled={
+            replayCommandActive ||
+            replayStatus.state === "stopping" ||
+            (!replayActive && (!selectedTarget || encodersLoading || !replayEncoderAvailable))
+          }
+          onClick={replayActive ? stopReplayBuffer : startReplayBuffer}
         >
-          {demoRunning ? "Stop Replay Buffer" : "Start Replay Buffer"}
+          {replayStatus.state === "starting"
+            ? "Starting..."
+            : replayStatus.state === "stopping"
+              ? "Stopping..."
+              : replayActive
+                ? "Stop Replay Buffer"
+                : "Start Replay Buffer"}
         </button>
       </section>
 
@@ -436,41 +600,82 @@ export function ReplayPage() {
             <span className="section-note">Session only</span>
           </div>
 
-          <div className="setting-row setting-row-stacked">
-            <span className="setting-label">Capture Mode</span>
-            <div className="segmented-control" aria-label="Capture mode">
-              {captureModes.map((mode) => (
-                <button
-                  className={captureMode === mode ? "segment-active" : ""}
-                  type="button"
-                  aria-pressed={captureMode === mode}
-                  key={mode}
-                  onClick={() => setCaptureMode(mode)}
-                >
-                  {mode}
-                </button>
-              ))}
-            </div>
+          <div className="setting-row">
+            <span className="setting-label">Capture Target</span>
+            <span className="replay-setting-value">{selectedTargetLabel ?? "Select a target above"}</span>
           </div>
-
-          <SelectSetting label="Clip Length" value={clipLength} onChange={setClipLength} options={["30 Seconds", "1 Minute", "2 Minutes", "3 Minutes", "5 Minutes"]} />
-          <SelectSetting label="Resolution" value={resolution} onChange={setResolution} options={["720p", "1080p", "1440p"]} />
-          <SelectSetting label="Frame Rate" value={frameRate} onChange={setFrameRate} options={["30 FPS", "60 FPS"]} />
-          <SelectSetting label="Encoder" value={encoder} onChange={setEncoder} options={["NVIDIA NVENC AV1", "NVIDIA NVENC HEVC", "NVIDIA NVENC H.264", "Automatic"]} />
+          <label className="setting-row">
+            <span className="setting-label">Replay Duration</span>
+            <select
+              value={replayDuration}
+              disabled={replayActive}
+              onChange={(event) => setReplayDuration(Number(event.target.value))}
+            >
+              {replayDurationOptions.map((option) => (
+                <option value={option.value} key={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="setting-row">
+            <span className="setting-label">Frame Rate</span>
+            <select
+              value={frameRate}
+              disabled={replayActive}
+              onChange={(event) => setFrameRate(Number(event.target.value))}
+            >
+              <option value={30}>30 FPS</option>
+              <option value={60}>60 FPS</option>
+            </select>
+          </label>
+          <label className="setting-row">
+            <span className="setting-label">Encoder</span>
+            <select
+              value={replayEncoder}
+              disabled={replayActive || encodersLoading}
+              onChange={(event) => setReplayEncoder(event.target.value as Exclude<EncoderId, "av1">)}
+            >
+              <option value="automatic">Automatic</option>
+              <option value="hevc" disabled={!isEncoderAvailable(encoderCapabilities, "hevc")}>HEVC</option>
+              <option value="h264" disabled={!isEncoderAvailable(encoderCapabilities, "h264")}>H.264</option>
+            </select>
+          </label>
+          <p className="capture-config-note">
+            Stage 6 captures the target at its native dimensions. Video only; no audio is recorded.
+          </p>
         </section>
 
         <div className="replay-side-stack">
-          <section className="panel" aria-labelledby="audio-heading">
+          <section className="panel replay-diagnostics" aria-labelledby="diagnostics-heading">
             <div className="section-heading">
               <div>
-                <span className="eyebrow">MIX</span>
-                <h2 id="audio-heading">Audio Sources</h2>
+                <span className="eyebrow">DEVELOPER TELEMETRY</span>
+                <h2 id="diagnostics-heading">Segment Diagnostics</h2>
               </div>
             </div>
-            <ToggleSetting label="Game Audio" checked={audioSources.game} onChange={(value) => setAudioSource("game", value)} />
-            <ToggleSetting label="Discord" checked={audioSources.discord} onChange={(value) => setAudioSource("discord", value)} />
-            <ToggleSetting label="Microphone" checked={audioSources.microphone} onChange={(value) => setAudioSource("microphone", value)} />
-            <ToggleSetting label="Other Application" checked={audioSources.other} onChange={(value) => setAudioSource("other", value)} />
+            <dl className="diagnostic-grid">
+              <Diagnostic label="Expected segment" value={`${replayStatus.expectedSegmentDurationSeconds.toFixed(2)} s`} />
+              <Diagnostic label="Last segment" value={formatOptionalMetric(replayStatus.lastSegmentDurationSeconds, "s")} />
+              <Diagnostic label="Last rotation gap" value={formatOptionalMetric(replayStatus.lastRotationGapMs, "ms")} />
+              <Diagnostic label="Last finalize time" value={formatOptionalMetric(replayStatus.lastFinalizeTimeMs, "ms")} />
+              <Diagnostic label="Pending finalizations" value={String(replayStatus.pendingFinalizations)} />
+              <Diagnostic label="Dropped segments" value={String(replayStatus.droppedSegments)} />
+              <Diagnostic label="Video format" value={replayStatus.width ? `${replayStatus.width} × ${replayStatus.height} @ ${replayStatus.frameRate} FPS` : "—"} />
+              <Diagnostic label="Session" value={replayStatus.sessionId ?? "—"} />
+            </dl>
+            <div className="recent-segments">
+              <span className="setting-label">Recent finalized segments</span>
+              {replayStatus.recentSegments.length ? (
+                replayStatus.recentSegments.map((segment) => (
+                  <div className="recent-segment-row" key={segment.sequenceNumber}>
+                    <code>#{String(segment.sequenceNumber).padStart(6, "0")}</code>
+                    <span>{(segment.actualDurationMs / 1_000).toFixed(2)} s</span>
+                    <span>{formatBytes(segment.fileSize)}</span>
+                  </div>
+                ))
+              ) : (
+                <p>No finalized segments yet.</p>
+              )}
+            </div>
           </section>
 
           <section className="panel save-panel" aria-labelledby="save-heading">
@@ -480,17 +685,11 @@ export function ReplayPage() {
                 <h2 id="save-heading">Save Replay</h2>
               </div>
             </div>
-            <div className="hotkey-row">
-              <div>
-                <span className="setting-label">Replay Hotkey</span>
-                <kbd>Ctrl + Shift + F10</kbd>
-              </div>
-              <button className="secondary-button" type="button">Change</button>
-            </div>
-            <button className="save-replay-button" type="button" disabled title="Capture engine not connected">
+            <p className="save-stage-note">The rolling video segments stay temporary during this stage.</p>
+            <button className="save-replay-button" type="button" disabled title="Available in Stage 7">
               SAVE REPLAY
             </button>
-            <span className="disabled-reason">Capture engine not connected</span>
+            <span className="disabled-reason">Save Replay will be enabled in the next stage.</span>
           </section>
         </div>
       </div>
@@ -525,35 +724,55 @@ function formatEncoderId(encoder: EncoderId) {
   return labels[encoder];
 }
 
-type SelectSettingProps = {
-  label: string;
-  value: string;
-  options: string[];
-  onChange: (value: string) => void;
-};
-
-function SelectSetting({ label, value, options, onChange }: SelectSettingProps) {
-  return (
-    <label className="setting-row">
-      <span className="setting-label">{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
-        {options.map((option) => <option key={option}>{option}</option>)}
-      </select>
-    </label>
-  );
+function isReplayActive(state: ReplayLifecycleState) {
+  return state === "starting" || state === "running" || state === "stopping";
 }
 
-type ToggleSettingProps = {
-  label: string;
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-};
+function isEncoderAvailable(capabilities: EncoderCapabilitiesResult | null, id: EncoderId) {
+  return capabilities?.encoders.some((encoder) => encoder.id === id && encoder.available) ?? false;
+}
 
-function ToggleSetting({ label, checked, onChange }: ToggleSettingProps) {
+function getSelectedTargetLabel(
+  selected: SelectedTarget | null,
+  monitors: MonitorTarget[],
+  windows: WindowTarget[],
+) {
+  if (!selected) return null;
+  if (selected.targetType === "monitor") {
+    const monitor = monitors.find((target) => target.id === selected.id);
+    return monitor ? `Display ${monitor.displayIndex} - ${monitor.friendlyName}` : "Selected display";
+  }
+
+  const window = windows.find((target) => target.id === selected.id);
+  return window ? `${window.processName ?? `Process ${window.processId}`} - ${window.title}` : "Selected window";
+}
+
+function formatReplayState(state: ReplayLifecycleState) {
+  return state.charAt(0).toUpperCase() + state.slice(1);
+}
+
+function formatDuration(seconds: number) {
+  if (seconds < 60) return `${seconds} seconds`;
+  const minutes = seconds / 60;
+  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KB`;
+  if (bytes < 1_073_741_824) return `${(bytes / 1_048_576).toFixed(1)} MB`;
+  return `${(bytes / 1_073_741_824).toFixed(2)} GB`;
+}
+
+function formatOptionalMetric(value: number | null, unit: string) {
+  return value === null ? "—" : `${value.toFixed(2)} ${unit}`;
+}
+
+function Diagnostic({ label, value }: { label: string; value: string }) {
   return (
-    <div className="setting-row toggle-row">
-      <span className="setting-label">{label}</span>
-      <Toggle label={label} checked={checked} onChange={onChange} />
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
     </div>
   );
 }

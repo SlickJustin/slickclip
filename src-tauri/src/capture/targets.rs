@@ -58,7 +58,7 @@ pub enum CaptureTargetType {
     Window,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureTargetRequest {
     pub target_type: CaptureTargetType,
@@ -72,6 +72,7 @@ pub enum NativeCaptureTarget {
 
 pub struct ResolvedCaptureTarget {
     pub target: NativeCaptureTarget,
+    pub label: String,
     pub width: u32,
     pub height: u32,
 }
@@ -209,6 +210,8 @@ fn resolve_monitor(id: &str) -> Result<ResolvedCaptureTarget, String> {
             continue;
         }
 
+        let display_index = monitor.index().unwrap_or(1);
+        let friendly_name = monitor.name().unwrap_or_else(|_| device_name.clone());
         let width = monitor
             .width()
             .map_err(|error| format!("Could not read the selected display width: {error}"))?;
@@ -217,6 +220,7 @@ fn resolve_monitor(id: &str) -> Result<ResolvedCaptureTarget, String> {
             .map_err(|error| format!("Could not read the selected display height: {error}"))?;
         return Ok(ResolvedCaptureTarget {
             target: NativeCaptureTarget::Monitor(monitor),
+            label: format!("Display {display_index} - {friendly_name}"),
             width,
             height,
         });
@@ -240,6 +244,10 @@ fn resolve_window(id: &str) -> Result<ResolvedCaptureTarget, String> {
             continue;
         }
 
+        let title = window
+            .title()
+            .unwrap_or_else(|_| format!("Window owned by process {process_id}"));
+        let process_name = window.process_name().ok();
         let width = window
             .width()
             .map_err(|error| format!("Could not read the selected window width: {error}"))?;
@@ -248,6 +256,9 @@ fn resolve_window(id: &str) -> Result<ResolvedCaptureTarget, String> {
             .map_err(|error| format!("Could not read the selected window height: {error}"))?;
         return Ok(ResolvedCaptureTarget {
             target: NativeCaptureTarget::Window(window),
+            label: process_name
+                .map(|name| format!("{name} - {title}"))
+                .unwrap_or(title),
             width: positive_dimension(width, "width")?,
             height: positive_dimension(height, "height")?,
         });

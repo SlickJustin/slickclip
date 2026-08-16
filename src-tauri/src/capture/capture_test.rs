@@ -307,6 +307,7 @@ fn capture_five_second_test(
         target,
         width,
         height,
+        ..
     } = resolve_target(target_request).map_err(CaptureFailure::before_permission)?;
     let width = even_dimension(width).map_err(CaptureFailure::before_permission)?;
     let height = even_dimension(height).map_err(CaptureFailure::before_permission)?;
@@ -468,6 +469,10 @@ fn request_borderless_access() -> Result<(), BorderlessFailure> {
         message: message.to_string(),
         bordered_capture_available,
     })
+}
+
+pub(crate) fn ensure_borderless_capture_access() -> Result<(), String> {
+    request_borderless_access().map_err(|failure| failure.message)
 }
 
 fn reserve_output_path(output_dir: &Path) -> Result<PathBuf, String> {
