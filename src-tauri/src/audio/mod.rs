@@ -11,11 +11,20 @@ mod wave_format;
 use tauri::State;
 
 pub use capture_test::AudioCaptureTestManager;
+pub(crate) use capture_test::{
+    initialize_capture_client, initialize_process_loopback_client, InitializedAudioClient,
+};
+pub(crate) use microphone::activate_microphone;
+pub(crate) use platform::{ComApartment, OwnedHandle};
+pub(crate) use sessions::resolve_process_metadata;
 use types::{
-    ApplicationAudioListResult, AudioCaptureCommandResult, AudioCaptureStatus, AudioError,
-    AudioErrorCode, MicrophoneListResult, ProcessActivationProbeResult, ProcessLoopbackCapability,
+    ApplicationAudioListResult, AudioCaptureCommandResult, AudioCaptureStatus,
+    MicrophoneListResult, ProcessActivationProbeResult, ProcessLoopbackCapability,
     PROCESS_LOOPBACK_MINIMUM_BUILD,
 };
+pub(crate) use types::{AudioError, AudioErrorCode, AudioFormatMetadata};
+pub(crate) use wav::WavWriter;
+pub(crate) use wave_format::CaptureWaveFormat;
 
 #[tauri::command]
 pub async fn list_audio_microphones() -> MicrophoneListResult {

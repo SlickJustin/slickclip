@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use super::audio::AudioReplayStatus;
 use super::segment::CompletedSegment;
 
 #[derive(Clone, Default, Serialize)]
@@ -111,6 +112,7 @@ pub struct ReplayBufferStatus {
     pub frame_pool_buffer_count: u32,
     pub rotation_lifecycle: RotationLifecycleTrace,
     pub recent_segments: Vec<CompletedSegment>,
+    pub audio: AudioReplayStatus,
 }
 
 #[derive(Serialize)]

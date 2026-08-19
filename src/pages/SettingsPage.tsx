@@ -39,10 +39,6 @@ export function SettingsPage() {
   const [hotkeyPending, setHotkeyPending] = useState(false);
   const [hotkeyMessage, setHotkeyMessage] = useState<{ text: string; success: boolean } | null>(null);
   const [toggles, setToggles] = useState({
-    game: true,
-    discord: true,
-    microphone: true,
-    other: false,
     windowsStartup: false,
     bufferStartup: false,
     desktopPrivacy: true,
@@ -179,13 +175,6 @@ export function SettingsPage() {
               {hotkeyMessage?.text ?? hotkey.lastRegistrationError}
             </span>
           )}
-        </SettingsSection>
-
-        <SettingsSection title="Audio">
-          <SettingsToggle label="Game Audio" checked={toggles.game} onChange={(value) => updateToggle("game", value)} />
-          <SettingsToggle label="Discord" checked={toggles.discord} onChange={(value) => updateToggle("discord", value)} />
-          <SettingsToggle label="Microphone" checked={toggles.microphone} onChange={(value) => updateToggle("microphone", value)} />
-          <SettingsToggle label="Other Application" checked={toggles.other} onChange={(value) => updateToggle("other", value)} />
         </SettingsSection>
 
         <SettingsSection title="Audio Capture Test">

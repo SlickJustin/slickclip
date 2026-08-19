@@ -5,7 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::replay::{ReplayBufferManager, ReplayLifecycleState, ReplaySaveSnapshot};
+use crate::replay::{
+    AudioSnapshotPlan, ReplayBufferManager, ReplayLifecycleState, ReplaySaveSnapshot,
+    SavedReplayTimeline,
+};
 
 use super::assembler::{ClipAssembler, FfmpegClipAssembler};
 
@@ -44,6 +47,11 @@ pub struct SaveReplayStatus {
     pub file_size: Option<u64>,
     pub codec: Option<String>,
     pub error_message: Option<String>,
+    pub audio_snapshot_plans: Vec<AudioSnapshotPlan>,
+    pub video_timeline: Option<SavedReplayTimeline>,
+    pub internal_encoded_duration_seconds: Option<f64>,
+    pub ffprobe_duration_seconds: Option<f64>,
+    pub internal_ffprobe_difference_ms: Option<f64>,
 }
 
 impl SaveReplayStatus {
@@ -61,6 +69,11 @@ impl SaveReplayStatus {
             file_size: None,
             codec: None,
             error_message: None,
+            audio_snapshot_plans: Vec::new(),
+            video_timeline: None,
+            internal_encoded_duration_seconds: None,
+            ffprobe_duration_seconds: None,
+            internal_ffprobe_difference_ms: None,
         }
     }
 }
@@ -126,6 +139,11 @@ impl SharedSaveJob {
             file_size: None,
             codec: None,
             error_message: None,
+            audio_snapshot_plans: Vec::new(),
+            video_timeline: None,
+            internal_encoded_duration_seconds: None,
+            ffprobe_duration_seconds: None,
+            internal_ffprobe_difference_ms: None,
         };
     }
 
@@ -143,13 +161,8 @@ impl SharedSaveJob {
             .iter()
             .map(|segment| segment.sequence_number)
             .collect();
-        status.actual_saved_duration_seconds = Some(
-            snapshot
-                .segments
-                .iter()
-                .map(|segment| segment.actual_duration_ms as f64 / 1_000.0)
-                .sum(),
-        );
+        status.actual_saved_duration_seconds =
+            Some(snapshot.video_timeline.clip_playback_duration_100ns as f64 / 10_000_000.0);
         status.actual_earliest_timestamp_ms = snapshot
             .segments
             .first()
@@ -162,6 +175,10 @@ impl SharedSaveJob {
             .segments
             .first()
             .map(|segment| segment.codec.clone());
+        status.audio_snapshot_plans = snapshot.audio_snapshot_plans.clone();
+        status.video_timeline = Some(snapshot.video_timeline.clone());
+        status.internal_encoded_duration_seconds =
+            Some(snapshot.video_timeline.clip_playback_duration_100ns as f64 / 10_000_000.0);
     }
 
     fn complete(&self, result: super::assembler::ClipAssemblyResult) {
@@ -173,6 +190,9 @@ impl SharedSaveJob {
         status.output_path = Some(result.output_path.to_string_lossy().into_owned());
         status.file_size = Some(result.file_size);
         status.codec = Some(result.codec);
+        status.internal_encoded_duration_seconds = Some(result.internal_encoded_duration_seconds);
+        status.ffprobe_duration_seconds = result.ffprobe_duration_seconds;
+        status.internal_ffprobe_difference_ms = result.internal_ffprobe_difference_ms;
         status.error_message = None;
     }
 

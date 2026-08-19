@@ -90,9 +90,12 @@ impl FfmpegExecutable {
             .map_err(|error| format!("Could not launch FFmpeg: {error}"))
     }
 
-    pub fn validate_packet_timeline_if_available(&self, output_path: &Path) -> Result<(), String> {
+    pub fn validate_packet_timeline_if_available(
+        &self,
+        output_path: &Path,
+    ) -> Result<Option<f64>, String> {
         let Some(ffprobe) = self.resolve_ffprobe() else {
-            return Ok(());
+            return Ok(None);
         };
         let mut command = Command::new(ffprobe);
         command
@@ -127,7 +130,7 @@ impl FfmpegExecutable {
 
         let report: ProbeReport = serde_json::from_slice(&output.stdout)
             .map_err(|error| format!("Could not parse ffprobe timeline validation: {error}"))?;
-        validate_probe_report(&report)
+        validate_probe_report(&report).map(Some)
     }
 
     fn resolve_ffprobe(&self) -> Option<OsString> {
@@ -186,7 +189,7 @@ struct ProbePacket {
     duration_time: Option<String>,
 }
 
-fn validate_probe_report(report: &ProbeReport) -> Result<(), String> {
+fn validate_probe_report(report: &ProbeReport) -> Result<f64, String> {
     let Some(stream) = report.streams.first() else {
         return Err("The assembled replay has no video stream.".to_string());
     };
@@ -243,7 +246,7 @@ fn validate_probe_report(report: &ProbeReport) -> Result<(), String> {
         };
     }
 
-    Ok(())
+    Ok(duration)
 }
 
 fn parse_probe_number(value: &str) -> Option<f64> {

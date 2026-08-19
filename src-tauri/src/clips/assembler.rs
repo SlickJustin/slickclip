@@ -13,6 +13,9 @@ pub struct ClipAssemblyResult {
     pub earliest_timestamp_ms: u64,
     pub latest_timestamp_ms: u64,
     pub codec: String,
+    pub internal_encoded_duration_seconds: f64,
+    pub ffprobe_duration_seconds: Option<f64>,
+    pub internal_ffprobe_difference_ms: Option<f64>,
 }
 
 pub trait ClipAssembler {
@@ -60,7 +63,8 @@ impl ClipAssembler for FfmpegClipAssembler {
                 });
             }
 
-            ffmpeg.validate_packet_timeline_if_available(&paths.partial)?;
+            let ffprobe_duration_seconds =
+                ffmpeg.validate_packet_timeline_if_available(&paths.partial)?;
 
             let partial_metadata = fs::metadata(&paths.partial).map_err(|error| {
                 format!(
@@ -94,16 +98,33 @@ impl ClipAssembler for FfmpegClipAssembler {
 
             let first = &segments[0];
             let last = &segments[segments.len() - 1];
+            let internal_encoded_duration_seconds = segments
+                .iter()
+                .map(|segment| segment.encoded_duration_100ns as f64 / 10_000_000.0)
+                .sum::<f64>();
+            let internal_ffprobe_difference_ms = ffprobe_duration_seconds
+                .map(|duration| (internal_encoded_duration_seconds - duration) * 1_000.0);
+            #[cfg(debug_assertions)]
+            if let Some(difference_ms) = internal_ffprobe_difference_ms {
+                let tolerance_ms = (2_000.0 / f64::from(first.frame_rate.max(1))).max(50.0);
+                if difference_ms.abs() > tolerance_ms {
+                    return Err(format!(
+                        "Internal encoded duration ({internal_encoded_duration_seconds:.6} s) differs from ffprobe ({:.6} s) by {difference_ms:.3} ms, beyond the {tolerance_ms:.3} ms development tolerance.",
+                        ffprobe_duration_seconds.unwrap_or_default()
+                    ));
+                }
+            }
             Ok(ClipAssemblyResult {
                 output_path: paths.final_path.clone(),
                 file_size: final_size,
-                actual_duration_seconds: segments
-                    .iter()
-                    .map(|segment| segment.actual_duration_ms as f64 / 1_000.0)
-                    .sum(),
+                actual_duration_seconds: ffprobe_duration_seconds
+                    .unwrap_or(internal_encoded_duration_seconds),
                 earliest_timestamp_ms: first.start_timestamp_ms,
                 latest_timestamp_ms: last.end_timestamp_ms,
                 codec: first.codec.clone(),
+                internal_encoded_duration_seconds,
+                ffprobe_duration_seconds,
+                internal_ffprobe_difference_ms,
             })
         })();
 
@@ -254,6 +275,17 @@ mod tests {
             actual_duration_ms: 2_000,
             first_frame_timestamp_100ns: 0,
             last_frame_timestamp_100ns: 20_000_000,
+            encoded_start_pts_100ns: 0,
+            encoded_last_frame_pts_100ns: 19_833_334,
+            encoded_end_pts_100ns: 20_000_000,
+            encoded_duration_100ns: 20_000_000,
+            encoded_time_base_numerator: 1,
+            encoded_time_base_denominator: 10_000_000,
+            frame_timing_points: vec![crate::replay::segment::VideoFrameTimingPoint {
+                frame_index: 0,
+                source_qpc_100ns: 0,
+                encoded_pts_100ns: 0,
+            }],
             next_segment_first_frame_timestamp_100ns: None,
             source_frame_gap_ms: None,
             frame_count: 120,

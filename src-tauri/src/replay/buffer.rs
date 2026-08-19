@@ -29,10 +29,15 @@ use crate::capture::targets::{
 };
 use crate::capture::WGC_FRAME_POOL_BUFFER_COUNT;
 
-use super::segment::{CompletedSegment, SegmentRing};
+use super::audio::{
+    AudioReplayConfiguration, AudioReplaySession, AudioReplayShared, AudioSnapshotPinGuard,
+    AudioSnapshotPlan, ReplaySessionClock,
+};
+use super::segment::{CompletedSegment, SegmentRing, VideoFrameTimingPoint};
 use super::state::{
     ReplayBufferStatus, ReplayCommandResult, ReplayLifecycleState, RotationLifecycleTrace,
 };
+use super::timeline::SavedReplayTimeline;
 
 pub const SEGMENT_DURATION: Duration = Duration::from_secs(2);
 const RECENT_SEGMENT_LIMIT: usize = 5;
@@ -176,13 +181,18 @@ pub struct ReplayBufferStartRequest {
     pub encoder: EncoderChoice,
     pub replay_duration_seconds: u32,
     pub frame_rate: u32,
+    #[serde(default)]
+    pub audio: AudioReplayConfiguration,
 }
 
 pub struct ReplaySaveSnapshot {
     pub save_request_timestamp_ms: u64,
     pub requested_duration_seconds: u32,
     pub segments: Vec<CompletedSegment>,
+    pub video_timeline: SavedReplayTimeline,
+    pub audio_snapshot_plans: Vec<AudioSnapshotPlan>,
     _pins: SegmentPinGuard,
+    _audio_pins: AudioSnapshotPinGuard,
 }
 
 struct SegmentPinGuard {
@@ -283,6 +293,7 @@ impl ReplayInner {
         &self,
         frames_observed: u64,
         callback_telemetry: &ReplayCallbackTelemetry,
+        audio: super::audio::AudioReplayStatus,
     ) -> ReplayBufferStatus {
         let (average_callback_duration_ms, worst_callback_duration_ms) =
             callback_telemetry.callback.snapshot();
@@ -393,6 +404,7 @@ impl ReplayInner {
             frame_pool_buffer_count: WGC_FRAME_POOL_BUFFER_COUNT,
             rotation_lifecycle: self.rotation_lifecycle.clone(),
             recent_segments: self.ring.recent(RECENT_SEGMENT_LIMIT),
+            audio,
         }
     }
 }
@@ -403,6 +415,7 @@ struct SharedReplay {
     stop_requested: AtomicBool,
     frames_observed: AtomicU64,
     callback_telemetry: ReplayCallbackTelemetry,
+    audio: Arc<AudioReplayShared>,
 }
 
 impl SharedReplay {
@@ -413,6 +426,7 @@ impl SharedReplay {
             stop_requested: AtomicBool::new(false),
             frames_observed: AtomicU64::new(0),
             callback_telemetry: ReplayCallbackTelemetry::default(),
+            audio: Arc::new(AudioReplayShared::new()),
         }
     }
 
@@ -431,13 +445,16 @@ impl SharedReplay {
     }
 
     fn snapshot(&self) -> ReplayBufferStatus {
+        let audio = self.audio.snapshot();
         self.lock().snapshot(
             self.frames_observed.load(Ordering::Relaxed),
             &self.callback_telemetry,
+            audio,
         )
     }
 
     fn begin(&self, request: &ReplayBufferStartRequest) {
+        self.audio.reset();
         self.stop_requested.store(false, Ordering::Release);
         self.frames_observed.store(0, Ordering::Relaxed);
         self.callback_telemetry.reset();
@@ -799,14 +816,24 @@ impl SharedReplay {
             (segments, requested_duration_seconds, sequence_numbers)
         };
 
+        let video_timeline = SavedReplayTimeline::from_segments(&segments)?;
+        debug_assert_eq!(
+            video_timeline.video_pts_to_clip_100ns(segments[0].sequence_number, 0),
+            Some(0)
+        );
+        let (audio_snapshot_plans, audio_pins) = self.audio.plan_and_pin(&video_timeline);
+
         Ok(ReplaySaveSnapshot {
             save_request_timestamp_ms,
             requested_duration_seconds,
             segments,
+            video_timeline,
+            audio_snapshot_plans,
             _pins: SegmentPinGuard {
                 shared: Arc::clone(self),
                 sequence_numbers,
             },
+            _audio_pins: audio_pins,
         })
     }
 
@@ -968,6 +995,12 @@ impl ReplayBufferManager {
             }
         }
 
+        if self.status().state == ReplayLifecycleState::Stopped && !self.shared.has_pins() {
+            if let Err(error) = cleanup_session_directories(&self.root) {
+                self.shared.mark_error(error);
+            }
+        }
+
         let status = self.status();
         if status.state == ReplayLifecycleState::Stopped {
             ReplayCommandResult::success(status)
@@ -1010,6 +1043,7 @@ impl ReplayBufferManager {
 }
 
 fn validate_start_request(request: &ReplayBufferStartRequest) -> Result<(), String> {
+    request.audio.validate()?;
     if !ALLOWED_REPLAY_DURATIONS.contains(&request.replay_duration_seconds) {
         return Err(format!(
             "Replay duration must be one of 30, 60, 120, 180, or 300 seconds; received {}.",
@@ -1037,6 +1071,7 @@ fn run_replay_session(
     root: &Path,
     request: ReplayBufferStartRequest,
 ) -> Result<(), String> {
+    let session_clock = ReplaySessionClock::create()?;
     let resolved_encoder = resolve_encoder(request.encoder)?;
     let ResolvedCaptureTarget {
         target,
@@ -1064,6 +1099,16 @@ fn run_replay_session(
         session_directory.clone(),
     );
 
+    shared.audio.begin(
+        &request.audio,
+        session_clock.clone(),
+        session_directory.clone(),
+        request.replay_duration_seconds,
+    )?;
+    let mut audio_session =
+        AudioReplaySession::prepare(shared.audio.enabled_tracks(), session_clock.clone())?;
+    audio_session.start()?;
+
     let flags = ReplayCaptureFlags {
         shared: Arc::clone(&shared),
         session_directory,
@@ -1071,11 +1116,13 @@ fn run_replay_session(
         width,
         height,
         frame_rate: request.frame_rate,
+        session_started: session_clock.started,
     };
     let capture_result = match target {
         NativeCaptureTarget::Monitor(monitor) => start_target_capture(monitor, flags),
         NativeCaptureTarget::Window(window) => start_target_capture(window, flags),
     };
+    audio_session.stop_and_wait();
 
     match capture_result {
         Ok(()) => {
@@ -1094,6 +1141,7 @@ struct ReplayCaptureFlags {
     width: u32,
     height: u32,
     frame_rate: u32,
+    session_started: Instant,
 }
 
 struct ActiveSegment {
@@ -1110,6 +1158,7 @@ struct ActiveSegment {
     encoder_creation_completed_ms: f64,
     first_frame_submitted_ms: Option<f64>,
     last_frame_submitted_ms: Option<f64>,
+    frame_timing_points: Vec<VideoFrameTimingPoint>,
 }
 
 struct FrameEncodeResult {
@@ -1153,6 +1202,7 @@ impl ActiveSegment {
             encoder_creation_completed_ms,
             first_frame_submitted_ms: None,
             last_frame_submitted_ms: None,
+            frame_timing_points: Vec::new(),
         })
     }
 
@@ -1180,6 +1230,7 @@ impl ActiveSegment {
         &mut self,
         frame: &mut Frame<'_>,
         session_started: Instant,
+        frame_rate: u32,
     ) -> Result<FrameEncodeResult, String> {
         let timestamp = frame
             .timestamp()
@@ -1193,6 +1244,13 @@ impl ActiveSegment {
         let send_duration = send_started.elapsed();
         let submitted_ms = session_started.elapsed().as_secs_f64() * 1_000.0;
 
+        if !encoded.telemetry.queued {
+            return Ok(FrameEncodeResult {
+                send_duration,
+                telemetry: encoded.telemetry,
+            });
+        }
+
         if self.first_frame_instant.is_none() {
             self.first_frame_instant = Some(Instant::now());
             self.first_frame_timestamp = Some(timestamp);
@@ -1201,6 +1259,13 @@ impl ActiveSegment {
         }
         self.last_frame_timestamp = Some(timestamp);
         self.last_frame_submitted_ms = Some(submitted_ms);
+        let encoded_pts_100ns =
+            ((i128::from(self.frame_count) * 10_000_000) / i128::from(frame_rate.max(1))) as i64;
+        self.frame_timing_points.push(VideoFrameTimingPoint {
+            frame_index: self.frame_count,
+            source_qpc_100ns: timestamp,
+            encoded_pts_100ns,
+        });
         self.frame_count += 1;
         Ok(FrameEncodeResult {
             send_duration,
@@ -1213,11 +1278,8 @@ impl ActiveSegment {
         flags: &ReplayCaptureFlags,
         boundary: Option<SegmentBoundaryTiming>,
     ) -> FinalizeJob {
-        let frame_duration_100ns = 10_000_000 / i64::from(flags.frame_rate);
-        let actual_duration_100ns = match (self.first_frame_timestamp, self.last_frame_timestamp) {
-            (Some(first), Some(last)) => last.saturating_sub(first) + frame_duration_100ns,
-            _ => 0,
-        };
+        let actual_duration_100ns = ((i128::from(self.frame_count) * 10_000_000)
+            / i128::from(flags.frame_rate.max(1))) as i64;
         let actual_duration_ms = u64::try_from(actual_duration_100ns.max(0) / 10_000)
             .unwrap_or(0)
             .max(1);
@@ -1230,6 +1292,14 @@ impl ActiveSegment {
             start_timestamp_ms,
             end_timestamp_ms: unix_timestamp_ms(),
             actual_duration_ms,
+            encoded_start_pts_100ns: 0,
+            encoded_last_frame_pts_100ns: self
+                .frame_timing_points
+                .last()
+                .map(|point| point.encoded_pts_100ns)
+                .unwrap_or(0),
+            encoded_end_pts_100ns: actual_duration_100ns,
+            encoded_duration_100ns: actual_duration_100ns,
             codec: flags.codec,
             width: flags.width,
             height: flags.height,
@@ -1253,6 +1323,7 @@ impl ActiveSegment {
             next_first_frame_submitted_ms: boundary
                 .as_ref()
                 .map(|timing| timing.next_first_frame_submitted_ms),
+            frame_timing_points: self.frame_timing_points,
         }
     }
 }
@@ -1272,6 +1343,10 @@ struct FinalizeJob {
     start_timestamp_ms: u64,
     end_timestamp_ms: u64,
     actual_duration_ms: u64,
+    encoded_start_pts_100ns: i64,
+    encoded_last_frame_pts_100ns: i64,
+    encoded_end_pts_100ns: i64,
+    encoded_duration_100ns: i64,
     codec: EncoderCodec,
     width: u32,
     height: u32,
@@ -1289,6 +1364,7 @@ struct FinalizeJob {
     first_frame_submitted_ms: Option<f64>,
     last_frame_submitted_ms: Option<f64>,
     next_first_frame_submitted_ms: Option<f64>,
+    frame_timing_points: Vec<VideoFrameTimingPoint>,
 }
 
 struct FinalizerWorker {
@@ -1406,6 +1482,13 @@ fn finalize_segments(receiver: mpsc::Receiver<FinalizeJob>, shared: Arc<SharedRe
             actual_duration_ms: job.actual_duration_ms,
             first_frame_timestamp_100ns: job.first_frame_timestamp_100ns,
             last_frame_timestamp_100ns: job.last_frame_timestamp_100ns,
+            encoded_start_pts_100ns: job.encoded_start_pts_100ns,
+            encoded_last_frame_pts_100ns: job.encoded_last_frame_pts_100ns,
+            encoded_end_pts_100ns: job.encoded_end_pts_100ns,
+            encoded_duration_100ns: job.encoded_duration_100ns,
+            encoded_time_base_numerator: 1,
+            encoded_time_base_denominator: 10_000_000,
+            frame_timing_points: job.frame_timing_points,
             next_segment_first_frame_timestamp_100ns: job.next_segment_first_frame_timestamp_100ns,
             source_frame_gap_ms: job.source_frame_gap_ms,
             frame_count: job.frame_count,
@@ -1638,7 +1721,7 @@ impl ReplayCaptureHandler {
         &mut self,
         frame: &mut Frame<'_>,
         phases: &mut CallbackPhaseDurations,
-    ) -> Result<u64, ReplayHandlerError> {
+    ) -> Result<Option<u64>, ReplayHandlerError> {
         self.rotation_lifecycle.swap_started_ms = Some(self.elapsed_ms());
         let mut next = self
             .prepared
@@ -1650,7 +1733,7 @@ impl ReplayCaptureHandler {
             .and_then(|segment| segment.last_frame_timestamp)
             .ok_or_else(|| ReplayHandlerError::new("The active replay segment has no frames."))?;
         let encoded = next
-            .encode_frame(frame, self.session_started)
+            .encode_frame(frame, self.session_started, self.flags.frame_rate)
             .map_err(ReplayHandlerError::new)?;
         self.flags
             .shared
@@ -1660,6 +1743,10 @@ impl ReplayCaptureHandler {
             .shared
             .callback_telemetry
             .record_encoder_frame(encoded.telemetry);
+        if !encoded.telemetry.queued {
+            self.prepared = Some(next);
+            return Ok(None);
+        }
         let next_first_timestamp = next.first_frame_timestamp.ok_or_else(|| {
             ReplayHandlerError::new("The prepared encoder did not accept its first frame.")
         })?;
@@ -1709,7 +1796,7 @@ impl ReplayCaptureHandler {
         self.publish_lifecycle(phases);
         self.awaiting_following_frame = true;
         self.rotation_requested_ms = None;
-        Ok(previous_sequence_number)
+        Ok(Some(previous_sequence_number))
     }
 
     fn process_frame(
@@ -1747,7 +1834,9 @@ impl ReplayCaptureHandler {
                 let swap_started = Instant::now();
                 let sequence_number = self.rotate_on_frame(frame, phases)?;
                 phases.swap += swap_started.elapsed();
-                if let Some(request_id) = save_rotation_due {
+                if let (Some(request_id), Some(sequence_number)) =
+                    (save_rotation_due, sequence_number)
+                {
                     let state_started = Instant::now();
                     self.flags
                         .shared
@@ -1770,7 +1859,7 @@ impl ReplayCaptureHandler {
             .active
             .as_mut()
             .ok_or_else(|| ReplayHandlerError::new("The active replay segment is missing."))?
-            .encode_frame(frame, self.session_started)
+            .encode_frame(frame, self.session_started, self.flags.frame_rate)
             .map_err(ReplayHandlerError::new)?;
         self.flags
             .shared
@@ -1856,7 +1945,7 @@ impl GraphicsCaptureApiHandler for ReplayCaptureHandler {
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         ensure_borderless_capture_access().map_err(ReplayHandlerError::new)?;
-        let session_started = Instant::now();
+        let session_started = ctx.flags.session_started;
         let finalizer =
             FinalizerWorker::new(Arc::clone(&ctx.flags.shared)).map_err(ReplayHandlerError::new)?;
         let active = ActiveSegment::create(&ctx.flags, 1, session_started)
@@ -2024,8 +2113,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        calculate_rotation_diagnostics, validate_start_request, ReplayBufferStartRequest,
-        SharedReplay,
+        calculate_rotation_diagnostics, validate_start_request, AudioReplayConfiguration,
+        ReplayBufferStartRequest, SharedReplay, VideoFrameTimingPoint,
     };
     use crate::capture::encoder::{EncoderChoice, EncoderCodec};
     use crate::capture::targets::{CaptureTargetRequest, CaptureTargetType};
@@ -2041,10 +2130,18 @@ mod tests {
             encoder: EncoderChoice::Automatic,
             replay_duration_seconds: duration,
             frame_rate,
+            audio: AudioReplayConfiguration::default(),
         }
     }
 
     fn completed_segment(path: &Path, sequence_number: u64) -> CompletedSegment {
+        let frame_timing_points = (0..120)
+            .map(|frame_index| VideoFrameTimingPoint {
+                frame_index,
+                source_qpc_100ns: ((i128::from(frame_index) * 20_000_000) / 120) as i64,
+                encoded_pts_100ns: ((i128::from(frame_index) * 20_000_000) / 120) as i64,
+            })
+            .collect::<Vec<_>>();
         CompletedSegment {
             sequence_number,
             file_path: path.to_string_lossy().into_owned(),
@@ -2052,7 +2149,14 @@ mod tests {
             end_timestamp_ms: (sequence_number + 1) * 2_000,
             actual_duration_ms: 2_000,
             first_frame_timestamp_100ns: 0,
-            last_frame_timestamp_100ns: 20_000_000,
+            last_frame_timestamp_100ns: 19_833_333,
+            encoded_start_pts_100ns: 0,
+            encoded_last_frame_pts_100ns: 19_833_334,
+            encoded_end_pts_100ns: 20_000_000,
+            encoded_duration_100ns: 20_000_000,
+            encoded_time_base_numerator: 1,
+            encoded_time_base_denominator: 10_000_000,
+            frame_timing_points,
             next_segment_first_frame_timestamp_100ns: None,
             source_frame_gap_ms: None,
             frame_count: 120,

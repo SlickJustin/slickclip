@@ -66,6 +66,7 @@ impl ProcessClientFormatCandidate {
     }
 }
 
+#[derive(Clone)]
 pub struct CaptureWaveFormat {
     pub bytes: Vec<u8>,
     pub metadata: AudioFormatMetadata,

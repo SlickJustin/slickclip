@@ -3,6 +3,14 @@ use std::collections::VecDeque;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VideoFrameTimingPoint {
+    pub frame_index: u64,
+    pub source_qpc_100ns: i64,
+    pub encoded_pts_100ns: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CompletedSegment {
     pub sequence_number: u64,
     pub file_path: String,
@@ -11,6 +19,13 @@ pub struct CompletedSegment {
     pub actual_duration_ms: u64,
     pub first_frame_timestamp_100ns: i64,
     pub last_frame_timestamp_100ns: i64,
+    pub encoded_start_pts_100ns: i64,
+    pub encoded_last_frame_pts_100ns: i64,
+    pub encoded_end_pts_100ns: i64,
+    pub encoded_duration_100ns: i64,
+    pub encoded_time_base_numerator: u32,
+    pub encoded_time_base_denominator: u32,
+    pub frame_timing_points: Vec<VideoFrameTimingPoint>,
     pub next_segment_first_frame_timestamp_100ns: Option<i64>,
     pub source_frame_gap_ms: Option<f64>,
     pub frame_count: u64,
@@ -32,14 +47,14 @@ pub struct CompletedSegment {
 }
 
 pub struct SegmentRing {
-    replay_window_ms: u64,
+    replay_window_100ns: i64,
     segments: VecDeque<CompletedSegment>,
 }
 
 impl SegmentRing {
     pub fn new(replay_window_seconds: u32) -> Self {
         Self {
-            replay_window_ms: u64::from(replay_window_seconds) * 1_000,
+            replay_window_100ns: i64::from(replay_window_seconds) * 10_000_000,
             segments: VecDeque::new(),
         }
     }
@@ -53,9 +68,9 @@ impl SegmentRing {
                 break;
             };
             let remaining_duration = self
-                .total_duration_ms()
-                .saturating_sub(front.actual_duration_ms);
-            if remaining_duration < self.replay_window_ms {
+                .total_duration_100ns()
+                .saturating_sub(front.encoded_duration_100ns);
+            if remaining_duration < self.replay_window_100ns {
                 break;
             }
 
@@ -72,10 +87,14 @@ impl SegmentRing {
     }
 
     pub fn total_duration_ms(&self) -> u64 {
+        u64::try_from(self.total_duration_100ns().max(0) / 10_000).unwrap_or(u64::MAX)
+    }
+
+    pub fn total_duration_100ns(&self) -> i64 {
         self.segments
             .iter()
-            .map(|segment| segment.actual_duration_ms)
-            .sum()
+            .map(|segment| segment.encoded_duration_100ns)
+            .fold(0i64, i64::saturating_add)
     }
 
     pub fn total_bytes(&self) -> u64 {
@@ -98,7 +117,10 @@ impl SegmentRing {
         requested_duration_ms: u64,
     ) -> Vec<CompletedSegment> {
         let mut selected = Vec::new();
-        let mut duration_ms = 0_u64;
+        let mut duration_100ns = 0_i64;
+        let requested_duration_100ns = i64::try_from(requested_duration_ms)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(10_000);
 
         for segment in self
             .segments
@@ -107,8 +129,8 @@ impl SegmentRing {
             .filter(|segment| segment.sequence_number <= final_sequence_number)
         {
             selected.push(segment.clone());
-            duration_ms = duration_ms.saturating_add(segment.actual_duration_ms);
-            if duration_ms >= requested_duration_ms {
+            duration_100ns = duration_100ns.saturating_add(segment.encoded_duration_100ns);
+            if duration_100ns >= requested_duration_100ns {
                 break;
             }
         }
@@ -120,7 +142,7 @@ impl SegmentRing {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompletedSegment, SegmentRing};
+    use super::{CompletedSegment, SegmentRing, VideoFrameTimingPoint};
 
     fn segment(sequence_number: u64, duration_ms: u64) -> CompletedSegment {
         CompletedSegment {
@@ -131,6 +153,17 @@ mod tests {
             actual_duration_ms: duration_ms,
             first_frame_timestamp_100ns: 0,
             last_frame_timestamp_100ns: i64::try_from(duration_ms * 10_000).unwrap(),
+            encoded_start_pts_100ns: 0,
+            encoded_last_frame_pts_100ns: i64::try_from(duration_ms * 10_000).unwrap(),
+            encoded_end_pts_100ns: i64::try_from(duration_ms * 10_000).unwrap(),
+            encoded_duration_100ns: i64::try_from(duration_ms * 10_000).unwrap(),
+            encoded_time_base_numerator: 1,
+            encoded_time_base_denominator: 10_000_000,
+            frame_timing_points: vec![VideoFrameTimingPoint {
+                frame_index: 0,
+                source_qpc_100ns: 0,
+                encoded_pts_100ns: 0,
+            }],
             next_segment_first_frame_timestamp_100ns: None,
             source_frame_gap_ms: None,
             frame_count: duration_ms / 16,

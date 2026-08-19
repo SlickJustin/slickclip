@@ -1,12 +1,16 @@
+mod audio;
 mod buffer;
-mod segment;
+pub(crate) mod segment;
 mod state;
+mod timeline;
 
 use tauri::State;
 
+pub use audio::AudioSnapshotPlan;
 pub use buffer::{ReplayBufferManager, ReplayBufferStartRequest, ReplaySaveSnapshot};
 pub use segment::CompletedSegment;
 pub use state::{ReplayBufferStatus, ReplayCommandResult, ReplayLifecycleState};
+pub use timeline::SavedReplayTimeline;
 
 #[tauri::command]
 pub async fn start_replay_buffer(

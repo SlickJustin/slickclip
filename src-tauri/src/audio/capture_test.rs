@@ -506,13 +506,13 @@ fn run_capture_test_inner(
     })
 }
 
-struct InitializedAudioClient {
-    audio_client: IAudioClient,
-    format: CaptureWaveFormat,
-    format_diagnostics: Option<AudioFormatDiagnostics>,
+pub(crate) struct InitializedAudioClient {
+    pub(crate) audio_client: IAudioClient,
+    pub(crate) format: CaptureWaveFormat,
+    pub(crate) format_diagnostics: Option<AudioFormatDiagnostics>,
 }
 
-fn initialize_capture_client(
+pub(crate) fn initialize_capture_client(
     audio_client: &IAudioClient,
     stream_flags: u32,
     format: &CaptureWaveFormat,
@@ -532,7 +532,7 @@ fn initialize_capture_client(
     }
 }
 
-fn initialize_process_loopback_client(
+pub(crate) fn initialize_process_loopback_client(
     process_id: u32,
 ) -> Result<InitializedAudioClient, AudioError> {
     let first_client = activate_process_loopback(process_id)?;

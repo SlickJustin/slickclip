@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { Toggle } from "../components/Toggle";
 
 type CaptureTestResult = {
   success: boolean;
@@ -99,6 +100,17 @@ type TargetListResult<T> = {
   errorMessage: string | null;
 };
 
+type MicrophoneEndpoint = { id: string; friendlyName: string; state: string; isDefaultMultimedia: boolean; isDefaultCommunications: boolean };
+type ApplicationAudioProcess = { processId: number; displayName: string; processName: string; executablePath: string | null };
+type AudioListResult<T> = { success: boolean; devices?: T[]; applications?: T[]; error: { message: string } | null };
+type AudioTrackRole = "game" | "voiceChat" | "microphone" | "other";
+type AudioTrackState = "disabled" | "preparing" | "prepared" | "running" | "ended" | "error" | "stopped";
+type AudioFormat = { sampleFormat: string; sampleRate: number; channelCount: number; bitsPerSample: number; validBitsPerSample: number | null };
+type AudioTrackStatus = { role: AudioTrackRole; enabled: boolean; state: AudioTrackState; sourceLabel: string | null; format: AudioFormat | null; errorMessage: string | null; retainedDurationSeconds: number; segmentCount: number; totalRetainedBytes: number; packetCount: number; discontinuityCount: number; timestampErrorCount: number; currentQueueDepth: number; maximumQueueDepth: number; queueCapacity: number; queueFullEvents: number; droppedPackets: number; droppedSampleFrames: number; expectedDurationFromSamplesSeconds: number; qpcElapsedDurationSeconds: number | null; sampleQpcDifferenceMs: number | null; estimatedClockDriftPpm: number | null; writerWriteTimeMs: number; writerFinalizeTimeMs: number };
+type VideoSegmentPlaybackMap = { sequenceNumber: number; sourceStartQpc100ns: number; sourceLastFrameQpc100ns: number; sourcePlaybackEndQpc100ns: number; encodedStartPts100ns: number; encodedEndPts100ns: number; encodedDuration100ns: number; clipStart100ns: number; clipEnd100ns: number; frameTimingPoints: { frameIndex: number; sourceQpc100ns: number; encodedPts100ns: number }[] };
+type SavedReplayTimeline = { rawCaptureStartQpc100ns: number; rawCaptureEndQpc100ns: number; rawCaptureSpan100ns: number; clipPlaybackStart100ns: number; clipPlaybackEnd100ns: number; clipPlaybackDuration100ns: number; encodedTimeBaseNumerator: number; encodedTimeBaseDenominator: number; timestampStrategy: string; discardedCaptureGapCount: number; discardedCaptureGapDuration100ns: number; segmentMaps: VideoSegmentPlaybackMap[] };
+type AudioSnapshotPlan = { trackRole: AudioTrackRole; rawVideoStartQpc100ns: number; rawVideoEndQpc100ns: number; rawVideoSpanMs: number; clipPlaybackStartMs: number; clipPlaybackEndMs: number; clipPlaybackDurationMs: number; rawAudioStartQpc100ns: number | null; rawAudioEndQpc100ns: number | null; mappedPlaybackStartMs: number | null; mappedPlaybackEndMs: number | null; mappedStartRegion: string | null; mappedEndRegion: string | null; leadingUncoveredMs: number; trailingUncoveredMs: number; trimBeforeClipMs: number; trimAfterClipMs: number; finalClipCoverageMs: number; audioInDiscardedVideoGapsMs: number; materialUncoveredThresholdMs: number; hasMaterialUncoveredAudio: boolean; warning: string | null; segmentCount: number; segmentSequenceNumbers: number[] };
+
 type TargetTab = "monitor" | "window";
 type SelectedTarget = { targetType: TargetTab; id: string };
 type CaptureTestStatus = "idle" | "preparing" | "recording" | "success" | "error";
@@ -113,6 +125,12 @@ type CompletedSegment = {
   actualDurationMs: number;
   firstFrameTimestamp100ns: number;
   lastFrameTimestamp100ns: number;
+  encodedStartPts100ns: number;
+  encodedLastFramePts100ns: number;
+  encodedEndPts100ns: number;
+  encodedDuration100ns: number;
+  encodedTimeBaseNumerator: number;
+  encodedTimeBaseDenominator: number;
   nextSegmentFirstFrameTimestamp100ns: number | null;
   sourceFrameGapMs: number | null;
   frameCount: number;
@@ -214,6 +232,7 @@ type ReplayBufferStatus = {
     followingFrameArrivedMs: number | null;
   };
   recentSegments: CompletedSegment[];
+  audio: { clock: { sessionStartQpc: number | null; qpcFrequency: number | null; sessionStartQpc100ns: number | null; timingDomain: string }; tracks: AudioTrackStatus[] };
 };
 
 type ReplayCommandResult = {
@@ -243,6 +262,11 @@ type SaveReplayStatus = {
   fileSize: number | null;
   codec: string | null;
   errorMessage: string | null;
+  audioSnapshotPlans: AudioSnapshotPlan[];
+  videoTimeline: SavedReplayTimeline | null;
+  internalEncodedDurationSeconds: number | null;
+  ffprobeDurationSeconds: number | null;
+  internalFfprobeDifferenceMs: number | null;
 };
 
 type SaveReplayCommandResult = {
@@ -340,6 +364,7 @@ const initialReplayStatus: ReplayBufferStatus = {
     followingFrameArrivedMs: null,
   },
   recentSegments: [],
+  audio: { clock: { sessionStartQpc: null, qpcFrequency: null, sessionStartQpc100ns: null, timingDomain: "" }, tracks: [] },
 };
 
 const initialSaveReplayStatus: SaveReplayStatus = {
@@ -355,6 +380,11 @@ const initialSaveReplayStatus: SaveReplayStatus = {
   fileSize: null,
   codec: null,
   errorMessage: null,
+  audioSnapshotPlans: [],
+  videoTimeline: null,
+  internalEncodedDurationSeconds: null,
+  ffprobeDurationSeconds: null,
+  internalFfprobeDifferenceMs: null,
 };
 
 export function ReplayPage() {
@@ -383,11 +413,22 @@ export function ReplayPage() {
   const [captureTestEncoder, setCaptureTestEncoder] = useState<EncoderId>("automatic");
   const [encoderCapabilities, setEncoderCapabilities] = useState<EncoderCapabilitiesResult | null>(null);
   const [encodersLoading, setEncodersLoading] = useState(true);
+  const [audioApplications, setAudioApplications] = useState<ApplicationAudioProcess[]>([]);
+  const [microphones, setMicrophones] = useState<MicrophoneEndpoint[]>([]);
+  const [audioSourcesLoading, setAudioSourcesLoading] = useState(true);
+  const [audioSourcesError, setAudioSourcesError] = useState<string | null>(null);
+  const [gameEnabled, setGameEnabled] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [microphoneEnabled, setMicrophoneEnabled] = useState(false);
+  const [gameProcessId, setGameProcessId] = useState("");
+  const [voiceProcessId, setVoiceProcessId] = useState("");
+  const [microphoneId, setMicrophoneId] = useState("");
   useEffect(() => {
     void refreshAllTargets();
     void refreshEncoderCapabilities();
     void refreshReplayStatus();
     void refreshSaveReplayStatus();
+    void refreshAudioSources();
   }, []);
 
   useEffect(() => {
@@ -494,6 +535,13 @@ export function ReplayPage() {
           encoder: replayEncoder,
           replayDurationSeconds: replayDuration,
           frameRate,
+          audio: {
+            tracks: [
+              ...(gameEnabled ? [{ role: "game", enabled: true, sourceKind: "process", processId: Number(gameProcessId), sourceLabel: audioApplications.find((app) => String(app.processId) === gameProcessId)?.processName ?? null }] : []),
+              ...(voiceEnabled ? [{ role: "voiceChat", enabled: true, sourceKind: "process", processId: Number(voiceProcessId), sourceLabel: audioApplications.find((app) => String(app.processId) === voiceProcessId)?.processName ?? null }] : []),
+              ...(microphoneEnabled ? [{ role: "microphone", enabled: true, sourceKind: "microphone", endpointId: microphoneId, sourceLabel: microphones.find((mic) => mic.id === microphoneId)?.friendlyName ?? null }] : []),
+            ],
+          },
         },
       });
       setReplayStatus(result.status);
@@ -505,6 +553,30 @@ export function ReplayPage() {
       await refreshReplayStatus();
     } finally {
       setReplayCommandActive(false);
+    }
+  }
+
+  async function refreshAudioSources() {
+    if (isReplayActive(replayStatus.state)) return;
+    setAudioSourcesLoading(true);
+    setAudioSourcesError(null);
+    try {
+      const [apps, mics] = await Promise.all([
+        invoke<AudioListResult<ApplicationAudioProcess>>("list_application_audio_processes"),
+        invoke<AudioListResult<MicrophoneEndpoint>>("list_audio_microphones"),
+      ]);
+      const nextApps = apps.applications ?? [];
+      const nextMics = mics.devices ?? [];
+      setAudioApplications(nextApps);
+      setMicrophones(nextMics);
+      setGameProcessId((value) => nextApps.some((app) => String(app.processId) === value) ? value : "");
+      setVoiceProcessId((value) => nextApps.some((app) => String(app.processId) === value) ? value : "");
+      setMicrophoneId((value) => nextMics.some((mic) => mic.id === value) ? value : (nextMics[0]?.id ?? ""));
+      setAudioSourcesError([apps.error?.message, mics.error?.message].filter(Boolean).join(" ") || null);
+    } catch (error) {
+      setAudioSourcesError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAudioSourcesLoading(false);
     }
   }
 
@@ -692,6 +764,11 @@ export function ReplayPage() {
     replayStatus.state === "running" &&
     replayStatus.completedSegmentCount > 0 &&
     !saveJobActive;
+  const audioConfigurationValid =
+    (!gameEnabled || gameProcessId !== "") &&
+    (!voiceEnabled || voiceProcessId !== "") &&
+    (!microphoneEnabled || microphoneId !== "") &&
+    (!gameEnabled || !voiceEnabled || gameProcessId !== voiceProcessId);
   const selectedTargetLabel = getSelectedTargetLabel(selectedTarget, monitors, windows);
 
   return (
@@ -907,7 +984,7 @@ export function ReplayPage() {
             replayCommandActive ||
             baselineActive ||
             replayStatus.state === "stopping" ||
-            (!replayActive && (!selectedTarget || encodersLoading || !replayEncoderAvailable))
+            (!replayActive && (!selectedTarget || encodersLoading || !replayEncoderAvailable || !audioConfigurationValid))
           }
           onClick={replayActive ? stopReplayBuffer : startReplayBuffer}
         >
@@ -922,7 +999,8 @@ export function ReplayPage() {
       </section>
 
       <div className="replay-grid">
-        <section className="panel" aria-labelledby="capture-heading">
+        <div className="replay-config-stack">
+          <section className="panel" aria-labelledby="capture-heading">
           <div className="section-heading">
             <div>
               <span className="eyebrow">CONFIGURATION</span>
@@ -971,9 +1049,40 @@ export function ReplayPage() {
             </select>
           </label>
           <p className="capture-config-note">
-            Stage 6 captures the target at its native dimensions. Video only; no audio is recorded.
+            Video remains at the target's native dimensions. Enabled audio sources are retained as independent rolling WAV tracks.
           </p>
-        </section>
+          </section>
+
+          <section className="panel replay-audio-panel" aria-labelledby="replay-audio-heading">
+          <div className="section-heading">
+            <div><span className="eyebrow">INDEPENDENT TRACKS</span><h2 id="replay-audio-heading">Audio</h2></div>
+            <button className="secondary-button" type="button" disabled={replayActive || audioSourcesLoading} onClick={() => void refreshAudioSources()}>
+              {audioSourcesLoading ? "Refreshing..." : "Refresh Sources"}
+            </button>
+          </div>
+          {audioSourcesError && <p className="replay-buffer-error">{audioSourcesError}</p>}
+          <AudioSourceRow label="Game Audio" enabled={gameEnabled} onEnabled={setGameEnabled} locked={replayActive} status={findAudioTrack(replayStatus, "game")}>
+            <select value={gameProcessId} disabled={replayActive || !gameEnabled || audioSourcesLoading} onChange={(event) => setGameProcessId(event.target.value)}>
+              <option value="">Select application</option>
+              {audioApplications.map((app) => <option value={app.processId} key={app.processId}>{app.displayName} ({app.processName}, PID {app.processId})</option>)}
+            </select>
+          </AudioSourceRow>
+          <AudioSourceRow label="Voice Chat" enabled={voiceEnabled} onEnabled={setVoiceEnabled} locked={replayActive} status={findAudioTrack(replayStatus, "voiceChat")}>
+            <select value={voiceProcessId} disabled={replayActive || !voiceEnabled || audioSourcesLoading} onChange={(event) => setVoiceProcessId(event.target.value)}>
+              <option value="">Select voice-chat application</option>
+              {audioApplications.map((app) => <option value={app.processId} key={app.processId}>{app.displayName} ({app.processName}, PID {app.processId})</option>)}
+            </select>
+          </AudioSourceRow>
+          <AudioSourceRow label="Microphone" enabled={microphoneEnabled} onEnabled={setMicrophoneEnabled} locked={replayActive} status={findAudioTrack(replayStatus, "microphone")}>
+            <select value={microphoneId} disabled={replayActive || !microphoneEnabled || audioSourcesLoading} onChange={(event) => setMicrophoneId(event.target.value)}>
+              <option value="">Select microphone</option>
+              {microphones.map((mic) => <option value={mic.id} key={mic.id}>{mic.friendlyName}{mic.isDefaultCommunications ? " (Default communications)" : ""}</option>)}
+            </select>
+          </AudioSourceRow>
+          <div className="replay-audio-source future"><div><strong>Other App</strong><small>Backend role supported; UI assignment is reserved for a later stage.</small></div><span>Disabled</span></div>
+          {!audioConfigurationValid && <p className="replay-buffer-error">Choose a source for every enabled track. Game and Voice Chat must use different PIDs.</p>}
+          </section>
+        </div>
 
         <div className="replay-side-stack">
           <section className="panel replay-diagnostics" aria-labelledby="diagnostics-heading">
@@ -986,19 +1095,19 @@ export function ReplayPage() {
             <dl className="diagnostic-grid">
               <Diagnostic label="Expected segment" value={`${replayStatus.expectedSegmentDurationSeconds.toFixed(2)} s`} />
               <Diagnostic label="Last segment" value={formatOptionalMetric(replayStatus.lastSegmentDurationSeconds, "s")} />
-              <Diagnostic label="Normal frame interval" value={formatOptionalMetric(replayStatus.normalFrameIntervalMs, "ms")} />
-              <Diagnostic label="Last source frame gap" value={formatOptionalMetric(replayStatus.lastSourceFrameGapMs, "ms")} />
-              <Diagnostic label="Worst source frame gap" value={formatOptionalMetric(replayStatus.worstSourceFrameGapMs, "ms")} />
-              <Diagnostic label="Average source frame gap" value={formatOptionalMetric(replayStatus.averageSourceFrameGapMs, "ms")} />
+              <Diagnostic label="Expected capture interval" value={formatOptionalMetric(replayStatus.normalFrameIntervalMs, "ms")} />
+              <Diagnostic label="Last WGC boundary gap" value={formatOptionalMetric(replayStatus.lastSourceFrameGapMs, "ms")} />
+              <Diagnostic label="Worst WGC boundary gap" value={formatOptionalMetric(replayStatus.worstSourceFrameGapMs, "ms")} />
+              <Diagnostic label="Average WGC boundary gap" value={formatOptionalMetric(replayStatus.averageSourceFrameGapMs, "ms")} />
               <Diagnostic label="Last encoder creation" value={formatOptionalMetric(replayStatus.lastEncoderCreationMs, "ms")} />
               <Diagnostic label="Worst encoder creation" value={formatOptionalMetric(replayStatus.worstEncoderCreationMs, "ms")} />
               <Diagnostic label="Average encoder creation" value={formatOptionalMetric(replayStatus.averageEncoderCreationMs, "ms")} />
               <Diagnostic label="Last finalize time" value={formatOptionalMetric(replayStatus.lastFinalizeTimeMs, "ms")} />
               <Diagnostic label="Rotation count" value={String(replayStatus.rotationCount)} />
               <Diagnostic label="Frames observed" value={String(replayStatus.framesObserved)} />
-              <Diagnostic label="Last estimated missed" value={formatOptionalCount(replayStatus.lastEstimatedFramesMissed)} />
-              <Diagnostic label="Estimated missed total" value={String(replayStatus.estimatedFramesMissedTotal)} />
-              <Diagnostic label="Material boundary gaps" value={String(replayStatus.materialSourceGapCount)} />
+              <Diagnostic label="Last estimated capture intervals skipped" value={formatOptionalCount(replayStatus.lastEstimatedFramesMissed)} />
+              <Diagnostic label="Estimated capture intervals skipped" value={String(replayStatus.estimatedFramesMissedTotal)} />
+              <Diagnostic label="Material WGC boundary gaps" value={String(replayStatus.materialSourceGapCount)} />
               <Diagnostic label="Next encoder" value={formatEncoderPreparation(replayStatus)} />
               <Diagnostic label="Callback avg / worst" value={formatMetricPair(replayStatus.averageCallbackDurationMs, replayStatus.worstCallbackDurationMs)} />
               <Diagnostic label="send_frame avg / worst" value={formatMetricPair(replayStatus.averageSendFrameDurationMs, replayStatus.worstSendFrameDurationMs)} />
@@ -1096,6 +1205,13 @@ export function ReplayPage() {
                 <p>No finalized segments yet.</p>
               )}
             </div>
+            {replayStatus.audio.tracks.length > 0 && (
+              <div className="recent-segments">
+                <span className="setting-label">Audio track telemetry</span>
+                {replayStatus.audio.tracks.map((track) => <AudioTrackTelemetry track={track} key={track.role} />)}
+                <code>{replayStatus.audio.clock.timingDomain}</code>
+              </div>
+            )}
           </section>
 
           <section className="panel save-panel" aria-labelledby="save-heading">
@@ -1127,6 +1243,30 @@ export function ReplayPage() {
                   {saveReplayStatus.fileSize !== null && (
                     <span>{formatBytes(saveReplayStatus.fileSize)}</span>
                   )}
+                </div>
+              )}
+              {saveReplayStatus.audioSnapshotPlans.length > 0 && (
+                <div className="audio-snapshot-plans">
+                  <small>Audio selection plan (diagnostic only; saved MP4 remains video-only)</small>
+                  {saveReplayStatus.audioSnapshotPlans.map((plan) => (
+                    <div className={`audio-snapshot-plan${plan.hasMaterialUncoveredAudio ? " warning" : ""}`} key={plan.trackRole}>
+                      <strong>{formatAudioRole(plan.trackRole)}</strong>
+                      <code>Raw audio QPC {plan.rawAudioStartQpc100ns ?? "—"}→{plan.rawAudioEndQpc100ns ?? "—"}</code>
+                      <code>Mapped playback {formatOptionalMetric(plan.mappedPlaybackStartMs, "ms")}→{formatOptionalMetric(plan.mappedPlaybackEndMs, "ms")}</code>
+                      <span>Coverage {plan.finalClipCoverageMs.toFixed(3)} ms · leading/trailing uncovered {plan.leadingUncoveredMs.toFixed(3)} / {plan.trailingUncoveredMs.toFixed(3)} ms</span>
+                      <span>Trim before/after {plan.trimBeforeClipMs.toFixed(3)} / {plan.trimAfterClipMs.toFixed(3)} ms · boundary-gap material {plan.audioInDiscardedVideoGapsMs.toFixed(3)} ms · {plan.segmentCount} segments</span>
+                      {plan.warning && <span className="save-replay-error">{plan.warning}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {saveReplayStatus.videoTimeline && (
+                <div className="timeline-consistency-report">
+                  <small>Saved-replay timeline consistency</small>
+                  <code>Raw WGC QPC {saveReplayStatus.videoTimeline.rawCaptureStartQpc100ns}→{saveReplayStatus.videoTimeline.rawCaptureEndQpc100ns} ({format100nsSeconds(saveReplayStatus.videoTimeline.rawCaptureSpan100ns)} s)</code>
+                  <code>Final playback 0.000→{format100nsSeconds(saveReplayStatus.videoTimeline.clipPlaybackDuration100ns)} s · discarded boundary capture time {format100nsSeconds(saveReplayStatus.videoTimeline.discardedCaptureGapDuration100ns)} s across {saveReplayStatus.videoTimeline.discardedCaptureGapCount} gaps</code>
+                  <code>Internal / ffprobe {formatOptionalMetric(saveReplayStatus.internalEncodedDurationSeconds, "s")} / {formatOptionalMetric(saveReplayStatus.ffprobeDurationSeconds, "s")} · difference {formatOptionalMetric(saveReplayStatus.internalFfprobeDifferenceMs, "ms")}</code>
+                  <small>{saveReplayStatus.videoTimeline.timestampStrategy}</small>
                 </div>
               )}
               {saveReplayStatus.state === "completed" &&
@@ -1257,6 +1397,10 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1_073_741_824).toFixed(2)} GB`;
 }
 
+function format100nsSeconds(value: number) {
+  return (value / 10_000_000).toFixed(6);
+}
+
 function formatOptionalMetric(value: number | null, unit: string) {
   return value === null ? "—" : `${value.toFixed(2)} ${unit}`;
 }
@@ -1306,6 +1450,47 @@ function Diagnostic({ label, value }: { label: string; value: string }) {
     <div>
       <dt>{label}</dt>
       <dd>{value}</dd>
+    </div>
+  );
+}
+
+function findAudioTrack(status: ReplayBufferStatus, role: AudioTrackRole) {
+  return status.audio.tracks.find((track) => track.role === role) ?? null;
+}
+
+function formatAudioRole(role: AudioTrackRole) {
+  return ({ game: "Game", voiceChat: "Voice Chat", microphone: "Microphone", other: "Other" } as const)[role];
+}
+
+function formatAudioFormat(format: AudioFormat | null) {
+  if (!format) return "Format pending";
+  const channels = format.channelCount === 1 ? "Mono" : format.channelCount === 2 ? "Stereo" : `${format.channelCount} channels`;
+  return `${format.sampleRate / 1_000} kHz ${channels} ${format.sampleFormat}`;
+}
+
+function AudioSourceRow({ label, enabled, onEnabled, locked, status, children }: { label: string; enabled: boolean; onEnabled: (value: boolean) => void; locked: boolean; status: AudioTrackStatus | null; children: React.ReactNode }) {
+  return (
+    <div className="replay-audio-source">
+      <div className="replay-audio-source-heading"><div><strong>{label}</strong>{status && <small>{status.state}: {status.sourceLabel ?? "source pending"}</small>}</div><Toggle label={`Enable ${label}`} checked={enabled} onChange={onEnabled} disabled={locked} /></div>
+      {children}
+      {status?.format && <small>{formatAudioFormat(status.format)} · Retained {status.retainedDurationSeconds.toFixed(1)} s · Drops {status.droppedPackets}</small>}
+      {status?.errorMessage && <small className="replay-buffer-error">{status.errorMessage}</small>}
+    </div>
+  );
+}
+
+function AudioTrackTelemetry({ track }: { track: AudioTrackStatus }) {
+  return (
+    <div className="recent-segment-row audio-track-row">
+      <strong>{formatAudioRole(track.role)} · {track.state}</strong>
+      <span>{track.sourceLabel ?? "—"}</span>
+      <span>{formatAudioFormat(track.format)}</span>
+      <span>{track.retainedDurationSeconds.toFixed(1)} s / {track.segmentCount} segments / {formatBytes(track.totalRetainedBytes)}</span>
+      <span>queue {track.currentQueueDepth}/{track.maximumQueueDepth}/{track.queueCapacity} · full {track.queueFullEvents}</span>
+      <span>drops {track.droppedPackets} packets / {track.droppedSampleFrames} frames</span>
+      <span>disc {track.discontinuityCount} · timestamp {track.timestampErrorCount}</span>
+      <span>writer write/finalize {track.writerWriteTimeMs.toFixed(2)} / {track.writerFinalizeTimeMs.toFixed(2)} ms</span>
+      <span>sample−QPC {formatOptionalMetric(track.sampleQpcDifferenceMs, "ms")} · drift {formatOptionalMetric(track.estimatedClockDriftPpm, "ppm")}</span>
     </div>
   );
 }
