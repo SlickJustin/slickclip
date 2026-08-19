@@ -1,8 +1,9 @@
 use std::path::Path;
 
+use windows::Foundation::TimeSpan;
 use windows_capture::encoder::{
-    AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
-    VideoSettingsSubType,
+    AudioSettingsBuilder, ContainerSettingsBuilder, DetachedFrame, VideoEncoder,
+    VideoSettingsBuilder, VideoSettingsSubType,
 };
 use windows_capture::frame::Frame;
 
@@ -68,6 +69,36 @@ impl VideoEncoderBackend for WindowsCaptureFileBackend {
             .ok_or_else(|| EncoderBackendError::new("The capture encoder was already finalized"))?;
         let result = encoder
             .send_frame_with_result(frame)
+            .map_err(|error| EncoderBackendError::new(error.to_string()))?;
+        let queue_capacity = encoder.telemetry().snapshot().queue_capacity;
+
+        Ok(EncodedFrameOutput {
+            samples: Vec::new(),
+            telemetry: EncoderFrameTelemetry {
+                queued: result.queued,
+                gpu_copy_duration: result.gpu_copy_duration,
+                queue_depth: result.queue_depth,
+                queue_capacity,
+            },
+        })
+    }
+
+    fn encode_detached_frame(
+        &mut self,
+        frame: &DetachedFrame,
+        presentation_timestamp_100ns: i64,
+    ) -> Result<EncodedFrameOutput, EncoderBackendError> {
+        let encoder = self
+            .encoder
+            .as_mut()
+            .ok_or_else(|| EncoderBackendError::new("The capture encoder was already finalized"))?;
+        let result = encoder
+            .send_detached_frame_with_result(
+                frame,
+                TimeSpan {
+                    Duration: presentation_timestamp_100ns,
+                },
+            )
             .map_err(|error| EncoderBackendError::new(error.to_string()))?;
         let queue_capacity = encoder.telemetry().snapshot().queue_capacity;
 

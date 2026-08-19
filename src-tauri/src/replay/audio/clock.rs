@@ -58,6 +58,13 @@ impl ReplaySessionClock {
         raw_qpc_to_100ns(qpc, self.qpc_frequency).saturating_sub(self.session_start_qpc_100ns)
     }
 
+    pub fn now_qpc_100ns(&self) -> Result<i64, String> {
+        let mut now = 0i64;
+        unsafe { QueryPerformanceCounter(&mut now) }
+            .map_err(|error| format!("Could not query the replay QPC clock: {error}"))?;
+        Ok(raw_qpc_to_100ns(now, self.qpc_frequency))
+    }
+
     pub fn status(&self) -> ReplayClockStatus {
         ReplayClockStatus {
             session_start_qpc: Some(self.session_start_qpc),

@@ -5,8 +5,10 @@ use std::collections::VecDeque;
 #[serde(rename_all = "camelCase")]
 pub struct VideoFrameTimingPoint {
     pub frame_index: u64,
+    pub output_qpc_100ns: i64,
     pub source_qpc_100ns: i64,
     pub encoded_pts_100ns: i64,
+    pub fresh_source: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -17,6 +19,8 @@ pub struct CompletedSegment {
     pub start_timestamp_ms: u64,
     pub end_timestamp_ms: u64,
     pub actual_duration_ms: u64,
+    pub segment_session_start_qpc_100ns: i64,
+    pub segment_session_end_qpc_100ns: i64,
     pub first_frame_timestamp_100ns: i64,
     pub last_frame_timestamp_100ns: i64,
     pub encoded_start_pts_100ns: i64,
@@ -28,6 +32,9 @@ pub struct CompletedSegment {
     pub frame_timing_points: Vec<VideoFrameTimingPoint>,
     pub next_segment_first_frame_timestamp_100ns: Option<i64>,
     pub source_frame_gap_ms: Option<f64>,
+    pub source_update_count: u64,
+    pub fresh_output_frame_count: u64,
+    pub held_output_frame_count: u64,
     pub frame_count: u64,
     pub encoder_creation_time_ms: f64,
     pub encoder_creation_started_ms: f64,
@@ -151,6 +158,8 @@ mod tests {
             start_timestamp_ms: sequence_number * duration_ms,
             end_timestamp_ms: (sequence_number + 1) * duration_ms,
             actual_duration_ms: duration_ms,
+            segment_session_start_qpc_100ns: 0,
+            segment_session_end_qpc_100ns: i64::try_from(duration_ms * 10_000).unwrap(),
             first_frame_timestamp_100ns: 0,
             last_frame_timestamp_100ns: i64::try_from(duration_ms * 10_000).unwrap(),
             encoded_start_pts_100ns: 0,
@@ -161,11 +170,16 @@ mod tests {
             encoded_time_base_denominator: 10_000_000,
             frame_timing_points: vec![VideoFrameTimingPoint {
                 frame_index: 0,
+                output_qpc_100ns: 0,
                 source_qpc_100ns: 0,
                 encoded_pts_100ns: 0,
+                fresh_source: true,
             }],
             next_segment_first_frame_timestamp_100ns: None,
             source_frame_gap_ms: None,
+            source_update_count: 1,
+            fresh_output_frame_count: 1,
+            held_output_frame_count: (duration_ms / 16).saturating_sub(1),
             frame_count: duration_ms / 16,
             encoder_creation_time_ms: 10.0,
             encoder_creation_started_ms: 0.0,

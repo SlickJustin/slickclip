@@ -339,6 +339,21 @@ pub struct OwnedSurface {
     surface: SendDirectX<IDirect3DSurface>,
 }
 
+/// An application-owned GPU snapshot of a capture frame.
+///
+/// The texture is detached from the WGC frame pool and can therefore outlive the
+/// `FrameArrived` callback. Encoder submissions copy it into a distinct
+/// encoder-owned surface, allowing the same visual image to be submitted more
+/// than once without sharing a mutable texture with the asynchronous encoder.
+pub struct DetachedFrame {
+    device: SendDirectX<ID3D11Device>,
+    context: SendDirectX<windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext>,
+    surface: OwnedSurface,
+    width: u32,
+    height: u32,
+    color_format: ColorFormat,
+}
+
 /// Builder for configuring video encoder settings.
 pub struct VideoSettingsBuilder {
     sub_type: VideoSettingsSubType,
@@ -1287,6 +1302,30 @@ impl VideoEncoder {
         Ok(owned)
     }
 
+    /// Copies a WGC frame into an application-owned GPU texture that is safe to
+    /// retain after the capture callback returns.
+    pub fn detach_frame(frame: &Frame) -> Result<DetachedFrame, VideoEncoderError> {
+        let owned = Self::create_owned_surface(
+            frame.device(),
+            frame.width(),
+            frame.height(),
+            frame.color_format(),
+        )?;
+        unsafe {
+            frame
+                .device_context()
+                .CopyResource(&owned.texture.0, frame.as_raw_texture());
+        }
+        Ok(DetachedFrame {
+            device: SendDirectX::new(frame.device().clone()),
+            context: SendDirectX::new(frame.device_context().clone()),
+            surface: owned,
+            width: frame.width(),
+            height: frame.height(),
+            color_format: frame.color_format(),
+        })
+    }
+
     fn queue_source(
         &mut self,
         source: VideoEncoderSource,
@@ -1361,6 +1400,108 @@ impl VideoEncoder {
             && let Some(t) = self.transcode_thread.take()
         {
             t.join().expect("Failed to join transcode thread")?;
+        }
+
+        Ok(result)
+    }
+
+    /// Submits a retained GPU frame at an explicit encoder timestamp.
+    ///
+    /// A fresh encoder-owned surface is allocated and populated for every
+    /// submission. Repeating a visual therefore preserves the detached source
+    /// while maintaining the encoder queue's existing ownership contract.
+    pub fn send_detached_frame_with_result(
+        &mut self,
+        frame: &DetachedFrame,
+        timestamp: TimeSpan,
+    ) -> Result<FrameSendResult, VideoEncoderError> {
+        if self.is_video_disabled {
+            return Err(VideoEncoderError::VideoDisabled);
+        }
+        if frame.color_format != self.target_color_format {
+            return Err(VideoEncoderError::UnsupportedFrameFormat(frame.color_format));
+        }
+
+        self.telemetry.inner.source_frames_received.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry.inner.queue_depth.load(Ordering::Relaxed)
+            >= self.telemetry.queue_capacity as u64
+        {
+            self.telemetry.record_full_drop();
+            return Ok(FrameSendResult {
+                queued: false,
+                gpu_copy_duration: None,
+                queue_depth: self.telemetry.inner.queue_depth.load(Ordering::Relaxed),
+            });
+        }
+
+        let copy_started = Instant::now();
+        let owned = Self::create_owned_surface(
+            &frame.device.0,
+            self.target_width,
+            self.target_height,
+            self.target_color_format,
+        )?;
+        if frame.width == self.target_width && frame.height == self.target_height {
+            unsafe {
+                frame
+                    .context
+                    .0
+                    .CopyResource(&owned.texture.0, &frame.surface.texture.0);
+            }
+        } else {
+            let mut render_target = None;
+            unsafe {
+                frame.device.0.CreateRenderTargetView(
+                    &owned.texture.0,
+                    None,
+                    Some(&mut render_target),
+                )?;
+            }
+            if let Some(render_target) = render_target {
+                unsafe {
+                    frame
+                        .context
+                        .0
+                        .ClearRenderTargetView(&render_target, &[0.0, 0.0, 0.0, 1.0]);
+                }
+            }
+            let copy_width = self.target_width.min(frame.width);
+            let copy_height = self.target_height.min(frame.height);
+            if copy_width > 0 && copy_height > 0 {
+                let source_box = D3D11_BOX {
+                    left: 0,
+                    top: 0,
+                    front: 0,
+                    right: copy_width,
+                    bottom: copy_height,
+                    back: 1,
+                };
+                unsafe {
+                    frame.context.0.CopySubresourceRegion(
+                        &owned.texture.0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        &frame.surface.texture.0,
+                        0,
+                        Some(&source_box),
+                    );
+                }
+            }
+        }
+        let copy_duration = copy_started.elapsed();
+        self.telemetry.record_copy(copy_duration);
+        let result = self.queue_source(
+            VideoEncoderSource::DirectX(owned),
+            timestamp,
+            Some(copy_duration),
+        )?;
+
+        if self.error_notify.load(atomic::Ordering::Relaxed)
+            && let Some(thread) = self.transcode_thread.take()
+        {
+            thread.join().expect("Failed to join transcode thread")?;
         }
 
         Ok(result)

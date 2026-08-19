@@ -65,6 +65,8 @@ pub struct AudioSnapshotPlan {
     pub raw_video_start_qpc_100ns: i64,
     pub raw_video_end_qpc_100ns: i64,
     pub raw_video_span_ms: f64,
+    pub clip_capture_start_qpc_100ns: i64,
+    pub clip_capture_end_qpc_100ns: i64,
     pub clip_playback_start_ms: f64,
     pub clip_playback_end_ms: f64,
     pub clip_playback_duration_ms: f64,
@@ -79,7 +81,6 @@ pub struct AudioSnapshotPlan {
     pub trim_before_clip_ms: f64,
     pub trim_after_clip_ms: f64,
     pub final_clip_coverage_ms: f64,
-    pub audio_in_discarded_video_gaps_ms: f64,
     pub material_uncovered_threshold_ms: f64,
     pub has_material_uncovered_audio: bool,
     pub warning: Option<String>,
@@ -316,8 +317,8 @@ impl AudioReplayShared {
             .filter(|track| track.configuration.enabled)
         {
             let selected = track.lock().ring.select_and_pin(
-                timeline.raw_capture_start_qpc_100ns,
-                timeline.raw_capture_end_qpc_100ns,
+                timeline.clip_capture_start_qpc_100ns,
+                timeline.clip_capture_end_qpc_100ns,
             );
             let sequences = selected
                 .iter()
@@ -331,18 +332,6 @@ impl AudioReplayShared {
             let mapped_end = end_mapping.map(|value| value.clip_time_100ns);
             let clip_duration = timeline.clip_playback_duration_100ns;
             let coverage = calculate_audio_coverage(mapped_start, mapped_end, clip_duration);
-            let selected_gap_material = match (selected_start, selected_end) {
-                (Some(start), Some(end)) => timeline
-                    .discarded_capture_gaps
-                    .iter()
-                    .map(|gap| {
-                        end.min(gap.source_end_qpc_100ns)
-                            .saturating_sub(start.max(gap.source_start_qpc_100ns))
-                            .max(0)
-                    })
-                    .sum(),
-                _ => 0,
-            };
             let warning = coverage.material.then(|| format!(
                 "{:?} audio does not cover the final playback window: {:.3} ms leading and {:.3} ms trailing uncovered.",
                 track.configuration.role,
@@ -354,6 +343,8 @@ impl AudioReplayShared {
                 raw_video_start_qpc_100ns: timeline.raw_capture_start_qpc_100ns,
                 raw_video_end_qpc_100ns: timeline.raw_capture_end_qpc_100ns,
                 raw_video_span_ms: timeline.raw_capture_span_100ns as f64 / 10_000.0,
+                clip_capture_start_qpc_100ns: timeline.clip_capture_start_qpc_100ns,
+                clip_capture_end_qpc_100ns: timeline.clip_capture_end_qpc_100ns,
                 clip_playback_start_ms: 0.0,
                 clip_playback_end_ms: clip_duration as f64 / 10_000.0,
                 clip_playback_duration_ms: clip_duration as f64 / 10_000.0,
@@ -370,7 +361,6 @@ impl AudioReplayShared {
                 trim_before_clip_ms: coverage.trim_before as f64 / 10_000.0,
                 trim_after_clip_ms: coverage.trim_after as f64 / 10_000.0,
                 final_clip_coverage_ms: coverage.coverage as f64 / 10_000.0,
-                audio_in_discarded_video_gaps_ms: selected_gap_material as f64 / 10_000.0,
                 material_uncovered_threshold_ms: MATERIAL_UNCOVERED_100NS as f64 / 10_000.0,
                 has_material_uncovered_audio: coverage.material,
                 warning,
@@ -387,7 +377,6 @@ fn mapping_kind_name(kind: CaptureMappingKind) -> &'static str {
     match kind {
         CaptureMappingKind::BeforeClip => "beforeClip",
         CaptureMappingKind::Segment => "encodedSegment",
-        CaptureMappingKind::DiscardedBoundaryGap => "discardedBoundaryGap",
         CaptureMappingKind::AfterClip => "afterClip",
     }
 }
@@ -577,19 +566,20 @@ mod tests {
             raw_capture_start_qpc_100ns: 15_000_000,
             raw_capture_end_qpc_100ns: 25_000_000,
             raw_capture_span_100ns: 10_000_000,
+            clip_capture_start_qpc_100ns: 15_000_000,
+            clip_capture_end_qpc_100ns: 25_000_000,
             clip_playback_start_100ns: 0,
             clip_playback_end_100ns: 10_000_000,
             clip_playback_duration_100ns: 10_000_000,
             encoded_time_base_numerator: 1,
             encoded_time_base_denominator: 10_000_000,
             timestamp_strategy: "test".into(),
-            discarded_capture_gap_count: 0,
-            discarded_capture_gap_duration_100ns: 0,
             segment_maps: vec![VideoSegmentPlaybackMap {
                 sequence_number: 1,
+                session_start_qpc_100ns: 15_000_000,
+                session_end_qpc_100ns: 25_000_000,
                 source_start_qpc_100ns: 15_000_000,
                 source_last_frame_qpc_100ns: 24_833_334,
-                source_playback_end_qpc_100ns: 25_000_000,
                 encoded_start_pts_100ns: 0,
                 encoded_end_pts_100ns: 10_000_000,
                 encoded_duration_100ns: 10_000_000,
@@ -597,11 +587,12 @@ mod tests {
                 clip_end_100ns: 10_000_000,
                 frame_timing_points: vec![crate::replay::segment::VideoFrameTimingPoint {
                     frame_index: 0,
+                    output_qpc_100ns: 15_000_000,
                     source_qpc_100ns: 15_000_000,
                     encoded_pts_100ns: 0,
+                    fresh_source: true,
                 }],
             }],
-            discarded_capture_gaps: vec![],
         };
         let (plans, pins) = shared.plan_and_pin(&timeline);
         assert_eq!(plans[0].segment_count, 1);

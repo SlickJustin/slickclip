@@ -3,6 +3,7 @@ use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use windows_capture::encoder::DetachedFrame;
 use windows_capture::frame::Frame;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -138,6 +139,12 @@ pub trait VideoEncoderBackend: Send {
     fn encode_frame(
         &mut self,
         frame: &mut Frame<'_>,
+    ) -> Result<EncodedFrameOutput, EncoderBackendError>;
+
+    fn encode_detached_frame(
+        &mut self,
+        frame: &DetachedFrame,
+        presentation_timestamp_100ns: i64,
     ) -> Result<EncodedFrameOutput, EncoderBackendError>;
 
     fn finish(self: Box<Self>) -> Result<Vec<EncodedVideoSample>, EncoderBackendError>;

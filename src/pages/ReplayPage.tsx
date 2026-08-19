@@ -107,9 +107,9 @@ type AudioTrackRole = "game" | "voiceChat" | "microphone" | "other";
 type AudioTrackState = "disabled" | "preparing" | "prepared" | "running" | "ended" | "error" | "stopped";
 type AudioFormat = { sampleFormat: string; sampleRate: number; channelCount: number; bitsPerSample: number; validBitsPerSample: number | null };
 type AudioTrackStatus = { role: AudioTrackRole; enabled: boolean; state: AudioTrackState; sourceLabel: string | null; format: AudioFormat | null; errorMessage: string | null; retainedDurationSeconds: number; segmentCount: number; totalRetainedBytes: number; packetCount: number; discontinuityCount: number; timestampErrorCount: number; currentQueueDepth: number; maximumQueueDepth: number; queueCapacity: number; queueFullEvents: number; droppedPackets: number; droppedSampleFrames: number; expectedDurationFromSamplesSeconds: number; qpcElapsedDurationSeconds: number | null; sampleQpcDifferenceMs: number | null; estimatedClockDriftPpm: number | null; writerWriteTimeMs: number; writerFinalizeTimeMs: number };
-type VideoSegmentPlaybackMap = { sequenceNumber: number; sourceStartQpc100ns: number; sourceLastFrameQpc100ns: number; sourcePlaybackEndQpc100ns: number; encodedStartPts100ns: number; encodedEndPts100ns: number; encodedDuration100ns: number; clipStart100ns: number; clipEnd100ns: number; frameTimingPoints: { frameIndex: number; sourceQpc100ns: number; encodedPts100ns: number }[] };
-type SavedReplayTimeline = { rawCaptureStartQpc100ns: number; rawCaptureEndQpc100ns: number; rawCaptureSpan100ns: number; clipPlaybackStart100ns: number; clipPlaybackEnd100ns: number; clipPlaybackDuration100ns: number; encodedTimeBaseNumerator: number; encodedTimeBaseDenominator: number; timestampStrategy: string; discardedCaptureGapCount: number; discardedCaptureGapDuration100ns: number; segmentMaps: VideoSegmentPlaybackMap[] };
-type AudioSnapshotPlan = { trackRole: AudioTrackRole; rawVideoStartQpc100ns: number; rawVideoEndQpc100ns: number; rawVideoSpanMs: number; clipPlaybackStartMs: number; clipPlaybackEndMs: number; clipPlaybackDurationMs: number; rawAudioStartQpc100ns: number | null; rawAudioEndQpc100ns: number | null; mappedPlaybackStartMs: number | null; mappedPlaybackEndMs: number | null; mappedStartRegion: string | null; mappedEndRegion: string | null; leadingUncoveredMs: number; trailingUncoveredMs: number; trimBeforeClipMs: number; trimAfterClipMs: number; finalClipCoverageMs: number; audioInDiscardedVideoGapsMs: number; materialUncoveredThresholdMs: number; hasMaterialUncoveredAudio: boolean; warning: string | null; segmentCount: number; segmentSequenceNumbers: number[] };
+type VideoSegmentPlaybackMap = { sequenceNumber: number; sessionStartQpc100ns: number; sessionEndQpc100ns: number; sourceStartQpc100ns: number; sourceLastFrameQpc100ns: number; encodedStartPts100ns: number; encodedEndPts100ns: number; encodedDuration100ns: number; clipStart100ns: number; clipEnd100ns: number; frameTimingPoints: { frameIndex: number; outputQpc100ns: number; sourceQpc100ns: number; encodedPts100ns: number; freshSource: boolean }[] };
+type SavedReplayTimeline = { rawCaptureStartQpc100ns: number; rawCaptureEndQpc100ns: number; rawCaptureSpan100ns: number; clipCaptureStartQpc100ns: number; clipCaptureEndQpc100ns: number; clipPlaybackStart100ns: number; clipPlaybackEnd100ns: number; clipPlaybackDuration100ns: number; encodedTimeBaseNumerator: number; encodedTimeBaseDenominator: number; timestampStrategy: string; segmentMaps: VideoSegmentPlaybackMap[] };
+type AudioSnapshotPlan = { trackRole: AudioTrackRole; rawVideoStartQpc100ns: number; rawVideoEndQpc100ns: number; rawVideoSpanMs: number; clipCaptureStartQpc100ns: number; clipCaptureEndQpc100ns: number; clipPlaybackStartMs: number; clipPlaybackEndMs: number; clipPlaybackDurationMs: number; rawAudioStartQpc100ns: number | null; rawAudioEndQpc100ns: number | null; mappedPlaybackStartMs: number | null; mappedPlaybackEndMs: number | null; mappedStartRegion: string | null; mappedEndRegion: string | null; leadingUncoveredMs: number; trailingUncoveredMs: number; trimBeforeClipMs: number; trimAfterClipMs: number; finalClipCoverageMs: number; materialUncoveredThresholdMs: number; hasMaterialUncoveredAudio: boolean; warning: string | null; segmentCount: number; segmentSequenceNumbers: number[] };
 
 type TargetTab = "monitor" | "window";
 type SelectedTarget = { targetType: TargetTab; id: string };
@@ -123,6 +123,8 @@ type CompletedSegment = {
   startTimestampMs: number;
   endTimestampMs: number;
   actualDurationMs: number;
+  segmentSessionStartQpc100ns: number;
+  segmentSessionEndQpc100ns: number;
   firstFrameTimestamp100ns: number;
   lastFrameTimestamp100ns: number;
   encodedStartPts100ns: number;
@@ -133,6 +135,9 @@ type CompletedSegment = {
   encodedTimeBaseDenominator: number;
   nextSegmentFirstFrameTimestamp100ns: number | null;
   sourceFrameGapMs: number | null;
+  sourceUpdateCount: number;
+  freshOutputFrameCount: number;
+  heldOutputFrameCount: number;
   frameCount: number;
   encoderCreationTimeMs: number;
   encoderCreationStartedMs: number;
@@ -215,6 +220,18 @@ type ReplayBufferStatus = {
   encoderQueueCapacity: number;
   encoderQueueFullEvents: number;
   deliberatelyDroppedFrames: number;
+  videoTimelineStartQpc100ns: number | null;
+  schedulerCurrentOutputFrameIndex: number | null;
+  schedulerExpectedOutputFrameIndex: number | null;
+  schedulerCurrentLatenessMs: number | null;
+  schedulerWorstLatenessMs: number | null;
+  schedulerCatchUpFrames: number;
+  freshOutputFrames: number;
+  heldOutputFrames: number;
+  supersededSourceUpdates: number;
+  missedRealtimeOutputFrames: number;
+  sourceFrameUpdateRate: number | null;
+  outputCfrRate: number | null;
   framePoolCreationMethod: string;
   framePoolBufferCount: number;
   rotationLifecycle: {
@@ -347,6 +364,18 @@ const initialReplayStatus: ReplayBufferStatus = {
   encoderQueueCapacity: 0,
   encoderQueueFullEvents: 0,
   deliberatelyDroppedFrames: 0,
+  videoTimelineStartQpc100ns: null,
+  schedulerCurrentOutputFrameIndex: null,
+  schedulerExpectedOutputFrameIndex: null,
+  schedulerCurrentLatenessMs: null,
+  schedulerWorstLatenessMs: null,
+  schedulerCatchUpFrames: 0,
+  freshOutputFrames: 0,
+  heldOutputFrames: 0,
+  supersededSourceUpdates: 0,
+  missedRealtimeOutputFrames: 0,
+  sourceFrameUpdateRate: null,
+  outputCfrRate: null,
   framePoolCreationMethod: "CreateFreeThreaded",
   framePoolBufferCount: 2,
   rotationLifecycle: {
@@ -1095,22 +1124,30 @@ export function ReplayPage() {
             <dl className="diagnostic-grid">
               <Diagnostic label="Expected segment" value={`${replayStatus.expectedSegmentDurationSeconds.toFixed(2)} s`} />
               <Diagnostic label="Last segment" value={formatOptionalMetric(replayStatus.lastSegmentDurationSeconds, "s")} />
-              <Diagnostic label="Expected capture interval" value={formatOptionalMetric(replayStatus.normalFrameIntervalMs, "ms")} />
-              <Diagnostic label="Last WGC boundary gap" value={formatOptionalMetric(replayStatus.lastSourceFrameGapMs, "ms")} />
-              <Diagnostic label="Worst WGC boundary gap" value={formatOptionalMetric(replayStatus.worstSourceFrameGapMs, "ms")} />
-              <Diagnostic label="Average WGC boundary gap" value={formatOptionalMetric(replayStatus.averageSourceFrameGapMs, "ms")} />
+              <Diagnostic label="Output CFR interval" value={formatOptionalMetric(replayStatus.normalFrameIntervalMs, "ms")} />
+              <Diagnostic label="Last WGC delivery gap" value={formatOptionalMetric(replayStatus.lastSourceFrameGapMs, "ms")} />
+              <Diagnostic label="Worst WGC delivery gap" value={formatOptionalMetric(replayStatus.worstSourceFrameGapMs, "ms")} />
+              <Diagnostic label="Average WGC delivery gap" value={formatOptionalMetric(replayStatus.averageSourceFrameGapMs, "ms")} />
               <Diagnostic label="Last encoder creation" value={formatOptionalMetric(replayStatus.lastEncoderCreationMs, "ms")} />
               <Diagnostic label="Worst encoder creation" value={formatOptionalMetric(replayStatus.worstEncoderCreationMs, "ms")} />
               <Diagnostic label="Average encoder creation" value={formatOptionalMetric(replayStatus.averageEncoderCreationMs, "ms")} />
               <Diagnostic label="Last finalize time" value={formatOptionalMetric(replayStatus.lastFinalizeTimeMs, "ms")} />
               <Diagnostic label="Rotation count" value={String(replayStatus.rotationCount)} />
-              <Diagnostic label="Frames observed" value={String(replayStatus.framesObserved)} />
+              <Diagnostic label="WGC source updates" value={String(replayStatus.framesObserved)} />
               <Diagnostic label="Last estimated capture intervals skipped" value={formatOptionalCount(replayStatus.lastEstimatedFramesMissed)} />
               <Diagnostic label="Estimated capture intervals skipped" value={String(replayStatus.estimatedFramesMissedTotal)} />
-              <Diagnostic label="Material WGC boundary gaps" value={String(replayStatus.materialSourceGapCount)} />
+              <Diagnostic label="Material WGC delivery gaps" value={String(replayStatus.materialSourceGapCount)} />
+              <Diagnostic label="Video timeline start QPC" value={formatOptionalCount(replayStatus.videoTimelineStartQpc100ns)} />
+              <Diagnostic label="CFR output / expected index" value={`${formatOptionalCount(replayStatus.schedulerCurrentOutputFrameIndex)} / ${formatOptionalCount(replayStatus.schedulerExpectedOutputFrameIndex)}`} />
+              <Diagnostic label="Scheduler late current / worst" value={formatMetricPair(replayStatus.schedulerCurrentLatenessMs, replayStatus.schedulerWorstLatenessMs)} />
+              <Diagnostic label="Scheduler catch-up frames" value={String(replayStatus.schedulerCatchUpFrames)} />
+              <Diagnostic label="Fresh / held output frames" value={`${replayStatus.freshOutputFrames} / ${replayStatus.heldOutputFrames}`} />
+              <Diagnostic label="Superseded WGC updates" value={String(replayStatus.supersededSourceUpdates)} />
+              <Diagnostic label="Missed realtime outputs" value={String(replayStatus.missedRealtimeOutputFrames)} />
+              <Diagnostic label="Source / output rate" value={`${formatOptionalMetric(replayStatus.sourceFrameUpdateRate, "FPS")} / ${formatOptionalMetric(replayStatus.outputCfrRate, "FPS")}`} />
               <Diagnostic label="Next encoder" value={formatEncoderPreparation(replayStatus)} />
               <Diagnostic label="Callback avg / worst" value={formatMetricPair(replayStatus.averageCallbackDurationMs, replayStatus.worstCallbackDurationMs)} />
-              <Diagnostic label="send_frame avg / worst" value={formatMetricPair(replayStatus.averageSendFrameDurationMs, replayStatus.worstSendFrameDurationMs)} />
+              <Diagnostic label="Scheduled submit avg / worst" value={formatMetricPair(replayStatus.averageSendFrameDurationMs, replayStatus.worstSendFrameDurationMs)} />
               <Diagnostic label="Callback lock avg / worst" value={formatMetricPair(replayStatus.averageCallbackLockWaitMs, replayStatus.worstCallbackLockWaitMs)} />
               <Diagnostic label="Rotation eval avg / worst" value={formatMetricPair(replayStatus.averageRotationEvaluationMs, replayStatus.worstRotationEvaluationMs)} />
               <Diagnostic label="Swap avg / worst" value={formatMetricPair(replayStatus.averageSwapDurationMs, replayStatus.worstSwapDurationMs)} />
@@ -1196,7 +1233,8 @@ export function ReplayPage() {
                     <code>#{String(segment.sequenceNumber).padStart(6, "0")}</code>
                     <span>{(segment.actualDurationMs / 1_000).toFixed(2)} s</span>
                     <span>{segment.frameCount} frames</span>
-                    <span>{segment.sourceFrameGapMs === null ? "final" : `${segment.sourceFrameGapMs.toFixed(2)} ms gap`}</span>
+                    <span>{segment.freshOutputFrameCount} fresh / {segment.heldOutputFrameCount} held</span>
+                    <span>{segment.sourceFrameGapMs === null ? "final" : `${segment.sourceFrameGapMs.toFixed(2)} ms source gap`}</span>
                     <span>{segment.encoderCreationTimeMs.toFixed(2)} ms create</span>
                     <span>{formatBytes(segment.fileSize)}</span>
                   </div>
@@ -1254,7 +1292,8 @@ export function ReplayPage() {
                       <code>Raw audio QPC {plan.rawAudioStartQpc100ns ?? "—"}→{plan.rawAudioEndQpc100ns ?? "—"}</code>
                       <code>Mapped playback {formatOptionalMetric(plan.mappedPlaybackStartMs, "ms")}→{formatOptionalMetric(plan.mappedPlaybackEndMs, "ms")}</code>
                       <span>Coverage {plan.finalClipCoverageMs.toFixed(3)} ms · leading/trailing uncovered {plan.leadingUncoveredMs.toFixed(3)} / {plan.trailingUncoveredMs.toFixed(3)} ms</span>
-                      <span>Trim before/after {plan.trimBeforeClipMs.toFixed(3)} / {plan.trimAfterClipMs.toFixed(3)} ms · boundary-gap material {plan.audioInDiscardedVideoGapsMs.toFixed(3)} ms · {plan.segmentCount} segments</span>
+                      <span>Trim before/after {plan.trimBeforeClipMs.toFixed(3)} / {plan.trimAfterClipMs.toFixed(3)} ms · {plan.segmentCount} segments</span>
+                      <code>Video QPC anchor {plan.clipCaptureStartQpc100ns}→{plan.clipCaptureEndQpc100ns}</code>
                       {plan.warning && <span className="save-replay-error">{plan.warning}</span>}
                     </div>
                   ))}
@@ -1264,7 +1303,8 @@ export function ReplayPage() {
                 <div className="timeline-consistency-report">
                   <small>Saved-replay timeline consistency</small>
                   <code>Raw WGC QPC {saveReplayStatus.videoTimeline.rawCaptureStartQpc100ns}→{saveReplayStatus.videoTimeline.rawCaptureEndQpc100ns} ({format100nsSeconds(saveReplayStatus.videoTimeline.rawCaptureSpan100ns)} s)</code>
-                  <code>Final playback 0.000→{format100nsSeconds(saveReplayStatus.videoTimeline.clipPlaybackDuration100ns)} s · discarded boundary capture time {format100nsSeconds(saveReplayStatus.videoTimeline.discardedCaptureGapDuration100ns)} s across {saveReplayStatus.videoTimeline.discardedCaptureGapCount} gaps</code>
+                  <code>Realtime video QPC {saveReplayStatus.videoTimeline.clipCaptureStartQpc100ns}→{saveReplayStatus.videoTimeline.clipCaptureEndQpc100ns}</code>
+                  <code>Final playback 0.000→{format100nsSeconds(saveReplayStatus.videoTimeline.clipPlaybackDuration100ns)} s · source delivery gaps preserved by held CFR frames</code>
                   <code>Internal / ffprobe {formatOptionalMetric(saveReplayStatus.internalEncodedDurationSeconds, "s")} / {formatOptionalMetric(saveReplayStatus.ffprobeDurationSeconds, "s")} · difference {formatOptionalMetric(saveReplayStatus.internalFfprobeDifferenceMs, "ms")}</code>
                   <small>{saveReplayStatus.videoTimeline.timestampStrategy}</small>
                 </div>
