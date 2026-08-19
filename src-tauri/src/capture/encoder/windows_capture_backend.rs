@@ -6,7 +6,12 @@ use windows_capture::encoder::{
 };
 use windows_capture::frame::Frame;
 
-use super::types::{EncodedVideoSample, EncoderBackendError, EncoderCodec, VideoEncoderBackend};
+use super::types::{
+    EncodedFrameOutput, EncodedVideoSample, EncoderBackendError, EncoderCodec,
+    EncoderFrameTelemetry, VideoEncoderBackend,
+};
+
+pub const ENCODER_FRAME_QUEUE_CAPACITY: usize = 8;
 
 /// Existing file-oriented encoder, isolated behind the common backend boundary.
 ///
@@ -36,7 +41,8 @@ impl WindowsCaptureFileBackend {
         };
         let video_settings = VideoSettingsBuilder::new(width, height)
             .sub_type(subtype)
-            .frame_rate(frame_rate);
+            .frame_rate(frame_rate)
+            .frame_queue_capacity(ENCODER_FRAME_QUEUE_CAPACITY);
         let encoder = VideoEncoder::new(
             video_settings,
             AudioSettingsBuilder::new().disabled(true),
@@ -55,14 +61,25 @@ impl VideoEncoderBackend for WindowsCaptureFileBackend {
     fn encode_frame(
         &mut self,
         frame: &mut Frame<'_>,
-    ) -> Result<Vec<EncodedVideoSample>, EncoderBackendError> {
-        self.encoder
+    ) -> Result<EncodedFrameOutput, EncoderBackendError> {
+        let encoder = self
+            .encoder
             .as_mut()
-            .ok_or_else(|| EncoderBackendError::new("The capture encoder was already finalized"))?
-            .send_frame(frame)
+            .ok_or_else(|| EncoderBackendError::new("The capture encoder was already finalized"))?;
+        let result = encoder
+            .send_frame_with_result(frame)
             .map_err(|error| EncoderBackendError::new(error.to_string()))?;
+        let queue_capacity = encoder.telemetry().snapshot().queue_capacity;
 
-        Ok(Vec::new())
+        Ok(EncodedFrameOutput {
+            samples: Vec::new(),
+            telemetry: EncoderFrameTelemetry {
+                queued: result.queued,
+                gpu_copy_duration: result.gpu_copy_duration,
+                queue_depth: result.queue_depth,
+                queue_capacity,
+            },
+        })
     }
 
     fn finish(mut self: Box<Self>) -> Result<Vec<EncodedVideoSample>, EncoderBackendError> {

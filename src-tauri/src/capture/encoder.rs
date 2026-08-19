@@ -12,7 +12,7 @@ use windows_capture::encoder::{
     VideoSettingsSubType,
 };
 
-pub use types::{EncoderChoice, EncoderCodec, VideoEncoderBackend};
+pub use types::{EncoderChoice, EncoderCodec, EncoderFrameTelemetry, VideoEncoderBackend};
 pub use windows_capture_backend::WindowsCaptureFileBackend;
 
 const PROBE_WIDTH: u32 = 1920;

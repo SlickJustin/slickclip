@@ -19,11 +19,13 @@ use windows_capture::settings::{
 
 use super::capture_test::ensure_borderless_capture_access;
 use super::encoder::{
-    resolve_encoder, EncoderChoice, EncoderCodec, VideoEncoderBackend, WindowsCaptureFileBackend,
+    resolve_encoder, EncoderChoice, EncoderCodec, EncoderFrameTelemetry, VideoEncoderBackend,
+    WindowsCaptureFileBackend,
 };
 use super::targets::{
     resolve_target, CaptureTargetRequest, NativeCaptureTarget, ResolvedCaptureTarget,
 };
+use super::WGC_FRAME_POOL_BUFFER_COUNT;
 use crate::replay::ReplayBufferManager;
 
 const BASELINE_DURATION: Duration = Duration::from_secs(20);
@@ -62,6 +64,16 @@ pub struct ContinuousBaselineResult {
     send_frame_over_33_33_ms: u64,
     send_frame_over_50_ms: u64,
     send_frame_over_100_ms: u64,
+    owned_frame_copies: u64,
+    average_gpu_copy_duration_ms: Option<f64>,
+    worst_gpu_copy_duration_ms: Option<f64>,
+    encoder_queue_depth: u64,
+    maximum_encoder_queue_depth: u64,
+    encoder_queue_capacity: usize,
+    encoder_queue_full_events: u64,
+    deliberately_dropped_frames: u64,
+    frame_pool_creation_method: String,
+    frame_pool_buffer_count: u32,
     finalization_duration_ms: Option<f64>,
 }
 
@@ -97,6 +109,16 @@ impl ContinuousBaselineResult {
             send_frame_over_33_33_ms: 0,
             send_frame_over_50_ms: 0,
             send_frame_over_100_ms: 0,
+            owned_frame_copies: 0,
+            average_gpu_copy_duration_ms: None,
+            worst_gpu_copy_duration_ms: None,
+            encoder_queue_depth: 0,
+            maximum_encoder_queue_depth: 0,
+            encoder_queue_capacity: 0,
+            encoder_queue_full_events: 0,
+            deliberately_dropped_frames: 0,
+            frame_pool_creation_method: "CreateFreeThreaded".to_string(),
+            frame_pool_buffer_count: WGC_FRAME_POOL_BUFFER_COUNT,
             finalization_duration_ms: None,
         }
     }
@@ -143,6 +165,13 @@ struct BaselineMeasurements {
     send_frame_over_33_33_ms: u64,
     send_frame_over_50_ms: u64,
     send_frame_over_100_ms: u64,
+    owned_frame_copies: u64,
+    gpu_copy: DurationStats,
+    encoder_queue_depth: u64,
+    maximum_encoder_queue_depth: u64,
+    encoder_queue_capacity: usize,
+    encoder_queue_full_events: u64,
+    deliberately_dropped_frames: u64,
     finalization_duration_ms: Option<f64>,
     finalization_error: Option<String>,
 }
@@ -166,6 +195,13 @@ impl BaselineMeasurements {
             send_frame_over_33_33_ms: 0,
             send_frame_over_50_ms: 0,
             send_frame_over_100_ms: 0,
+            owned_frame_copies: 0,
+            gpu_copy: DurationStats::default(),
+            encoder_queue_depth: 0,
+            maximum_encoder_queue_depth: 0,
+            encoder_queue_capacity: 0,
+            encoder_queue_full_events: 0,
+            deliberately_dropped_frames: 0,
             finalization_duration_ms: None,
             finalization_error: None,
         }
@@ -176,6 +212,7 @@ impl BaselineMeasurements {
         timestamp_100ns: i64,
         frame_rate: u32,
         send_frame_duration: Duration,
+        encoder: EncoderFrameTelemetry,
     ) {
         let expected_ms = 1_000.0 / f64::from(frame_rate.max(1));
         if let Some(previous) = self.last_source_timestamp_100ns {
@@ -207,6 +244,20 @@ impl BaselineMeasurements {
         self.send_frame_over_33_33_ms += u64::from(send_ms > 33.33);
         self.send_frame_over_50_ms += u64::from(send_ms > 50.0);
         self.send_frame_over_100_ms += u64::from(send_ms > 100.0);
+
+        self.encoder_queue_depth = encoder.queue_depth;
+        self.maximum_encoder_queue_depth =
+            self.maximum_encoder_queue_depth.max(encoder.queue_depth);
+        self.encoder_queue_capacity = encoder.queue_capacity;
+        if encoder.queued {
+            if let Some(copy_duration) = encoder.gpu_copy_duration {
+                self.owned_frame_copies += 1;
+                self.gpu_copy.record(copy_duration);
+            }
+        } else {
+            self.encoder_queue_full_events += 1;
+            self.deliberately_dropped_frames += 1;
+        }
     }
 }
 
@@ -295,7 +346,8 @@ impl GraphicsCaptureApiHandler for ContinuousBaselineHandler {
             })?
             .Duration;
         let send_started = Instant::now();
-        self.encoder
+        let encoded = self
+            .encoder
             .as_mut()
             .ok_or_else(|| {
                 BaselineHandlerError("The baseline encoder was already finalized.".to_string())
@@ -306,7 +358,7 @@ impl GraphicsCaptureApiHandler for ContinuousBaselineHandler {
             })?;
         let send_duration = send_started.elapsed();
         let mut measurements = lock_measurements(&self.measurements);
-        measurements.record_frame(timestamp, self.frame_rate, send_duration);
+        measurements.record_frame(timestamp, self.frame_rate, send_duration, encoded.telemetry);
         measurements.callback.record(callback_started.elapsed());
         Ok(())
     }
@@ -516,6 +568,16 @@ fn run_baseline(
         send_frame_over_33_33_ms: telemetry.send_frame_over_33_33_ms,
         send_frame_over_50_ms: telemetry.send_frame_over_50_ms,
         send_frame_over_100_ms: telemetry.send_frame_over_100_ms,
+        owned_frame_copies: telemetry.owned_frame_copies,
+        average_gpu_copy_duration_ms: telemetry.gpu_copy.average_ms(),
+        worst_gpu_copy_duration_ms: telemetry.gpu_copy.worst_ms(),
+        encoder_queue_depth: telemetry.encoder_queue_depth,
+        maximum_encoder_queue_depth: telemetry.maximum_encoder_queue_depth,
+        encoder_queue_capacity: telemetry.encoder_queue_capacity,
+        encoder_queue_full_events: telemetry.encoder_queue_full_events,
+        deliberately_dropped_frames: telemetry.deliberately_dropped_frames,
+        frame_pool_creation_method: "CreateFreeThreaded".to_string(),
+        frame_pool_buffer_count: WGC_FRAME_POOL_BUFFER_COUNT,
         finalization_duration_ms: telemetry.finalization_duration_ms,
     }
 }
@@ -534,7 +596,8 @@ where
         DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
         flags,
-    );
+    )
+    .frame_pool_buffer_count(WGC_FRAME_POOL_BUFFER_COUNT);
     let control =
         ContinuousBaselineHandler::start_free_threaded(settings).map_err(map_capture_error)?;
     let capture_started = lock_measurements(&measurements).capture_started;
@@ -607,13 +670,34 @@ fn reserve_output_path(output_dir: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::BaselineMeasurements;
+    use crate::capture::encoder::EncoderFrameTelemetry;
     use std::time::Duration;
 
     #[test]
     fn baseline_source_gap_telemetry_counts_missing_intervals() {
         let mut telemetry = BaselineMeasurements::new();
-        telemetry.record_frame(1_000_000, 60, Duration::from_micros(500));
-        telemetry.record_frame(1_833_333, 60, Duration::from_millis(40));
+        telemetry.record_frame(
+            1_000_000,
+            60,
+            Duration::from_micros(500),
+            EncoderFrameTelemetry {
+                queued: true,
+                gpu_copy_duration: Some(Duration::from_micros(250)),
+                queue_depth: 1,
+                queue_capacity: 8,
+            },
+        );
+        telemetry.record_frame(
+            1_833_333,
+            60,
+            Duration::from_millis(40),
+            EncoderFrameTelemetry {
+                queued: false,
+                gpu_copy_duration: None,
+                queue_depth: 8,
+                queue_capacity: 8,
+            },
+        );
 
         assert_eq!(telemetry.frames_observed, 2);
         assert_eq!(telemetry.consecutive_delta_count, 1);
@@ -621,5 +705,9 @@ mod tests {
         assert_eq!(telemetry.estimated_frames_missed, 4);
         assert_eq!(telemetry.send_frame_over_33_33_ms, 1);
         assert_eq!(telemetry.send_frame_over_50_ms, 0);
+        assert_eq!(telemetry.owned_frame_copies, 1);
+        assert_eq!(telemetry.maximum_encoder_queue_depth, 8);
+        assert_eq!(telemetry.encoder_queue_full_events, 1);
+        assert_eq!(telemetry.deliberately_dropped_frames, 1);
     }
 }

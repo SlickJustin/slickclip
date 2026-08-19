@@ -39,6 +39,16 @@ type ContinuousBaselineResult = {
   sendFrameOver33_33Ms: number;
   sendFrameOver50Ms: number;
   sendFrameOver100Ms: number;
+  ownedFrameCopies: number;
+  averageGpuCopyDurationMs: number | null;
+  worstGpuCopyDurationMs: number | null;
+  encoderQueueDepth: number;
+  maximumEncoderQueueDepth: number;
+  encoderQueueCapacity: number;
+  encoderQueueFullEvents: number;
+  deliberatelyDroppedFrames: number;
+  framePoolCreationMethod: string;
+  framePoolBufferCount: number;
   finalizationDurationMs: number | null;
 };
 
@@ -179,6 +189,16 @@ type ReplayBufferStatus = {
   averageCallbackFilesystemMs: number | null;
   worstCallbackFilesystemMs: number | null;
   callbackFilesystemOperationCount: number;
+  ownedFrameCopies: number;
+  averageGpuCopyDurationMs: number | null;
+  worstGpuCopyDurationMs: number | null;
+  encoderQueueDepth: number;
+  maximumEncoderQueueDepth: number;
+  encoderQueueCapacity: number;
+  encoderQueueFullEvents: number;
+  deliberatelyDroppedFrames: number;
+  framePoolCreationMethod: string;
+  framePoolBufferCount: number;
   rotationLifecycle: {
     activeSequenceNumber: number | null;
     nextSequenceNumber: number | null;
@@ -295,6 +315,16 @@ const initialReplayStatus: ReplayBufferStatus = {
   averageCallbackFilesystemMs: null,
   worstCallbackFilesystemMs: null,
   callbackFilesystemOperationCount: 0,
+  ownedFrameCopies: 0,
+  averageGpuCopyDurationMs: null,
+  worstGpuCopyDurationMs: null,
+  encoderQueueDepth: 0,
+  maximumEncoderQueueDepth: 0,
+  encoderQueueCapacity: 0,
+  encoderQueueFullEvents: 0,
+  deliberatelyDroppedFrames: 0,
+  framePoolCreationMethod: "CreateFreeThreaded",
+  framePoolBufferCount: 2,
   rotationLifecycle: {
     activeSequenceNumber: null,
     nextSequenceNumber: null,
@@ -615,6 +645,16 @@ export function ReplayPage() {
         sendFrameOver33_33Ms: 0,
         sendFrameOver50Ms: 0,
         sendFrameOver100Ms: 0,
+        ownedFrameCopies: 0,
+        averageGpuCopyDurationMs: null,
+        worstGpuCopyDurationMs: null,
+        encoderQueueDepth: 0,
+        maximumEncoderQueueDepth: 0,
+        encoderQueueCapacity: 0,
+        encoderQueueFullEvents: 0,
+        deliberatelyDroppedFrames: 0,
+        framePoolCreationMethod: "CreateFreeThreaded",
+        framePoolBufferCount: 2,
         finalizationDurationMs: null,
       });
     } finally {
@@ -951,6 +991,12 @@ export function ReplayPage() {
               <Diagnostic label="State update avg / worst" value={formatMetricPair(replayStatus.averageCallbackStateUpdateMs, replayStatus.worstCallbackStateUpdateMs)} />
               <Diagnostic label="Callback filesystem avg / worst" value={formatMetricPair(replayStatus.averageCallbackFilesystemMs, replayStatus.worstCallbackFilesystemMs)} />
               <Diagnostic label="Callback filesystem ops" value={String(replayStatus.callbackFilesystemOperationCount)} />
+              <Diagnostic label="Owned GPU frame copies" value={String(replayStatus.ownedFrameCopies)} />
+              <Diagnostic label="GPU copy avg / worst" value={formatMetricPair(replayStatus.averageGpuCopyDurationMs, replayStatus.worstGpuCopyDurationMs)} />
+              <Diagnostic label="Encoder queue depth / max" value={`${replayStatus.encoderQueueDepth} / ${replayStatus.maximumEncoderQueueDepth}`} />
+              <Diagnostic label="Encoder queue capacity" value={String(replayStatus.encoderQueueCapacity)} />
+              <Diagnostic label="Queue-full / dropped frames" value={`${replayStatus.encoderQueueFullEvents} / ${replayStatus.deliberatelyDroppedFrames}`} />
+              <Diagnostic label="WGC frame pool" value={`${replayStatus.framePoolCreationMethod} · ${replayStatus.framePoolBufferCount} buffers`} />
               <Diagnostic label="send_frame > 16.67 / 33.33 ms" value={`${replayStatus.sendFrameOver16_67Ms} / ${replayStatus.sendFrameOver33_33Ms}`} />
               <Diagnostic label="send_frame > 50 / 100 ms" value={`${replayStatus.sendFrameOver50Ms} / ${replayStatus.sendFrameOver100Ms}`} />
               <Diagnostic label="Pending finalizations" value={String(replayStatus.pendingFinalizations)} />
@@ -999,6 +1045,12 @@ export function ReplayPage() {
                         <Diagnostic label="send_frame avg / worst" value={formatMetricPair(baselineResult.averageSendFrameDurationMs, baselineResult.worstSendFrameDurationMs)} />
                         <Diagnostic label="send_frame > 16.67 / 33.33 ms" value={`${baselineResult.sendFrameOver16_67Ms} / ${baselineResult.sendFrameOver33_33Ms}`} />
                         <Diagnostic label="send_frame > 50 / 100 ms" value={`${baselineResult.sendFrameOver50Ms} / ${baselineResult.sendFrameOver100Ms}`} />
+                        <Diagnostic label="Owned GPU frame copies" value={String(baselineResult.ownedFrameCopies)} />
+                        <Diagnostic label="GPU copy avg / worst" value={formatMetricPair(baselineResult.averageGpuCopyDurationMs, baselineResult.worstGpuCopyDurationMs)} />
+                        <Diagnostic label="Encoder queue depth / max" value={`${baselineResult.encoderQueueDepth} / ${baselineResult.maximumEncoderQueueDepth}`} />
+                        <Diagnostic label="Encoder queue capacity" value={String(baselineResult.encoderQueueCapacity)} />
+                        <Diagnostic label="Queue-full / dropped frames" value={`${baselineResult.encoderQueueFullEvents} / ${baselineResult.deliberatelyDroppedFrames}`} />
+                        <Diagnostic label="WGC frame pool" value={`${baselineResult.framePoolCreationMethod} · ${baselineResult.framePoolBufferCount} buffers`} />
                         <Diagnostic label="First source timestamp" value={formatOptionalCount(baselineResult.firstSourceTimestamp100ns)} />
                         <Diagnostic label="Last source timestamp" value={formatOptionalCount(baselineResult.lastSourceTimestamp100ns)} />
                         <Diagnostic label="Finalize after capture" value={formatOptionalMetric(baselineResult.finalizationDurationMs, "ms")} />

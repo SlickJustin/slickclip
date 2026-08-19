@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use windows_capture::frame::Frame;
@@ -99,6 +100,20 @@ pub struct EncodedVideoSample {
     pub discontinuity: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct EncoderFrameTelemetry {
+    pub queued: bool,
+    pub gpu_copy_duration: Option<Duration>,
+    pub queue_depth: u64,
+    pub queue_capacity: usize,
+}
+
+#[allow(dead_code)]
+pub struct EncodedFrameOutput {
+    pub samples: Vec<EncodedVideoSample>,
+    pub telemetry: EncoderFrameTelemetry,
+}
+
 #[derive(Debug)]
 pub struct EncoderBackendError(String);
 
@@ -123,7 +138,7 @@ pub trait VideoEncoderBackend: Send {
     fn encode_frame(
         &mut self,
         frame: &mut Frame<'_>,
-    ) -> Result<Vec<EncodedVideoSample>, EncoderBackendError>;
+    ) -> Result<EncodedFrameOutput, EncoderBackendError>;
 
     fn finish(self: Box<Self>) -> Result<Vec<EncodedVideoSample>, EncoderBackendError>;
 }

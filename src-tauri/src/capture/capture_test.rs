@@ -24,6 +24,7 @@ use super::encoder::{
 use super::targets::{
     resolve_target, CaptureTargetRequest, NativeCaptureTarget, ResolvedCaptureTarget,
 };
+use super::WGC_FRAME_POOL_BUFFER_COUNT;
 
 const RECORDING_STARTED_EVENT: &str = "capture-test-recording-started";
 const CAPTURE_DURATION: Duration = Duration::from_secs(5);
@@ -387,7 +388,8 @@ where
         DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
         flags,
-    );
+    )
+    .frame_pool_buffer_count(WGC_FRAME_POOL_BUFFER_COUNT);
 
     CaptureTestHandler::start(settings)
 }

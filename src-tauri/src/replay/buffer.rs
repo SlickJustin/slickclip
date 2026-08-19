@@ -21,11 +21,13 @@ use windows_capture::settings::{
 use crate::capture::capture_test::ensure_borderless_capture_access;
 use crate::capture::continuous_baseline::is_continuous_baseline_active;
 use crate::capture::encoder::{
-    resolve_encoder, EncoderChoice, EncoderCodec, VideoEncoderBackend, WindowsCaptureFileBackend,
+    resolve_encoder, EncoderChoice, EncoderCodec, EncoderFrameTelemetry, VideoEncoderBackend,
+    WindowsCaptureFileBackend,
 };
 use crate::capture::targets::{
     resolve_target, CaptureTargetRequest, NativeCaptureTarget, ResolvedCaptureTarget,
 };
+use crate::capture::WGC_FRAME_POOL_BUFFER_COUNT;
 
 use super::segment::{CompletedSegment, SegmentRing};
 use super::state::{
@@ -92,6 +94,13 @@ struct ReplayCallbackTelemetry {
     send_over_33_33_ms: AtomicU64,
     send_over_50_ms: AtomicU64,
     send_over_100_ms: AtomicU64,
+    owned_frame_copies: AtomicU64,
+    gpu_copy: AtomicDurationStats,
+    encoder_queue_depth: AtomicU64,
+    maximum_encoder_queue_depth: AtomicU64,
+    encoder_queue_capacity: AtomicU64,
+    encoder_queue_full_events: AtomicU64,
+    deliberately_dropped_frames: AtomicU64,
 }
 
 impl ReplayCallbackTelemetry {
@@ -108,6 +117,13 @@ impl ReplayCallbackTelemetry {
         self.send_over_33_33_ms.store(0, Ordering::Relaxed);
         self.send_over_50_ms.store(0, Ordering::Relaxed);
         self.send_over_100_ms.store(0, Ordering::Relaxed);
+        self.owned_frame_copies.store(0, Ordering::Relaxed);
+        self.gpu_copy.reset();
+        self.encoder_queue_depth.store(0, Ordering::Relaxed);
+        self.maximum_encoder_queue_depth.store(0, Ordering::Relaxed);
+        self.encoder_queue_capacity.store(0, Ordering::Relaxed);
+        self.encoder_queue_full_events.store(0, Ordering::Relaxed);
+        self.deliberately_dropped_frames.store(0, Ordering::Relaxed);
     }
 
     fn record_send_frame(&self, duration: Duration) {
@@ -121,6 +137,26 @@ impl ReplayCallbackTelemetry {
             .fetch_add(u64::from(duration_ms > 50.0), Ordering::Relaxed);
         self.send_over_100_ms
             .fetch_add(u64::from(duration_ms > 100.0), Ordering::Relaxed);
+    }
+
+    fn record_encoder_frame(&self, telemetry: EncoderFrameTelemetry) {
+        self.encoder_queue_depth
+            .store(telemetry.queue_depth, Ordering::Relaxed);
+        self.maximum_encoder_queue_depth
+            .fetch_max(telemetry.queue_depth, Ordering::Relaxed);
+        self.encoder_queue_capacity
+            .store(telemetry.queue_capacity as u64, Ordering::Relaxed);
+        if telemetry.queued {
+            if let Some(copy_duration) = telemetry.gpu_copy_duration {
+                self.owned_frame_copies.fetch_add(1, Ordering::Relaxed);
+                self.gpu_copy.record(copy_duration);
+            }
+        } else {
+            self.encoder_queue_full_events
+                .fetch_add(1, Ordering::Relaxed);
+            self.deliberately_dropped_frames
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -261,6 +297,8 @@ impl ReplayInner {
             callback_telemetry.state_update.snapshot();
         let (average_callback_filesystem_ms, worst_callback_filesystem_ms) =
             callback_telemetry.filesystem.snapshot();
+        let (average_gpu_copy_duration_ms, worst_gpu_copy_duration_ms) =
+            callback_telemetry.gpu_copy.snapshot();
         ReplayBufferStatus {
             state: self.state,
             error_message: self.error_message.clone(),
@@ -331,6 +369,28 @@ impl ReplayInner {
             callback_filesystem_operation_count: callback_telemetry
                 .filesystem_operation_count
                 .load(Ordering::Relaxed),
+            owned_frame_copies: callback_telemetry
+                .owned_frame_copies
+                .load(Ordering::Relaxed),
+            average_gpu_copy_duration_ms,
+            worst_gpu_copy_duration_ms,
+            encoder_queue_depth: callback_telemetry
+                .encoder_queue_depth
+                .load(Ordering::Relaxed),
+            maximum_encoder_queue_depth: callback_telemetry
+                .maximum_encoder_queue_depth
+                .load(Ordering::Relaxed),
+            encoder_queue_capacity: callback_telemetry
+                .encoder_queue_capacity
+                .load(Ordering::Relaxed),
+            encoder_queue_full_events: callback_telemetry
+                .encoder_queue_full_events
+                .load(Ordering::Relaxed),
+            deliberately_dropped_frames: callback_telemetry
+                .deliberately_dropped_frames
+                .load(Ordering::Relaxed),
+            frame_pool_creation_method: "CreateFreeThreaded".to_string(),
+            frame_pool_buffer_count: WGC_FRAME_POOL_BUFFER_COUNT,
             rotation_lifecycle: self.rotation_lifecycle.clone(),
             recent_segments: self.ring.recent(RECENT_SEGMENT_LIMIT),
         }
@@ -1052,6 +1112,11 @@ struct ActiveSegment {
     last_frame_submitted_ms: Option<f64>,
 }
 
+struct FrameEncodeResult {
+    send_duration: Duration,
+    telemetry: EncoderFrameTelemetry,
+}
+
 impl ActiveSegment {
     fn create(
         flags: &ReplayCaptureFlags,
@@ -1115,13 +1180,14 @@ impl ActiveSegment {
         &mut self,
         frame: &mut Frame<'_>,
         session_started: Instant,
-    ) -> Result<Duration, String> {
+    ) -> Result<FrameEncodeResult, String> {
         let timestamp = frame
             .timestamp()
             .map_err(|error| format!("Could not read replay frame timestamp: {error}"))?
             .Duration;
         let send_started = Instant::now();
-        self.backend
+        let encoded = self
+            .backend
             .encode_frame(frame)
             .map_err(|error| format!("Replay encoder rejected a captured frame: {error}"))?;
         let send_duration = send_started.elapsed();
@@ -1136,7 +1202,10 @@ impl ActiveSegment {
         self.last_frame_timestamp = Some(timestamp);
         self.last_frame_submitted_ms = Some(submitted_ms);
         self.frame_count += 1;
-        Ok(send_duration)
+        Ok(FrameEncodeResult {
+            send_duration,
+            telemetry: encoded.telemetry,
+        })
     }
 
     fn into_finalize_job(
@@ -1580,13 +1649,17 @@ impl ReplayCaptureHandler {
             .as_ref()
             .and_then(|segment| segment.last_frame_timestamp)
             .ok_or_else(|| ReplayHandlerError::new("The active replay segment has no frames."))?;
-        let send_duration = next
+        let encoded = next
             .encode_frame(frame, self.session_started)
             .map_err(ReplayHandlerError::new)?;
         self.flags
             .shared
             .callback_telemetry
-            .record_send_frame(send_duration);
+            .record_send_frame(encoded.send_duration);
+        self.flags
+            .shared
+            .callback_telemetry
+            .record_encoder_frame(encoded.telemetry);
         let next_first_timestamp = next.first_frame_timestamp.ok_or_else(|| {
             ReplayHandlerError::new("The prepared encoder did not accept its first frame.")
         })?;
@@ -1693,7 +1766,7 @@ impl ReplayCaptureHandler {
         phases.rotation_evaluation += evaluation_started.elapsed();
 
         let was_empty = !self.active.as_ref().is_some_and(ActiveSegment::has_frames);
-        let send_duration = self
+        let encoded = self
             .active
             .as_mut()
             .ok_or_else(|| ReplayHandlerError::new("The active replay segment is missing."))?
@@ -1702,7 +1775,11 @@ impl ReplayCaptureHandler {
         self.flags
             .shared
             .callback_telemetry
-            .record_send_frame(send_duration);
+            .record_send_frame(encoded.send_duration);
+        self.flags
+            .shared
+            .callback_telemetry
+            .record_encoder_frame(encoded.telemetry);
         if was_empty {
             self.rotation_lifecycle.active_segment_first_frame_ms = self
                 .active
@@ -1857,7 +1934,8 @@ where
         DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
         flags,
-    );
+    )
+    .frame_pool_buffer_count(WGC_FRAME_POOL_BUFFER_COUNT);
 
     let control =
         ReplayCaptureHandler::start_free_threaded(settings).map_err(|error| match error {
