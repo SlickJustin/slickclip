@@ -5,7 +5,10 @@ mod track;
 
 use serde::{Deserialize, Serialize};
 
-pub use buffer::{AudioReplayShared, AudioReplayStatus, AudioSnapshotPinGuard, AudioSnapshotPlan};
+pub use buffer::{
+    AudioReplayShared, AudioReplayStatus, AudioSaveBarrierTelemetry, AudioSnapshotPinGuard,
+    AudioSnapshotPlan,
+};
 pub use clock::ReplaySessionClock;
 pub use track::AudioReplaySession;
 

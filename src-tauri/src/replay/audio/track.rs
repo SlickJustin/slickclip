@@ -454,6 +454,12 @@ fn capture_one(
                 / i128::from(status.format.as_ref().map(|f| f.sample_rate).unwrap_or(1)))
                 as i64;
             let audio_end_qpc = qpc.saturating_add(packet_duration_100ns);
+            status.newest_captured_audio_qpc_100ns = Some(
+                status
+                    .newest_captured_audio_qpc_100ns
+                    .unwrap_or(i64::MIN)
+                    .max(audio_end_qpc),
+            );
             let session_end_100ns = clock.normalized_qpc_to_session_100ns(audio_end_qpc);
             status.latest_audio_position_ms = Some(session_end_100ns as f64 / 10_000.0);
             status.first_device_position.get_or_insert(device_position);
@@ -598,9 +604,19 @@ fn writer_loop(
             wav.discontinuities += u64::from(packet.discontinuity);
             wav.timestamp_errors += u64::from(packet.timestamp_error);
             offset_frames += take;
+            if let Some(written_through) = wav.last_qpc {
+                track.record_written_through(written_through);
+            }
             if wav.frames >= target_frames {
                 finalize_wav(&track, &format, &clock, active.take().unwrap())?;
             }
+        }
+        if active
+            .as_ref()
+            .and_then(|wav| wav.last_qpc)
+            .is_some_and(|end| track.should_cut_after_packet(end))
+        {
+            finalize_wav(&track, &format, &clock, active.take().unwrap())?;
         }
     }
     if let Some(wav) = active {

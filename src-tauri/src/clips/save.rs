@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
 use crate::replay::{
-    AudioSnapshotPlan, ReplayBufferManager, ReplayLifecycleState, ReplaySaveSnapshot,
-    SavedReplayTimeline,
+    AudioSaveBarrierTelemetry, AudioSnapshotPlan, ReplayBufferManager, ReplayLifecycleState,
+    ReplaySaveSnapshot, SavedReplayTimeline,
 };
 
 use super::assembler::{ClipAssembler, FfmpegClipAssembler};
@@ -49,6 +49,11 @@ pub struct SaveReplayStatus {
     pub codec: Option<String>,
     pub error_message: Option<String>,
     pub audio_snapshot_plans: Vec<AudioSnapshotPlan>,
+    pub audio_save_barriers: Vec<AudioSaveBarrierTelemetry>,
+    pub video_boundary_wait_ms: Option<f64>,
+    pub audio_barrier_wait_ms: Option<f64>,
+    pub snapshot_ready_latency_ms: Option<f64>,
+    pub total_save_latency_ms: Option<f64>,
     pub video_timeline: Option<SavedReplayTimeline>,
     pub internal_encoded_duration_seconds: Option<f64>,
     pub ffprobe_duration_seconds: Option<f64>,
@@ -72,6 +77,11 @@ impl SaveReplayStatus {
             codec: None,
             error_message: None,
             audio_snapshot_plans: Vec::new(),
+            audio_save_barriers: Vec::new(),
+            video_boundary_wait_ms: None,
+            audio_barrier_wait_ms: None,
+            snapshot_ready_latency_ms: None,
+            total_save_latency_ms: None,
             video_timeline: None,
             internal_encoded_duration_seconds: None,
             ffprobe_duration_seconds: None,
@@ -143,6 +153,11 @@ impl SharedSaveJob {
             codec: None,
             error_message: None,
             audio_snapshot_plans: Vec::new(),
+            audio_save_barriers: Vec::new(),
+            video_boundary_wait_ms: None,
+            audio_barrier_wait_ms: None,
+            snapshot_ready_latency_ms: None,
+            total_save_latency_ms: None,
             video_timeline: None,
             internal_encoded_duration_seconds: None,
             ffprobe_duration_seconds: None,
@@ -180,12 +195,16 @@ impl SharedSaveJob {
             .first()
             .map(|segment| segment.codec.clone());
         status.audio_snapshot_plans = snapshot.audio_snapshot_plans.clone();
+        status.audio_save_barriers = snapshot.audio_save_barriers.clone();
+        status.video_boundary_wait_ms = Some(snapshot.video_boundary_wait_ms);
+        status.audio_barrier_wait_ms = Some(snapshot.audio_barrier_wait_ms);
+        status.snapshot_ready_latency_ms = Some(snapshot.snapshot_ready_latency_ms);
         status.video_timeline = Some(snapshot.video_timeline.clone());
         status.internal_encoded_duration_seconds =
             Some(snapshot.video_timeline.clip_playback_duration_100ns as f64 / 10_000_000.0);
     }
 
-    fn complete(&self, result: super::assembler::ClipAssemblyResult) {
+    fn complete(&self, result: super::assembler::ClipAssemblyResult, total_save_latency_ms: f64) {
         let mut status = self.lock();
         status.state = SaveJobState::Completed;
         status.actual_saved_duration_seconds = Some(result.actual_duration_seconds);
@@ -197,6 +216,7 @@ impl SharedSaveJob {
         status.internal_encoded_duration_seconds = Some(result.internal_encoded_duration_seconds);
         status.ffprobe_duration_seconds = result.ffprobe_duration_seconds;
         status.internal_ffprobe_difference_ms = result.internal_ffprobe_difference_ms;
+        status.total_save_latency_ms = Some(total_save_latency_ms);
         status.error_message = None;
     }
 
@@ -204,6 +224,21 @@ impl SharedSaveJob {
         let mut status = self.lock();
         status.state = SaveJobState::Error;
         status.error_message = Some(error.into());
+        status.output_path = None;
+        status.file_size = None;
+    }
+
+    fn fail_with_audio_barriers(
+        &self,
+        error: impl Into<String>,
+        barriers: Vec<AudioSaveBarrierTelemetry>,
+        total_save_latency_ms: f64,
+    ) {
+        let mut status = self.lock();
+        status.state = SaveJobState::Error;
+        status.error_message = Some(error.into());
+        status.audio_save_barriers = barriers;
+        status.total_save_latency_ms = Some(total_save_latency_ms);
         status.output_path = None;
         status.file_size = None;
     }
@@ -300,6 +335,7 @@ fn run_save_job(
     output_directory: &PathBuf,
     shared: Arc<SharedSaveJob>,
 ) {
+    let save_started = Instant::now();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         shared.set_state(SaveJobState::FinalizingCurrentSegment);
         let snapshot = replay.snapshot_for_save()?;
@@ -310,10 +346,19 @@ fn run_save_job(
         FfmpegClipAssembler.assemble(&snapshot.segments, output_directory, &timestamp)
     }));
 
+    let total_save_latency_ms = save_started.elapsed().as_secs_f64() * 1_000.0;
     match result {
-        Ok(Ok(result)) => shared.complete(result),
-        Ok(Err(error)) => shared.fail(error),
-        Err(_) => shared.fail("The Save Replay worker panicked."),
+        Ok(Ok(result)) => shared.complete(result, total_save_latency_ms),
+        Ok(Err(error)) => shared.fail_with_audio_barriers(
+            error,
+            replay.status().audio.save_barriers,
+            total_save_latency_ms,
+        ),
+        Err(_) => shared.fail_with_audio_barriers(
+            "The Save Replay worker panicked.",
+            replay.status().audio.save_barriers,
+            total_save_latency_ms,
+        ),
     }
 }
 

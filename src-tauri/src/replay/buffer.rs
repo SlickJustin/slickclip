@@ -31,8 +31,8 @@ use crate::capture::targets::{
 use crate::capture::WGC_FRAME_POOL_BUFFER_COUNT;
 
 use super::audio::{
-    AudioReplayConfiguration, AudioReplaySession, AudioReplayShared, AudioSnapshotPinGuard,
-    AudioSnapshotPlan, ReplaySessionClock,
+    AudioReplayConfiguration, AudioReplaySession, AudioReplayShared, AudioSaveBarrierTelemetry,
+    AudioSnapshotPinGuard, AudioSnapshotPlan, ReplaySessionClock,
 };
 use super::segment::{average_bitrate_mbps, CompletedSegment, SegmentRing, VideoFrameTimingPoint};
 use super::state::{
@@ -49,6 +49,8 @@ const MAX_CATCH_UP_FRAMES_PER_WAKE: u64 = 4;
 const MAX_REALTIME_BACKLOG_FRAMES: u64 = 120;
 const MAX_PENDING_SOURCE_FRAMES: usize = 8;
 const NORMAL_PREWARM_LEAD_SECONDS: u64 = 1;
+// Two seconds for a normal WAV segment plus bounded queue/write/finalize headroom.
+const AUDIO_SAVE_BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
@@ -244,6 +246,10 @@ pub struct ReplaySaveSnapshot {
     pub segments: Vec<CompletedSegment>,
     pub video_timeline: SavedReplayTimeline,
     pub audio_snapshot_plans: Vec<AudioSnapshotPlan>,
+    pub audio_save_barriers: Vec<AudioSaveBarrierTelemetry>,
+    pub video_boundary_wait_ms: f64,
+    pub audio_barrier_wait_ms: f64,
+    pub snapshot_ready_latency_ms: f64,
     _pins: SegmentPinGuard,
     _audio_pins: AudioSnapshotPinGuard,
 }
@@ -1013,6 +1019,8 @@ impl SharedReplay {
         final_sequence_number: u64,
         save_request_timestamp_ms: u64,
         save_request_qpc_100ns: i64,
+        video_boundary_wait_ms: f64,
+        save_started: Instant,
     ) -> Result<ReplaySaveSnapshot, String> {
         let (segments, requested_duration_seconds, sequence_numbers) = {
             let mut inner = self.lock();
@@ -1043,12 +1051,19 @@ impl SharedReplay {
             (segments, requested_duration_seconds, sequence_numbers)
         };
 
+        let video_pins = SegmentPinGuard {
+            shared: Arc::clone(self),
+            sequence_numbers,
+        };
         let video_timeline = SavedReplayTimeline::from_segments(&segments)?;
         debug_assert_eq!(
             video_timeline.video_pts_to_clip_100ns(segments[0].sequence_number, 0),
             Some(0)
         );
-        let (audio_snapshot_plans, audio_pins) = self.audio.plan_and_pin(&video_timeline);
+        let audio = self
+            .audio
+            .wait_for_coverage_and_plan(&video_timeline, AUDIO_SAVE_BARRIER_TIMEOUT)
+            .map_err(|failure| failure.message)?;
 
         Ok(ReplaySaveSnapshot {
             save_request_timestamp_ms,
@@ -1056,12 +1071,13 @@ impl SharedReplay {
             requested_duration_seconds,
             segments,
             video_timeline,
-            audio_snapshot_plans,
-            _pins: SegmentPinGuard {
-                shared: Arc::clone(self),
-                sequence_numbers,
-            },
-            _audio_pins: audio_pins,
+            audio_snapshot_plans: audio.plans,
+            audio_save_barriers: audio.barriers,
+            video_boundary_wait_ms,
+            audio_barrier_wait_ms: audio.wait_duration.as_secs_f64() * 1_000.0,
+            snapshot_ready_latency_ms: save_started.elapsed().as_secs_f64() * 1_000.0,
+            _pins: video_pins,
+            _audio_pins: audio.pins,
         })
     }
 
@@ -1243,14 +1259,22 @@ impl ReplayBufferManager {
     }
 
     pub fn snapshot_for_save(&self) -> Result<ReplaySaveSnapshot, String> {
+        let save_started = Instant::now();
+        self.shared.audio.clear_save_barriers();
         let (request_id, requested_at, requested_qpc_100ns) =
             self.shared.request_save_boundary()?;
         let (final_sequence_number, acknowledged_qpc_100ns) = self
             .shared
             .wait_for_save_boundary(request_id, Duration::from_secs(15))?;
         debug_assert_eq!(requested_qpc_100ns, acknowledged_qpc_100ns);
-        self.shared
-            .pin_snapshot(final_sequence_number, requested_at, acknowledged_qpc_100ns)
+        let video_boundary_wait_ms = save_started.elapsed().as_secs_f64() * 1_000.0;
+        self.shared.pin_snapshot(
+            final_sequence_number,
+            requested_at,
+            acknowledged_qpc_100ns,
+            video_boundary_wait_ms,
+            save_started,
+        )
     }
 
     pub fn shutdown_and_cleanup(&self) {
@@ -2871,6 +2895,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::sync::Arc;
+    use std::time::Instant;
 
     use super::{
         calculate_rotation_diagnostics, cfr_duration_100ns, due_source_update_count,
@@ -3181,7 +3206,9 @@ mod tests {
             }
         }
 
-        let snapshot = shared.pin_snapshot(3, 123, 60_000_000).unwrap();
+        let snapshot = shared
+            .pin_snapshot(3, 123, 60_000_000, 10.0, Instant::now())
+            .unwrap();
         let first_path = directory.join("segment-000001.mp4");
         shared.complete_segment(completed_segment(&directory.join("segment-000004.mp4"), 4));
         assert!(first_path.exists());

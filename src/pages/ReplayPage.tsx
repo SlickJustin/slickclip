@@ -106,10 +106,11 @@ type AudioListResult<T> = { success: boolean; devices?: T[]; applications?: T[];
 type AudioTrackRole = "game" | "voiceChat" | "microphone" | "other";
 type AudioTrackState = "disabled" | "preparing" | "prepared" | "running" | "ended" | "error" | "stopped";
 type AudioFormat = { sampleFormat: string; sampleRate: number; channelCount: number; bitsPerSample: number; validBitsPerSample: number | null };
-type AudioTrackStatus = { role: AudioTrackRole; enabled: boolean; state: AudioTrackState; sourceLabel: string | null; format: AudioFormat | null; errorMessage: string | null; retainedDurationSeconds: number; segmentCount: number; totalRetainedBytes: number; packetCount: number; discontinuityCount: number; timestampErrorCount: number; currentQueueDepth: number; maximumQueueDepth: number; queueCapacity: number; queueFullEvents: number; droppedPackets: number; droppedSampleFrames: number; expectedDurationFromSamplesSeconds: number; qpcElapsedDurationSeconds: number | null; sampleQpcDifferenceMs: number | null; estimatedClockDriftPpm: number | null; writerWriteTimeMs: number; writerFinalizeTimeMs: number };
+type AudioTrackStatus = { role: AudioTrackRole; enabled: boolean; state: AudioTrackState; sourceLabel: string | null; format: AudioFormat | null; errorMessage: string | null; retainedDurationSeconds: number; segmentCount: number; totalRetainedBytes: number; packetCount: number; discontinuityCount: number; timestampErrorCount: number; currentQueueDepth: number; maximumQueueDepth: number; queueCapacity: number; queueFullEvents: number; droppedPackets: number; droppedSampleFrames: number; expectedDurationFromSamplesSeconds: number; qpcElapsedDurationSeconds: number | null; sampleQpcDifferenceMs: number | null; estimatedClockDriftPpm: number | null; writerWriteTimeMs: number; writerFinalizeTimeMs: number; newestCapturedAudioQpc100ns: number | null; newestWrittenAudioQpc100ns: number | null; newestFinalizedAudioQpc100ns: number | null };
 type VideoSegmentPlaybackMap = { sequenceNumber: number; sessionStartQpc100ns: number; sessionEndQpc100ns: number; sourceStartQpc100ns: number; sourceLastFrameQpc100ns: number; encodedStartPts100ns: number; encodedEndPts100ns: number; encodedDuration100ns: number; clipStart100ns: number; clipEnd100ns: number; frameTimingPoints: { frameIndex: number; outputQpc100ns: number; sourceQpc100ns: number; encodedPts100ns: number; freshSource: boolean }[] };
 type SavedReplayTimeline = { rawCaptureStartQpc100ns: number; rawCaptureEndQpc100ns: number; rawCaptureSpan100ns: number; clipCaptureStartQpc100ns: number; clipCaptureEndQpc100ns: number; clipPlaybackStart100ns: number; clipPlaybackEnd100ns: number; clipPlaybackDuration100ns: number; encodedTimeBaseNumerator: number; encodedTimeBaseDenominator: number; timestampStrategy: string; segmentMaps: VideoSegmentPlaybackMap[] };
 type AudioSnapshotPlan = { trackRole: AudioTrackRole; rawVideoStartQpc100ns: number; rawVideoEndQpc100ns: number; rawVideoSpanMs: number; clipCaptureStartQpc100ns: number; clipCaptureEndQpc100ns: number; clipPlaybackStartMs: number; clipPlaybackEndMs: number; clipPlaybackDurationMs: number; rawAudioStartQpc100ns: number | null; rawAudioEndQpc100ns: number | null; mappedPlaybackStartMs: number | null; mappedPlaybackEndMs: number | null; mappedStartRegion: string | null; mappedEndRegion: string | null; leadingUncoveredMs: number; trailingUncoveredMs: number; trimBeforeClipMs: number; trimAfterClipMs: number; finalClipCoverageMs: number; materialUncoveredThresholdMs: number; hasMaterialUncoveredAudio: boolean; warning: string | null; segmentCount: number; segmentSequenceNumbers: number[] };
+type AudioSaveBarrierTelemetry = { trackRole: AudioTrackRole; sourceState: AudioTrackState; sourceErrorMessage: string | null; requiredVideoEndQpc100ns: number; capturedThroughQpc100ns: number | null; writtenThroughQpc100ns: number | null; finalizedThroughQpc100nsBeforeWait: number | null; finalizedThroughQpc100nsAfterWait: number | null; waitDurationMs: number; explicitWriterCutRequested: boolean; satisfyingSegmentSequence: number | null; timedOut: boolean; errorMessage: string | null };
 
 type TargetTab = "monitor" | "window";
 type SelectedTarget = { targetType: TargetTab; id: string };
@@ -258,7 +259,7 @@ type ReplayBufferStatus = {
     followingFrameArrivedMs: number | null;
   };
   recentSegments: CompletedSegment[];
-  audio: { clock: { sessionStartQpc: number | null; qpcFrequency: number | null; sessionStartQpc100ns: number | null; timingDomain: string }; tracks: AudioTrackStatus[] };
+  audio: { clock: { sessionStartQpc: number | null; qpcFrequency: number | null; sessionStartQpc100ns: number | null; timingDomain: string }; tracks: AudioTrackStatus[]; saveBarriers: AudioSaveBarrierTelemetry[] };
 };
 
 type ReplayCommandResult = {
@@ -290,6 +291,11 @@ type SaveReplayStatus = {
   codec: string | null;
   errorMessage: string | null;
   audioSnapshotPlans: AudioSnapshotPlan[];
+  audioSaveBarriers: AudioSaveBarrierTelemetry[];
+  videoBoundaryWaitMs: number | null;
+  audioBarrierWaitMs: number | null;
+  snapshotReadyLatencyMs: number | null;
+  totalSaveLatencyMs: number | null;
   videoTimeline: SavedReplayTimeline | null;
   internalEncodedDurationSeconds: number | null;
   ffprobeDurationSeconds: number | null;
@@ -411,7 +417,7 @@ const initialReplayStatus: ReplayBufferStatus = {
     followingFrameArrivedMs: null,
   },
   recentSegments: [],
-  audio: { clock: { sessionStartQpc: null, qpcFrequency: null, sessionStartQpc100ns: null, timingDomain: "" }, tracks: [] },
+  audio: { clock: { sessionStartQpc: null, qpcFrequency: null, sessionStartQpc100ns: null, timingDomain: "" }, tracks: [], saveBarriers: [] },
 };
 
 const initialSaveReplayStatus: SaveReplayStatus = {
@@ -429,6 +435,11 @@ const initialSaveReplayStatus: SaveReplayStatus = {
   codec: null,
   errorMessage: null,
   audioSnapshotPlans: [],
+  audioSaveBarriers: [],
+  videoBoundaryWaitMs: null,
+  audioBarrierWaitMs: null,
+  snapshotReadyLatencyMs: null,
+  totalSaveLatencyMs: null,
   videoTimeline: null,
   internalEncodedDurationSeconds: null,
   ffprobeDurationSeconds: null,
@@ -1328,6 +1339,28 @@ export function ReplayPage() {
                   ))}
                 </div>
               )}
+              {saveReplayStatus.audioSaveBarriers.length > 0 && (
+                <div className="audio-snapshot-plans">
+                  <small>Save-time audio coverage barrier</small>
+                  {saveReplayStatus.audioSaveBarriers.map((barrier) => (
+                    <div className={`audio-snapshot-plan${barrier.errorMessage ? " warning" : ""}`} key={barrier.trackRole}>
+                      <strong>{formatAudioRole(barrier.trackRole)} · {barrier.sourceState}</strong>
+                      <code>Required {barrier.requiredVideoEndQpc100ns}</code>
+                      <code>Captured / written {barrier.capturedThroughQpc100ns ?? "n/a"} / {barrier.writtenThroughQpc100ns ?? "n/a"}</code>
+                      <code>Finalized before / after {barrier.finalizedThroughQpc100nsBeforeWait ?? "n/a"} / {barrier.finalizedThroughQpc100nsAfterWait ?? "n/a"}</code>
+                      <span>{barrier.waitDurationMs.toFixed(2)} ms wait · writer cut {barrier.explicitWriterCutRequested ? "requested" : "not needed"} · satisfying segment #{barrier.satisfyingSegmentSequence ?? "n/a"}</span>
+                      {barrier.errorMessage && <span className="save-replay-error">{barrier.errorMessage}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(saveReplayStatus.videoBoundaryWaitMs !== null || saveReplayStatus.totalSaveLatencyMs !== null) && (
+                <div className="timeline-consistency-report">
+                  <small>Save latency</small>
+                  <code>Video boundary {formatOptionalMetric(saveReplayStatus.videoBoundaryWaitMs, "ms")} · audio barrier {formatOptionalMetric(saveReplayStatus.audioBarrierWaitMs, "ms")}</code>
+                  <code>Snapshot ready {formatOptionalMetric(saveReplayStatus.snapshotReadyLatencyMs, "ms")} · complete {formatOptionalMetric(saveReplayStatus.totalSaveLatencyMs, "ms")}</code>
+                </div>
+              )}
               {saveReplayStatus.videoTimeline && (
                 <div className="timeline-consistency-report">
                   <small>Saved-replay timeline consistency</small>
@@ -1405,7 +1438,7 @@ function formatSaveJobMessage(state: SaveJobState) {
   const messages: Record<SaveJobState, string> = {
     idle: "Ready to save available replay video.",
     preparing: "Preparing replay...",
-    finalizingCurrentSegment: "Waiting for the next prewarmed segment boundary...",
+    finalizingCurrentSegment: "Waiting for safe video and audio boundaries...",
     assembling: "Saving replay...",
     completed: "Replay saved",
     error: "Replay save failed",
@@ -1565,6 +1598,7 @@ function AudioTrackTelemetry({ track }: { track: AudioTrackStatus }) {
       <span>drops {track.droppedPackets} packets / {track.droppedSampleFrames} frames</span>
       <span>disc {track.discontinuityCount} · timestamp {track.timestampErrorCount}</span>
       <span>writer write/finalize {track.writerWriteTimeMs.toFixed(2)} / {track.writerFinalizeTimeMs.toFixed(2)} ms</span>
+      <span>QPC captured/written/finalized {track.newestCapturedAudioQpc100ns ?? "n/a"} / {track.newestWrittenAudioQpc100ns ?? "n/a"} / {track.newestFinalizedAudioQpc100ns ?? "n/a"}</span>
       <span>sample−QPC {formatOptionalMetric(track.sampleQpcDifferenceMs, "ms")} · drift {formatOptionalMetric(track.estimatedClockDriftPpm, "ppm")}</span>
     </div>
   );

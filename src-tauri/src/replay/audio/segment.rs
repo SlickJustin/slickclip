@@ -118,6 +118,17 @@ impl AudioSegmentRing {
         selected
     }
 
+    pub fn newest_end_qpc_100ns(&self) -> Option<i64> {
+        self.segments.back().map(|segment| segment.end_qpc_100ns)
+    }
+
+    pub fn sequence_covering_end(&self, required_end_qpc_100ns: i64) -> Option<u64> {
+        self.segments
+            .iter()
+            .find(|segment| segment.end_qpc_100ns >= required_end_qpc_100ns)
+            .map(|segment| segment.sequence_number)
+    }
+
     pub fn release(&mut self, sequences: &[u64], track_directory: &Path) {
         for sequence in sequences {
             let remove = match self.pins.get_mut(sequence) {
