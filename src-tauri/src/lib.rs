@@ -1,5 +1,6 @@
 mod capture;
 mod clips;
+mod hotkey;
 mod replay;
 
 use tauri::Manager;
@@ -14,6 +15,13 @@ fn greet(name: &str) -> String {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    hotkey::handle_global_shortcut(app, shortcut, event.state());
+                })
+                .build(),
+        )
         .setup(|app| {
             let replay_root = app.path().app_local_data_dir()?.join("ReplayBuffer");
             let replay_manager =
@@ -24,6 +32,9 @@ pub fn run() {
                 clips_directory,
             ));
             app.manage(replay_manager);
+            app.manage(hotkey::SaveReplayHotkeyManager::new());
+            app.state::<hotkey::SaveReplayHotkeyManager>()
+                .register_initial(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -37,7 +48,10 @@ pub fn run() {
             replay::stop_replay_buffer,
             replay::get_replay_buffer_status,
             clips::save_replay,
-            clips::get_save_replay_status
+            clips::get_save_replay_status,
+            hotkey::get_save_replay_hotkey,
+            hotkey::set_save_replay_hotkey,
+            hotkey::set_hotkey_recorder_active
         ])
         .build(tauri::generate_context!())
         .expect("error while building Tauri application");
@@ -47,6 +61,9 @@ pub fn run() {
             event,
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
         ) {
+            app_handle
+                .state::<hotkey::SaveReplayHotkeyManager>()
+                .unregister(app_handle);
             app_handle
                 .state::<clips::ClipSaveManager>()
                 .shutdown_and_wait();

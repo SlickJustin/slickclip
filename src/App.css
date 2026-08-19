@@ -1146,6 +1146,105 @@ kbd,
   letter-spacing: 0.8px;
 }
 
+.hotkey-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.hotkey-setting-copy,
+.hotkey-setting-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.hotkey-setting-controls {
+  align-items: flex-end;
+}
+
+.hotkey-registration-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #8e8895;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+}
+
+.hotkey-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.hotkey-status-registered {
+  background: #866cf0;
+  box-shadow: 0 0 8px rgba(134, 108, 240, 0.5);
+}
+
+.hotkey-status-error {
+  background: #d66e80;
+}
+
+kbd.hotkey-recording {
+  border-color: #8065e7;
+  color: #e2dcff;
+  box-shadow: 0 0 0 2px rgba(112, 85, 210, 0.13);
+}
+
+.hotkey-message-success,
+.hotkey-message-error {
+  display: block;
+  margin-top: 12px;
+  font-size: 11px;
+}
+
+.hotkey-message-success {
+  color: #a99bea;
+}
+
+.hotkey-message-error {
+  color: #dc8493;
+}
+
+.hotkey-feedback {
+  position: fixed;
+  z-index: 50;
+  right: 22px;
+  bottom: 22px;
+  max-width: 360px;
+  padding: 11px 14px;
+  border: 1px solid #4a4354;
+  border-radius: 7px;
+  color: #ddd7e5;
+  background: rgba(27, 24, 31, 0.96);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.34);
+  font-size: 12px;
+}
+
+.hotkey-feedback-success {
+  border-color: #745bcf;
+}
+
+.hotkey-feedback-error {
+  border-color: #8e4e5b;
+  color: #efb0ba;
+}
+
+@media (max-width: 720px) {
+  .hotkey-setting {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .hotkey-setting-controls {
+    align-items: flex-start;
+  }
+}
+
 .save-replay-button:not(:disabled) {
   border-color: #8065e7;
   color: #fff;

@@ -1,5 +1,24 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Toggle } from "../components/Toggle";
+
+type HotkeyState = {
+  registered: boolean;
+  currentCombination: string;
+  lastRegistrationError: string | null;
+};
+
+type HotkeyCommandResult = {
+  success: boolean;
+  state: HotkeyState;
+  errorMessage: string | null;
+};
+
+const initialHotkeyState: HotkeyState = {
+  registered: false,
+  currentCombination: "Ctrl + Shift + F10",
+  lastRegistrationError: null,
+};
 
 type SettingSelectProps = {
   label: string;
@@ -14,6 +33,10 @@ export function SettingsPage() {
   const [resolution, setResolution] = useState("1440p");
   const [frameRate, setFrameRate] = useState("60 FPS");
   const [encoder, setEncoder] = useState("Automatic");
+  const [hotkey, setHotkey] = useState<HotkeyState>(initialHotkeyState);
+  const [recordingHotkey, setRecordingHotkey] = useState(false);
+  const [hotkeyPending, setHotkeyPending] = useState(false);
+  const [hotkeyMessage, setHotkeyMessage] = useState<{ text: string; success: boolean } | null>(null);
   const [toggles, setToggles] = useState({
     game: true,
     discord: true,
@@ -26,6 +49,86 @@ export function SettingsPage() {
 
   function updateToggle(key: keyof typeof toggles, value: boolean) {
     setToggles((current) => ({ ...current, [key]: value }));
+  }
+
+  useEffect(() => {
+    void invoke<HotkeyState>("get_save_replay_hotkey")
+      .then(setHotkey)
+      .catch((error) => setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false }));
+  }, []);
+
+  useEffect(() => {
+    if (!recordingHotkey) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.repeat || isModifierCode(event.code)) return;
+      if (event.code === "Escape" && !event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey) {
+        void stopHotkeyRecording();
+        return;
+      }
+
+      const combination = combinationFromKeyboardEvent(event);
+      if (!combination) {
+        setHotkeyMessage({ text: "Use Ctrl, Shift, Alt, or Win with a supported keyboard key.", success: false });
+        return;
+      }
+      void submitHotkey(combination);
+    };
+
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [recordingHotkey]);
+
+  useEffect(() => () => {
+    if (recordingHotkey) void invoke("set_hotkey_recorder_active", { active: false });
+  }, [recordingHotkey]);
+
+  async function startHotkeyRecording() {
+    setHotkeyMessage(null);
+    try {
+      const state = await invoke<HotkeyState>("set_hotkey_recorder_active", { active: true });
+      setHotkey(state);
+      setRecordingHotkey(true);
+    } catch (error) {
+      setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false });
+    }
+  }
+
+  async function stopHotkeyRecording() {
+    setRecordingHotkey(false);
+    try {
+      const state = await invoke<HotkeyState>("set_hotkey_recorder_active", { active: false });
+      setHotkey(state);
+    } catch (error) {
+      setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false });
+    }
+  }
+
+  async function submitHotkey(combination: string) {
+    if (hotkeyPending) return;
+    setHotkeyPending(true);
+    setHotkeyMessage(null);
+    try {
+      const result = await invoke<HotkeyCommandResult>("set_save_replay_hotkey", { combination });
+      setHotkey(result.state);
+      setRecordingHotkey(false);
+      setHotkeyMessage({
+        text: result.success
+          ? `Save Replay hotkey changed to ${result.state.currentCombination}.`
+          : result.errorMessage ?? "The global hotkey could not be registered.",
+        success: result.success,
+      });
+    } catch (error) {
+      setRecordingHotkey(false);
+      setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false });
+      await invoke<HotkeyState>("set_hotkey_recorder_active", { active: false })
+        .then(setHotkey)
+        .catch(() => undefined);
+    } finally {
+      setHotkeyPending(false);
+    }
   }
 
   return (
@@ -44,6 +147,37 @@ export function SettingsPage() {
           <SettingSelect label="Resolution" value={resolution} onChange={setResolution} options={["720p", "1080p", "1440p"]} />
           <SettingSelect label="Frame Rate" value={frameRate} onChange={setFrameRate} options={["30 FPS", "60 FPS"]} />
           <SettingSelect label="Preferred Encoder" value={encoder} onChange={setEncoder} options={["NVIDIA NVENC AV1", "NVIDIA NVENC HEVC", "NVIDIA NVENC H.264", "Automatic"]} />
+        </SettingsSection>
+
+        <SettingsSection title="Hotkeys">
+          <div className="hotkey-setting">
+            <div className="hotkey-setting-copy">
+              <span>Save Replay Hotkey</span>
+              <small>Works globally while JustIn Replay is in the background.</small>
+              <div className="hotkey-registration-status">
+                <span className={`hotkey-status-dot ${hotkey.registered ? "hotkey-status-registered" : "hotkey-status-error"}`} />
+                {hotkey.registered ? "Registered" : "Not registered"}
+              </div>
+            </div>
+            <div className="hotkey-setting-controls">
+              <kbd className={recordingHotkey ? "hotkey-recording" : undefined}>
+                {recordingHotkey ? "Press a combination..." : hotkey.currentCombination}
+              </kbd>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={hotkeyPending}
+                onClick={recordingHotkey ? stopHotkeyRecording : startHotkeyRecording}
+              >
+                {recordingHotkey ? "Cancel" : hotkeyPending ? "Registering..." : "Change"}
+              </button>
+            </div>
+          </div>
+          {(hotkeyMessage || hotkey.lastRegistrationError) && (
+            <span className={hotkeyMessage?.success && !hotkey.lastRegistrationError ? "hotkey-message-success" : "hotkey-message-error"} role="status">
+              {hotkeyMessage?.text ?? hotkey.lastRegistrationError}
+            </span>
+          )}
         </SettingsSection>
 
         <SettingsSection title="Audio">
@@ -83,6 +217,47 @@ export function SettingsPage() {
       </div>
     </div>
   );
+}
+
+function isModifierCode(code: string) {
+  return ["ControlLeft", "ControlRight", "ShiftLeft", "ShiftRight", "AltLeft", "AltRight", "MetaLeft", "MetaRight"].includes(code);
+}
+
+function combinationFromKeyboardEvent(event: KeyboardEvent) {
+  const key = displayKeyFromCode(event.code);
+  if (!key) return null;
+  const parts = [
+    event.ctrlKey ? "Ctrl" : null,
+    event.shiftKey ? "Shift" : null,
+    event.altKey ? "Alt" : null,
+    event.metaKey ? "Win" : null,
+  ].filter((part): part is string => part !== null);
+  if (!parts.length) return null;
+  return [...parts, key].join(" + ");
+}
+
+function displayKeyFromCode(code: string) {
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3);
+  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  if (/^F(?:[1-9]|1[0-2])$/.test(code)) return code;
+  const keys: Record<string, string> = {
+    Space: "Space",
+    Enter: "Enter",
+    Escape: "Escape",
+    Tab: "Tab",
+    Backspace: "Backspace",
+    Delete: "Delete",
+    Insert: "Insert",
+    Home: "Home",
+    End: "End",
+    PageUp: "PageUp",
+    PageDown: "PageDown",
+    ArrowUp: "ArrowUp",
+    ArrowDown: "ArrowDown",
+    ArrowLeft: "ArrowLeft",
+    ArrowRight: "ArrowRight",
+  };
+  return keys[code] ?? null;
 }
 
 function SettingsSection({ title, children }: { title: string; children: React.ReactNode }) {

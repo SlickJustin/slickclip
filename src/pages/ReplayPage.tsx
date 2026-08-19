@@ -391,6 +391,23 @@ export function ReplayPage() {
   }, []);
 
   useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let disposed = false;
+    void listen("save-replay-hotkey-feedback", () => {
+      setSaveReplayCommandError(null);
+      void refreshSaveReplayStatus();
+      void refreshReplayStatus();
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!isReplayActive(replayStatus.state)) return;
 
     const timer = window.setInterval(() => void refreshReplayStatus(), 1_000);

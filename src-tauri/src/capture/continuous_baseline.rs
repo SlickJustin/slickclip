@@ -60,7 +60,9 @@ pub struct ContinuousBaselineResult {
     worst_callback_duration_ms: Option<f64>,
     average_send_frame_duration_ms: Option<f64>,
     worst_send_frame_duration_ms: Option<f64>,
+    #[serde(rename = "sendFrameOver16_67Ms")]
     send_frame_over_16_67_ms: u64,
+    #[serde(rename = "sendFrameOver33_33Ms")]
     send_frame_over_33_33_ms: u64,
     send_frame_over_50_ms: u64,
     send_frame_over_100_ms: u64,

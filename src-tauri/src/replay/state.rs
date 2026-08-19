@@ -82,7 +82,9 @@ pub struct ReplayBufferStatus {
     pub worst_callback_duration_ms: Option<f64>,
     pub average_send_frame_duration_ms: Option<f64>,
     pub worst_send_frame_duration_ms: Option<f64>,
+    #[serde(rename = "sendFrameOver16_67Ms")]
     pub send_frame_over_16_67_ms: u64,
+    #[serde(rename = "sendFrameOver33_33Ms")]
     pub send_frame_over_33_33_ms: u64,
     pub send_frame_over_50_ms: u64,
     pub send_frame_over_100_ms: u64,
