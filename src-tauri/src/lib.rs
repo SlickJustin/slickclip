@@ -1,3 +1,4 @@
+mod audio;
 mod capture;
 mod clips;
 mod hotkey;
@@ -32,6 +33,13 @@ pub fn run() {
                 clips_directory,
             ));
             app.manage(replay_manager);
+            let audio_tests_directory = app
+                .path()
+                .video_dir()?
+                .join("JustIn Replay")
+                .join("DevTests")
+                .join("Audio");
+            app.manage(audio::AudioCaptureTestManager::new(audio_tests_directory));
             app.manage(hotkey::SaveReplayHotkeyManager::new());
             app.state::<hotkey::SaveReplayHotkeyManager>()
                 .register_initial(app.handle());
@@ -51,7 +59,14 @@ pub fn run() {
             clips::get_save_replay_status,
             hotkey::get_save_replay_hotkey,
             hotkey::set_save_replay_hotkey,
-            hotkey::set_hotkey_recorder_active
+            hotkey::set_hotkey_recorder_active,
+            audio::list_audio_microphones,
+            audio::list_application_audio_processes,
+            audio::get_process_loopback_capability,
+            audio::probe_process_audio_activation,
+            audio::start_microphone_audio_test,
+            audio::start_process_audio_test,
+            audio::get_audio_capture_test_status
         ])
         .build(tauri::generate_context!())
         .expect("error while building Tauri application");
@@ -61,6 +76,9 @@ pub fn run() {
             event,
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
         ) {
+            app_handle
+                .state::<audio::AudioCaptureTestManager>()
+                .shutdown_and_wait();
             app_handle
                 .state::<hotkey::SaveReplayHotkeyManager>()
                 .unregister(app_handle);

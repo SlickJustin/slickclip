@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { AudioCaptureTest } from "../components/AudioCaptureTest";
 import { Toggle } from "../components/Toggle";
 
 type HotkeyState = {
@@ -185,6 +186,10 @@ export function SettingsPage() {
           <SettingsToggle label="Discord" checked={toggles.discord} onChange={(value) => updateToggle("discord", value)} />
           <SettingsToggle label="Microphone" checked={toggles.microphone} onChange={(value) => updateToggle("microphone", value)} />
           <SettingsToggle label="Other Application" checked={toggles.other} onChange={(value) => updateToggle("other", value)} />
+        </SettingsSection>
+
+        <SettingsSection title="Audio Capture Test">
+          <AudioCaptureTest />
         </SettingsSection>
 
         <SettingsSection title="Storage">
