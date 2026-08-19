@@ -39,6 +39,7 @@ pub struct SaveReplayStatus {
     pub requested_duration_seconds: u32,
     pub actual_saved_duration_seconds: Option<f64>,
     pub save_request_timestamp_ms: Option<u64>,
+    pub save_request_qpc_100ns: Option<i64>,
     pub selected_segment_count: usize,
     pub selected_segment_sequence_numbers: Vec<u64>,
     pub actual_earliest_timestamp_ms: Option<u64>,
@@ -61,6 +62,7 @@ impl SaveReplayStatus {
             requested_duration_seconds: 0,
             actual_saved_duration_seconds: None,
             save_request_timestamp_ms: None,
+            save_request_qpc_100ns: None,
             selected_segment_count: 0,
             selected_segment_sequence_numbers: Vec::new(),
             actual_earliest_timestamp_ms: None,
@@ -131,6 +133,7 @@ impl SharedSaveJob {
             requested_duration_seconds,
             actual_saved_duration_seconds: None,
             save_request_timestamp_ms: None,
+            save_request_qpc_100ns: None,
             selected_segment_count: 0,
             selected_segment_sequence_numbers: Vec::new(),
             actual_earliest_timestamp_ms: None,
@@ -154,6 +157,7 @@ impl SharedSaveJob {
     fn set_snapshot(&self, snapshot: &ReplaySaveSnapshot) {
         let mut status = self.lock();
         status.save_request_timestamp_ms = Some(snapshot.save_request_timestamp_ms);
+        status.save_request_qpc_100ns = Some(snapshot.save_request_qpc_100ns);
         status.requested_duration_seconds = snapshot.requested_duration_seconds;
         status.selected_segment_count = snapshot.segments.len();
         status.selected_segment_sequence_numbers = snapshot

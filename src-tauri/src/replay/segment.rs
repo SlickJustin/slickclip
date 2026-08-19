@@ -48,9 +48,15 @@ pub struct CompletedSegment {
     pub height: u32,
     pub frame_rate: u32,
     pub file_size: u64,
+    pub average_bitrate_mbps: f64,
     pub finalized: bool,
     pub finalization_time_ms: f64,
     pub rotation_gap_ms: Option<f64>,
+}
+
+pub fn average_bitrate_mbps(file_size: u64, duration_100ns: i64) -> Option<f64> {
+    (duration_100ns > 0)
+        .then(|| file_size as f64 * 8.0 * 10_000_000.0 / duration_100ns as f64 / 1_000_000.0)
 }
 
 pub struct SegmentRing {
@@ -149,7 +155,7 @@ impl SegmentRing {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompletedSegment, SegmentRing, VideoFrameTimingPoint};
+    use super::{average_bitrate_mbps, CompletedSegment, SegmentRing, VideoFrameTimingPoint};
 
     fn segment(sequence_number: u64, duration_ms: u64) -> CompletedSegment {
         CompletedSegment {
@@ -193,6 +199,11 @@ mod tests {
             height: 1080,
             frame_rate: 60,
             file_size: 1_000,
+            average_bitrate_mbps: average_bitrate_mbps(
+                1_000,
+                i64::try_from(duration_ms * 10_000).unwrap(),
+            )
+            .unwrap(),
             finalized: true,
             finalization_time_ms: 10.0,
             rotation_gap_ms: Some(2.0),
@@ -255,5 +266,11 @@ mod tests {
                 .sum::<u64>(),
             8_000
         );
+    }
+
+    #[test]
+    fn bitrate_uses_exact_file_bytes_and_encoded_duration() {
+        assert_eq!(average_bitrate_mbps(15_000_000, 80_000_000), Some(15.0));
+        assert_eq!(average_bitrate_mbps(1, 0), None);
     }
 }

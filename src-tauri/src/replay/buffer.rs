@@ -34,7 +34,7 @@ use super::audio::{
     AudioReplayConfiguration, AudioReplaySession, AudioReplayShared, AudioSnapshotPinGuard,
     AudioSnapshotPlan, ReplaySessionClock,
 };
-use super::segment::{CompletedSegment, SegmentRing, VideoFrameTimingPoint};
+use super::segment::{average_bitrate_mbps, CompletedSegment, SegmentRing, VideoFrameTimingPoint};
 use super::state::{
     ReplayBufferStatus, ReplayCommandResult, ReplayLifecycleState, RotationLifecycleTrace,
 };
@@ -48,6 +48,7 @@ const ALLOWED_REPLAY_DURATIONS: [u32; 5] = [30, 60, 120, 180, 300];
 const MAX_CATCH_UP_FRAMES_PER_WAKE: u64 = 4;
 const MAX_REALTIME_BACKLOG_FRAMES: u64 = 120;
 const MAX_PENDING_SOURCE_FRAMES: usize = 8;
+const NORMAL_PREWARM_LEAD_SECONDS: u64 = 1;
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
@@ -115,7 +116,15 @@ struct ReplayCallbackTelemetry {
     scheduler_expected_output_frame_index: AtomicU64,
     scheduler_current_lateness_100ns: AtomicU64,
     scheduler_worst_lateness_100ns: AtomicU64,
+    scheduler_catch_up_wakeups: AtomicU64,
+    scheduler_max_catch_up_burst: AtomicU64,
     scheduler_catch_up_frames: AtomicU64,
+    scheduler_rotation_catch_up_frames: AtomicU64,
+    scheduler_save_pending_catch_up_frames: AtomicU64,
+    queue_full_retry_attempts: AtomicU64,
+    recovered_queue_full_frames: AtomicU64,
+    last_rotation_lateness_before_100ns: AtomicI64,
+    last_rotation_lateness_after_100ns: AtomicI64,
     fresh_output_frames: AtomicU64,
     held_output_frames: AtomicU64,
     superseded_source_updates: AtomicU64,
@@ -153,7 +162,20 @@ impl ReplayCallbackTelemetry {
             .store(0, Ordering::Relaxed);
         self.scheduler_worst_lateness_100ns
             .store(0, Ordering::Relaxed);
+        self.scheduler_catch_up_wakeups.store(0, Ordering::Relaxed);
+        self.scheduler_max_catch_up_burst
+            .store(0, Ordering::Relaxed);
         self.scheduler_catch_up_frames.store(0, Ordering::Relaxed);
+        self.scheduler_rotation_catch_up_frames
+            .store(0, Ordering::Relaxed);
+        self.scheduler_save_pending_catch_up_frames
+            .store(0, Ordering::Relaxed);
+        self.queue_full_retry_attempts.store(0, Ordering::Relaxed);
+        self.recovered_queue_full_frames.store(0, Ordering::Relaxed);
+        self.last_rotation_lateness_before_100ns
+            .store(-1, Ordering::Relaxed);
+        self.last_rotation_lateness_after_100ns
+            .store(-1, Ordering::Relaxed);
         self.fresh_output_frames.store(0, Ordering::Relaxed);
         self.held_output_frames.store(0, Ordering::Relaxed);
         self.superseded_source_updates.store(0, Ordering::Relaxed);
@@ -189,7 +211,7 @@ impl ReplayCallbackTelemetry {
         } else {
             self.encoder_queue_full_events
                 .fetch_add(1, Ordering::Relaxed);
-            self.deliberately_dropped_frames
+            self.queue_full_retry_attempts
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -217,12 +239,26 @@ pub struct ReplayBufferStartRequest {
 
 pub struct ReplaySaveSnapshot {
     pub save_request_timestamp_ms: u64,
+    pub save_request_qpc_100ns: i64,
     pub requested_duration_seconds: u32,
     pub segments: Vec<CompletedSegment>,
     pub video_timeline: SavedReplayTimeline,
     pub audio_snapshot_plans: Vec<AudioSnapshotPlan>,
     _pins: SegmentPinGuard,
     _audio_pins: AudioSnapshotPinGuard,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SaveBoundaryRequest {
+    request_id: u64,
+    anchor_qpc_100ns: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AcknowledgedSaveBoundary {
+    request_id: u64,
+    anchor_qpc_100ns: i64,
+    final_sequence_number: u64,
 }
 
 struct SegmentPinGuard {
@@ -273,8 +309,9 @@ struct ReplayInner {
     pins: HashMap<u64, usize>,
     deferred_deletions: HashMap<u64, PathBuf>,
     next_rotation_request_id: u64,
-    pending_rotation_request_id: Option<u64>,
-    acknowledged_rotation: Option<(u64, u64)>,
+    session_clock: Option<ReplaySessionClock>,
+    pending_save_boundary: Option<SaveBoundaryRequest>,
+    acknowledged_save_boundary: Option<AcknowledgedSaveBoundary>,
 }
 
 impl ReplayInner {
@@ -316,8 +353,9 @@ impl ReplayInner {
             pins: HashMap::new(),
             deferred_deletions: HashMap::new(),
             next_rotation_request_id: 0,
-            pending_rotation_request_id: None,
-            acknowledged_rotation: None,
+            session_clock: None,
+            pending_save_boundary: None,
+            acknowledged_save_boundary: None,
         }
     }
 
@@ -468,9 +506,33 @@ impl ReplayInner {
                     .load(Ordering::Relaxed) as f64
                     / 10_000.0
             }),
+            scheduler_catch_up_wakeups: callback_telemetry
+                .scheduler_catch_up_wakeups
+                .load(Ordering::Relaxed),
+            scheduler_max_catch_up_burst: callback_telemetry
+                .scheduler_max_catch_up_burst
+                .load(Ordering::Relaxed),
             scheduler_catch_up_frames: callback_telemetry
                 .scheduler_catch_up_frames
                 .load(Ordering::Relaxed),
+            scheduler_rotation_catch_up_frames: callback_telemetry
+                .scheduler_rotation_catch_up_frames
+                .load(Ordering::Relaxed),
+            scheduler_save_pending_catch_up_frames: callback_telemetry
+                .scheduler_save_pending_catch_up_frames
+                .load(Ordering::Relaxed),
+            queue_full_retry_attempts: callback_telemetry
+                .queue_full_retry_attempts
+                .load(Ordering::Relaxed),
+            recovered_queue_full_frames: callback_telemetry
+                .recovered_queue_full_frames
+                .load(Ordering::Relaxed),
+            last_rotation_lateness_before_ms: atomic_100ns_ms(
+                &callback_telemetry.last_rotation_lateness_before_100ns,
+            ),
+            last_rotation_lateness_after_ms: atomic_100ns_ms(
+                &callback_telemetry.last_rotation_lateness_after_100ns,
+            ),
             fresh_output_frames: callback_telemetry
                 .fresh_output_frames
                 .load(Ordering::Relaxed),
@@ -589,8 +651,9 @@ impl SharedReplay {
             pins: HashMap::new(),
             deferred_deletions: HashMap::new(),
             next_rotation_request_id: 0,
-            pending_rotation_request_id: None,
-            acknowledged_rotation: None,
+            session_clock: None,
+            pending_save_boundary: None,
+            acknowledged_save_boundary: None,
         };
         self.changed.notify_all();
     }
@@ -603,6 +666,7 @@ impl SharedReplay {
         height: u32,
         session_id: String,
         session_directory: PathBuf,
+        session_clock: ReplaySessionClock,
     ) {
         let mut inner = self.lock();
         inner.target_label = Some(target_label);
@@ -611,6 +675,7 @@ impl SharedReplay {
         inner.height = height;
         inner.session_id = Some(session_id);
         inner.session_directory = Some(session_directory);
+        inner.session_clock = Some(session_clock);
         self.changed.notify_all();
     }
 
@@ -819,7 +884,17 @@ impl SharedReplay {
         self.changed.notify_all();
     }
 
-    fn request_save_rotation(&self) -> Result<(u64, u64), String> {
+    fn request_save_boundary(&self) -> Result<(u64, u64, i64), String> {
+        let clock = self
+            .lock()
+            .session_clock
+            .clone()
+            .ok_or_else(|| "The replay session clock is unavailable.".to_string())?;
+        let anchor_qpc_100ns = clock.now_qpc_100ns()?;
+        self.request_save_boundary_at(anchor_qpc_100ns)
+    }
+
+    fn request_save_boundary_at(&self, anchor_qpc_100ns: i64) -> Result<(u64, u64, i64), String> {
         let mut inner = self.lock();
         if inner.state != ReplayLifecycleState::Running {
             return Err("Save Replay requires a running replay buffer.".to_string());
@@ -827,50 +902,84 @@ impl SharedReplay {
         if inner.ring.len() == 0 {
             return Err("No finalized replay video is available yet.".to_string());
         }
+        if inner.pending_save_boundary.is_some() {
+            return Err("A Save Replay boundary request is already pending.".to_string());
+        }
 
         inner.next_rotation_request_id = inner.next_rotation_request_id.saturating_add(1);
         let request_id = inner.next_rotation_request_id;
-        inner.pending_rotation_request_id = Some(request_id);
-        inner.acknowledged_rotation = None;
+        inner.pending_save_boundary = Some(SaveBoundaryRequest {
+            request_id,
+            anchor_qpc_100ns,
+        });
+        inner.acknowledged_save_boundary = None;
         let requested_at = unix_timestamp_ms();
         self.changed.notify_all();
-        Ok((request_id, requested_at))
+        Ok((request_id, requested_at, anchor_qpc_100ns))
     }
 
-    fn pending_rotation_request(&self) -> Option<u64> {
-        self.lock().pending_rotation_request_id
+    fn pending_save_boundary(&self) -> Option<SaveBoundaryRequest> {
+        self.lock().pending_save_boundary
     }
 
-    fn acknowledge_rotation(&self, request_id: u64, sequence_number: u64) {
+    fn acknowledge_save_boundary(
+        &self,
+        request: SaveBoundaryRequest,
+        sequence_number: u64,
+        boundary_qpc_100ns: i64,
+    ) {
         let mut inner = self.lock();
-        if inner.pending_rotation_request_id == Some(request_id) {
-            inner.pending_rotation_request_id = None;
-            inner.acknowledged_rotation = Some((request_id, sequence_number));
+        if inner.pending_save_boundary == Some(request)
+            && boundary_qpc_100ns >= request.anchor_qpc_100ns
+        {
+            inner.pending_save_boundary = None;
+            inner.acknowledged_save_boundary = Some(AcknowledgedSaveBoundary {
+                request_id: request.request_id,
+                anchor_qpc_100ns: request.anchor_qpc_100ns,
+                final_sequence_number: sequence_number,
+            });
         }
         self.changed.notify_all();
     }
 
-    fn wait_for_save_boundary(&self, request_id: u64, timeout: Duration) -> Result<u64, String> {
+    fn wait_for_save_boundary(
+        &self,
+        request_id: u64,
+        timeout: Duration,
+    ) -> Result<(u64, i64), String> {
         let deadline = Instant::now() + timeout;
         let mut inner = self.lock();
 
         loop {
-            if let Some((acknowledged_id, sequence_number)) = inner.acknowledged_rotation {
-                if acknowledged_id == request_id && inner.ring.contains_sequence(sequence_number) {
-                    return Ok(sequence_number);
+            if let Some(acknowledged) = inner.acknowledged_save_boundary {
+                if acknowledged.request_id == request_id
+                    && inner
+                        .ring
+                        .contains_sequence(acknowledged.final_sequence_number)
+                {
+                    return Ok((
+                        acknowledged.final_sequence_number,
+                        acknowledged.anchor_qpc_100ns,
+                    ));
                 }
             }
             if inner.state == ReplayLifecycleState::Error {
-                if inner.pending_rotation_request_id == Some(request_id) {
-                    inner.pending_rotation_request_id = None;
+                if inner
+                    .pending_save_boundary
+                    .is_some_and(|request| request.request_id == request_id)
+                {
+                    inner.pending_save_boundary = None;
                 }
                 return Err(inner.error_message.clone().unwrap_or_else(|| {
                     "The replay buffer failed while finalizing the save boundary.".to_string()
                 }));
             }
             if inner.state != ReplayLifecycleState::Running {
-                if inner.pending_rotation_request_id == Some(request_id) {
-                    inner.pending_rotation_request_id = None;
+                if inner
+                    .pending_save_boundary
+                    .is_some_and(|request| request.request_id == request_id)
+                {
+                    inner.pending_save_boundary = None;
                 }
                 return Err(format!(
                     "The replay buffer entered {:?} before the save boundary finalized.",
@@ -880,8 +989,11 @@ impl SharedReplay {
 
             let now = Instant::now();
             if now >= deadline {
-                if inner.pending_rotation_request_id == Some(request_id) {
-                    inner.pending_rotation_request_id = None;
+                if inner
+                    .pending_save_boundary
+                    .is_some_and(|request| request.request_id == request_id)
+                {
+                    inner.pending_save_boundary = None;
                 }
                 return Err(
                     "Timed out waiting for the current replay segment to finalize.".to_string(),
@@ -900,6 +1012,7 @@ impl SharedReplay {
         self: &Arc<Self>,
         final_sequence_number: u64,
         save_request_timestamp_ms: u64,
+        save_request_qpc_100ns: i64,
     ) -> Result<ReplaySaveSnapshot, String> {
         let (segments, requested_duration_seconds, sequence_numbers) = {
             let mut inner = self.lock();
@@ -910,6 +1023,14 @@ impl SharedReplay {
             );
             if segments.is_empty() {
                 return Err("No finalized replay segments were available to save.".to_string());
+            }
+            if !segments.last().is_some_and(|segment| {
+                segment.segment_session_end_qpc_100ns >= save_request_qpc_100ns
+            }) {
+                return Err(
+                    "The finalized video snapshot does not cover the immutable Save Replay QPC anchor."
+                        .to_string(),
+                );
             }
 
             let sequence_numbers = segments
@@ -931,6 +1052,7 @@ impl SharedReplay {
 
         Ok(ReplaySaveSnapshot {
             save_request_timestamp_ms,
+            save_request_qpc_100ns,
             requested_duration_seconds,
             segments,
             video_timeline,
@@ -1121,12 +1243,14 @@ impl ReplayBufferManager {
     }
 
     pub fn snapshot_for_save(&self) -> Result<ReplaySaveSnapshot, String> {
-        let (request_id, requested_at) = self.shared.request_save_rotation()?;
-        let final_sequence_number = self
+        let (request_id, requested_at, requested_qpc_100ns) =
+            self.shared.request_save_boundary()?;
+        let (final_sequence_number, acknowledged_qpc_100ns) = self
             .shared
             .wait_for_save_boundary(request_id, Duration::from_secs(15))?;
+        debug_assert_eq!(requested_qpc_100ns, acknowledged_qpc_100ns);
         self.shared
-            .pin_snapshot(final_sequence_number, requested_at)
+            .pin_snapshot(final_sequence_number, requested_at, acknowledged_qpc_100ns)
     }
 
     pub fn shutdown_and_cleanup(&self) {
@@ -1203,6 +1327,7 @@ fn run_replay_session(
         height,
         session_id,
         session_directory.clone(),
+        session_clock.clone(),
     );
 
     shared.audio.begin(
@@ -1268,6 +1393,7 @@ struct SourceFrameStore {
     last_superseded_qpc_100ns: Option<i64>,
 }
 
+#[derive(Clone, Copy)]
 struct SourceSelection {
     source_qpc_100ns: i64,
     first_consumed_source_qpc_100ns: Option<i64>,
@@ -1367,6 +1493,21 @@ struct FrameEncodeResult {
     telemetry: EncoderFrameTelemetry,
 }
 
+#[derive(Default)]
+struct QueueFullRecovery {
+    retrying_output: bool,
+}
+
+impl QueueFullRecovery {
+    fn record_refusal(&mut self) {
+        self.retrying_output = true;
+    }
+
+    fn record_acceptance(&mut self) -> bool {
+        std::mem::take(&mut self.retrying_output)
+    }
+}
+
 impl ActiveSegment {
     fn create(
         flags: &ReplayCaptureFlags,
@@ -1411,7 +1552,7 @@ impl ActiveSegment {
     }
 
     fn should_rotate(&self, frame_rate: u32) -> bool {
-        self.frame_count >= segment_output_frame_capacity(frame_rate)
+        normal_rotation_due(self.frame_count, frame_rate)
     }
 
     fn has_frames(&self) -> bool {
@@ -1425,7 +1566,7 @@ impl ActiveSegment {
     }
 
     fn should_prepare(&self, frame_rate: u32) -> bool {
-        self.frame_count >= u64::from(frame_rate)
+        normal_prewarm_due(self.frame_count, frame_rate)
     }
 
     fn encode_frame(
@@ -1734,6 +1875,8 @@ fn finalize_segments(receiver: mpsc::Receiver<FinalizeJob>, shared: Arc<SharedRe
             height: job.height,
             frame_rate: job.frame_rate,
             file_size,
+            average_bitrate_mbps: average_bitrate_mbps(file_size, job.encoded_duration_100ns)
+                .unwrap_or(0.0),
             finalized: true,
             finalization_time_ms: finalization_started.elapsed().as_secs_f64() * 1_000.0,
             rotation_gap_ms: job.rotation_gap_ms,
@@ -1854,6 +1997,8 @@ struct RealtimeCfrScheduler {
     video_timeline_start_qpc_100ns: i64,
     next_output_frame_index: u64,
     last_output_source_generation: Option<u64>,
+    pending_output_selection: Option<(u64, SourceSelection)>,
+    queue_full_recovery: QueueFullRecovery,
 }
 
 impl RealtimeCfrScheduler {
@@ -1864,6 +2009,7 @@ impl RealtimeCfrScheduler {
             .video_timeline_start_qpc_100ns
             .store(self.video_timeline_start_qpc_100ns, Ordering::Relaxed);
         self.flags.shared.mark_running();
+        let telemetry_shared = Arc::clone(&self.flags.shared);
 
         loop {
             let now_qpc_100ns = self
@@ -1876,7 +2022,7 @@ impl RealtimeCfrScheduler {
                 now_qpc_100ns,
                 self.flags.frame_rate,
             );
-            let telemetry = &self.flags.shared.callback_telemetry;
+            let telemetry = &telemetry_shared.callback_telemetry;
             telemetry
                 .scheduler_expected_output_frame_index
                 .store(expected_frame_index, Ordering::Relaxed);
@@ -1910,11 +2056,12 @@ impl RealtimeCfrScheduler {
                 )));
             }
             let burst = due_count.min(MAX_CATCH_UP_FRAMES_PER_WAKE);
-            if burst > 1 {
-                telemetry
-                    .scheduler_catch_up_frames
-                    .fetch_add(burst - 1, Ordering::Relaxed);
-            }
+            let rotation_due_at_wake = self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.should_rotate(self.flags.frame_rate));
+            let save_pending_at_wake =
+                burst > 1 && self.flags.shared.pending_save_boundary().is_some();
 
             let mut emitted = 0u64;
             for _ in 0..burst {
@@ -1927,6 +2074,29 @@ impl RealtimeCfrScheduler {
                 self.flags
                     .shared
                     .record_callback_phases(Duration::ZERO, phases);
+            }
+
+            if emitted > 1 {
+                let catch_up_frames = emitted - 1;
+                telemetry
+                    .scheduler_catch_up_wakeups
+                    .fetch_add(1, Ordering::Relaxed);
+                telemetry
+                    .scheduler_max_catch_up_burst
+                    .fetch_max(emitted, Ordering::Relaxed);
+                telemetry
+                    .scheduler_catch_up_frames
+                    .fetch_add(catch_up_frames, Ordering::Relaxed);
+                if rotation_due_at_wake {
+                    telemetry
+                        .scheduler_rotation_catch_up_frames
+                        .fetch_add(catch_up_frames, Ordering::Relaxed);
+                }
+                if save_pending_at_wake {
+                    telemetry
+                        .scheduler_save_pending_catch_up_frames
+                        .fetch_add(catch_up_frames, Ordering::Relaxed);
+                }
             }
 
             if self.flags.shared.should_stop() {
@@ -2068,7 +2238,20 @@ impl RealtimeCfrScheduler {
         selection: &SourceSelection,
         fresh_source: bool,
         phases: &mut CallbackPhaseDurations,
-    ) -> Result<u64, ReplayHandlerError> {
+    ) -> Result<Option<u64>, ReplayHandlerError> {
+        let rotation_started_qpc = self
+            .flags
+            .clock
+            .now_qpc_100ns()
+            .map_err(ReplayHandlerError::new)?;
+        self.flags
+            .shared
+            .callback_telemetry
+            .last_rotation_lateness_before_100ns
+            .store(
+                rotation_started_qpc.saturating_sub(output_qpc_100ns).max(0),
+                Ordering::Relaxed,
+            );
         self.rotation_lifecycle.swap_started_ms = Some(self.elapsed_ms());
         let mut next = self
             .prepared
@@ -2100,14 +2283,8 @@ impl RealtimeCfrScheduler {
             .callback_telemetry
             .record_encoder_frame(encoded.telemetry);
         if !encoded.telemetry.queued {
-            self.flags
-                .shared
-                .callback_telemetry
-                .missed_realtime_output_frames
-                .fetch_add(1, Ordering::Relaxed);
-            return Err(ReplayHandlerError::new(
-                "The encoder queue could not accept a due realtime CFR frame during segment rotation.",
-            ));
+            self.prepared = Some(next);
+            return Ok(None);
         }
         let next_first_timestamp = next.first_frame_timestamp.ok_or_else(|| {
             ReplayHandlerError::new("The prepared encoder did not accept its first frame.")
@@ -2158,7 +2335,22 @@ impl RealtimeCfrScheduler {
         self.publish_lifecycle(phases);
         self.awaiting_following_frame = true;
         self.rotation_requested_ms = None;
-        Ok(previous_sequence_number)
+        let rotation_completed_qpc = self
+            .flags
+            .clock
+            .now_qpc_100ns()
+            .map_err(ReplayHandlerError::new)?;
+        self.flags
+            .shared
+            .callback_telemetry
+            .last_rotation_lateness_after_100ns
+            .store(
+                rotation_completed_qpc
+                    .saturating_sub(output_qpc_100ns)
+                    .max(0),
+                Ordering::Relaxed,
+            );
+        Ok(Some(previous_sequence_number))
     }
 
     fn emit_output_frame(
@@ -2174,23 +2366,17 @@ impl RealtimeCfrScheduler {
 
         let evaluation_started = Instant::now();
         self.poll_preparation(phases)?;
-        let pending_save_rotation = self.flags.shared.pending_rotation_request();
         let active_has_frames = self.active.as_ref().is_some_and(ActiveSegment::has_frames);
         let nominal_rotation_due = self
             .active
             .as_ref()
             .is_some_and(|active| active.should_rotate(self.flags.frame_rate))
             && active_has_frames;
-        let save_rotation_due = pending_save_rotation.filter(|_| active_has_frames);
 
-        if nominal_rotation_due || save_rotation_due.is_some() {
+        if nominal_rotation_due {
             self.mark_rotation_requested(phases);
             self.ensure_preparation(phases)?;
             self.poll_preparation(phases)?;
-            if self.prepared.is_none() {
-                phases.rotation_evaluation += evaluation_started.elapsed();
-                return Ok(false);
-            }
         } else if self
             .active
             .as_ref()
@@ -2208,26 +2394,43 @@ impl RealtimeCfrScheduler {
         let mut source_store = source_store
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let selection = source_store.select(output_qpc_100ns).ok_or_else(|| {
-            ReplayHandlerError::new("The realtime scheduler has no initial WGC visual frame.")
-        })?;
+        let selection = match self.pending_output_selection {
+            Some((pending_index, selection)) if pending_index == global_frame_index => selection,
+            _ => {
+                let selection = source_store.select(output_qpc_100ns).ok_or_else(|| {
+                    ReplayHandlerError::new(
+                        "The realtime scheduler has no initial WGC visual frame.",
+                    )
+                })?;
+                self.pending_output_selection = Some((global_frame_index, selection));
+                selection
+            }
+        };
         let fresh_source =
             source_generation_is_fresh(self.last_output_source_generation, selection.generation);
         let frame = source_store.current_frame().ok_or_else(|| {
             ReplayHandlerError::new("The realtime scheduler lost its current GPU source frame.")
         })?;
 
-        if nominal_rotation_due || save_rotation_due.is_some() {
+        let rotate_now = nominal_rotation_due && self.prepared.is_some();
+        let queued = if rotate_now {
             let swap_started = Instant::now();
-            let sequence_number =
+            let rotated =
                 self.rotate_on_output(frame, output_qpc_100ns, &selection, fresh_source, phases)?;
             phases.swap += swap_started.elapsed();
-            if let Some(request_id) = save_rotation_due {
-                let state_started = Instant::now();
-                self.flags
-                    .shared
-                    .acknowledge_rotation(request_id, sequence_number);
-                phases.state_update += state_started.elapsed();
+            if let Some(sequence_number) = rotated {
+                if let Some(request) = self.flags.shared.pending_save_boundary() {
+                    let state_started = Instant::now();
+                    self.flags.shared.acknowledge_save_boundary(
+                        request,
+                        sequence_number,
+                        output_qpc_100ns,
+                    );
+                    phases.state_update += state_started.elapsed();
+                }
+                true
+            } else {
+                false
             }
         } else {
             let was_empty = !self.active.as_ref().is_some_and(ActiveSegment::has_frames);
@@ -2254,24 +2457,28 @@ impl RealtimeCfrScheduler {
                 .shared
                 .callback_telemetry
                 .record_encoder_frame(encoded.telemetry);
-            if !encoded.telemetry.queued {
-                self.flags
-                    .shared
-                    .callback_telemetry
-                    .missed_realtime_output_frames
-                    .fetch_add(1, Ordering::Relaxed);
-                return Err(ReplayHandlerError::new(
-                    "The encoder queue could not sustain the realtime CFR output rate.",
-                ));
-            }
-            if was_empty {
+            if encoded.telemetry.queued && was_empty {
                 self.rotation_lifecycle.active_segment_first_frame_ms = self
                     .active
                     .as_ref()
                     .and_then(|active| active.first_frame_submitted_ms);
                 self.publish_lifecycle(phases);
             }
+            encoded.telemetry.queued
+        };
+
+        if !queued {
+            self.queue_full_recovery.record_refusal();
+            return Ok(false);
         }
+        if self.queue_full_recovery.record_acceptance() {
+            self.flags
+                .shared
+                .callback_telemetry
+                .recovered_queue_full_frames
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.pending_output_selection = None;
 
         self.last_output_source_generation = Some(selection.generation);
         let telemetry = &self.flags.shared.callback_telemetry;
@@ -2330,6 +2537,11 @@ fn expected_cfr_frame_index(start_qpc_100ns: i64, now_qpc_100ns: i64, frame_rate
         .unwrap_or(u64::MAX)
 }
 
+fn atomic_100ns_ms(value: &AtomicI64) -> Option<f64> {
+    let value = value.load(Ordering::Relaxed);
+    (value >= 0).then(|| value as f64 / 10_000.0)
+}
+
 fn cfr_frame_qpc(start_qpc_100ns: i64, frame_index: u64, frame_rate: u32) -> i64 {
     start_qpc_100ns.saturating_add(
         ((i128::from(frame_index) * 10_000_000i128) / i128::from(frame_rate.max(1))) as i64,
@@ -2342,6 +2554,15 @@ fn cfr_duration_100ns(frame_count: u64, frame_rate: u32) -> i64 {
 
 fn segment_output_frame_capacity(frame_rate: u32) -> u64 {
     u64::from(frame_rate).saturating_mul(SEGMENT_DURATION.as_secs())
+}
+
+fn normal_prewarm_due(frame_count: u64, frame_rate: u32) -> bool {
+    let lead_frames = u64::from(frame_rate).saturating_mul(NORMAL_PREWARM_LEAD_SECONDS);
+    frame_count >= segment_output_frame_capacity(frame_rate).saturating_sub(lead_frames)
+}
+
+fn normal_rotation_due(frame_count: u64, frame_rate: u32) -> bool {
+    frame_count >= segment_output_frame_capacity(frame_rate)
 }
 
 fn due_source_update_count(timestamps: impl Iterator<Item = i64>, output_qpc_100ns: i64) -> usize {
@@ -2476,6 +2697,8 @@ impl GraphicsCaptureApiHandler for ReplayCaptureHandler {
                 video_timeline_start_qpc_100ns: 0,
                 next_output_frame_index: 0,
                 last_output_source_generation: None,
+                pending_output_selection: None,
+                queue_full_recovery: QueueFullRecovery::default(),
             }),
             scheduler_thread: None,
         })
@@ -2651,12 +2874,16 @@ mod tests {
 
     use super::{
         calculate_rotation_diagnostics, cfr_duration_100ns, due_source_update_count,
-        expected_cfr_frame_index, segment_output_frame_capacity, source_generation_is_fresh,
-        validate_start_request, AudioReplayConfiguration, ReplayBufferStartRequest, SharedReplay,
-        VideoFrameTimingPoint,
+        expected_cfr_frame_index, normal_prewarm_due, normal_rotation_due,
+        segment_output_frame_capacity, source_generation_is_fresh, validate_start_request,
+        AudioReplayConfiguration, QueueFullRecovery, ReplayBufferStartRequest, ReplaySessionClock,
+        SharedReplay, VideoFrameTimingPoint,
     };
     use crate::capture::encoder::{EncoderChoice, EncoderCodec};
     use crate::capture::targets::{CaptureTargetRequest, CaptureTargetType};
+    use crate::replay::audio::{
+        AudioSourceKind, AudioTrackConfiguration, AudioTrackRole, AudioTrackState,
+    };
     use crate::replay::segment::CompletedSegment;
     use crate::replay::state::ReplayLifecycleState;
 
@@ -2723,6 +2950,7 @@ mod tests {
             height: 1080,
             frame_rate: 60,
             file_size: 4,
+            average_bitrate_mbps: 0.000016,
             finalized: true,
             finalization_time_ms: 10.0,
             rotation_gap_ms: Some(2.0),
@@ -2785,6 +3013,107 @@ mod tests {
     }
 
     #[test]
+    fn save_mid_segment_waits_for_an_ordinary_rotation_boundary() {
+        assert!(normal_prewarm_due(60, 60));
+        assert!(!normal_rotation_due(61, 60));
+        assert!(normal_rotation_due(120, 60));
+    }
+
+    #[test]
+    fn normal_prewarm_has_one_second_of_lead_for_observed_creation_time() {
+        let prewarm_frame = 60;
+        let boundary_frame = segment_output_frame_capacity(60);
+        let lead_ms = (boundary_frame - prewarm_frame) as f64 / 60.0 * 1_000.0;
+        assert_eq!(lead_ms, 1_000.0);
+        assert!(lead_ms > 370.74);
+    }
+
+    #[test]
+    fn queue_refusal_retries_the_same_cfr_position_before_advancing() {
+        let frame_index = 731;
+        let expected_qpc = super::cfr_frame_qpc(500_000_000, frame_index, 60);
+        let mut recovery = QueueFullRecovery::default();
+        recovery.record_refusal();
+        assert_eq!(
+            super::cfr_frame_qpc(500_000_000, frame_index, 60),
+            expected_qpc
+        );
+        assert!(recovery.record_acceptance());
+        assert!(!recovery.record_acceptance());
+    }
+
+    #[test]
+    fn save_anchor_does_not_stop_capture_and_only_acknowledges_a_covering_boundary() {
+        let shared = SharedReplay::new();
+        shared.begin(&request(30, 60));
+        {
+            let mut inner = shared.lock();
+            inner
+                .ring
+                .push(completed_segment(Path::new("segment-1.mp4"), 1));
+        }
+        shared.mark_running();
+
+        let (first_id, _, anchor) = shared.request_save_boundary_at(25_000_000).unwrap();
+        let first = shared.pending_save_boundary().unwrap();
+        assert_eq!(first.request_id, first_id);
+        assert!(!shared.should_stop());
+        assert_eq!(shared.snapshot().state, ReplayLifecycleState::Running);
+        assert!(!normal_rotation_due(75, 60));
+
+        shared.acknowledge_save_boundary(first, 1, anchor - 1);
+        assert_eq!(shared.pending_save_boundary(), Some(first));
+        shared.acknowledge_save_boundary(first, 1, anchor);
+        assert!(shared.pending_save_boundary().is_none());
+
+        let (second_id, _, _) = shared.request_save_boundary_at(26_000_000).unwrap();
+        assert!(second_id > first_id);
+        assert!(!shared.should_stop());
+    }
+
+    #[test]
+    fn audio_track_state_remains_active_across_save_request() {
+        let root =
+            std::env::temp_dir().join(format!("replay-save-audio-active-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let shared = SharedReplay::new();
+        shared.begin(&request(30, 60));
+        shared
+            .audio
+            .begin(
+                &AudioReplayConfiguration {
+                    tracks: vec![AudioTrackConfiguration {
+                        role: AudioTrackRole::Game,
+                        enabled: true,
+                        source_kind: AudioSourceKind::Process,
+                        process_id: Some(7),
+                        endpoint_id: None,
+                        source_label: Some("Game".into()),
+                    }],
+                },
+                ReplaySessionClock::create().unwrap(),
+                root.clone(),
+                30,
+            )
+            .unwrap();
+        {
+            let mut inner = shared.lock();
+            inner
+                .ring
+                .push(completed_segment(Path::new("segment-1.mp4"), 1));
+        }
+        shared.mark_running();
+        let before = shared.audio.snapshot().tracks[0].state;
+
+        shared.request_save_boundary_at(10_000_000).unwrap();
+
+        assert_eq!(before, AudioTrackState::Preparing);
+        assert_eq!(shared.audio.snapshot().tracks[0].state, before);
+        assert!(!shared.should_stop());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn normal_boundary_interval_reports_no_missed_frames() {
         let diagnostics = calculate_rotation_diagnostics(10_000_000, 10_166_667, 60, 175.0);
         assert!((diagnostics.source_frame_gap_ms - 16.6667).abs() < 0.001);
@@ -2840,6 +3169,7 @@ mod tests {
             1080,
             "test-session".to_string(),
             directory.clone(),
+            ReplaySessionClock::create().unwrap(),
         );
         shared.mark_running();
 
@@ -2851,7 +3181,7 @@ mod tests {
             }
         }
 
-        let snapshot = shared.pin_snapshot(3, 123).unwrap();
+        let snapshot = shared.pin_snapshot(3, 123, 60_000_000).unwrap();
         let first_path = directory.join("segment-000001.mp4");
         shared.complete_segment(completed_segment(&directory.join("segment-000004.mp4"), 4));
         assert!(first_path.exists());

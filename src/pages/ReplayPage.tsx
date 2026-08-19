@@ -151,6 +151,7 @@ type CompletedSegment = {
   height: number;
   frameRate: number;
   fileSize: number;
+  averageBitrateMbps: number;
   finalized: boolean;
   finalizationTimeMs: number;
   rotationGapMs: number | null;
@@ -225,7 +226,15 @@ type ReplayBufferStatus = {
   schedulerExpectedOutputFrameIndex: number | null;
   schedulerCurrentLatenessMs: number | null;
   schedulerWorstLatenessMs: number | null;
+  schedulerCatchUpWakeups: number;
+  schedulerMaxCatchUpBurst: number;
   schedulerCatchUpFrames: number;
+  schedulerRotationCatchUpFrames: number;
+  schedulerSavePendingCatchUpFrames: number;
+  queueFullRetryAttempts: number;
+  recoveredQueueFullFrames: number;
+  lastRotationLatenessBeforeMs: number | null;
+  lastRotationLatenessAfterMs: number | null;
   freshOutputFrames: number;
   heldOutputFrames: number;
   supersededSourceUpdates: number;
@@ -271,6 +280,7 @@ type SaveReplayStatus = {
   requestedDurationSeconds: number;
   actualSavedDurationSeconds: number | null;
   saveRequestTimestampMs: number | null;
+  saveRequestQpc100ns: number | null;
   selectedSegmentCount: number;
   selectedSegmentSequenceNumbers: number[];
   actualEarliestTimestampMs: number | null;
@@ -369,7 +379,15 @@ const initialReplayStatus: ReplayBufferStatus = {
   schedulerExpectedOutputFrameIndex: null,
   schedulerCurrentLatenessMs: null,
   schedulerWorstLatenessMs: null,
+  schedulerCatchUpWakeups: 0,
+  schedulerMaxCatchUpBurst: 0,
   schedulerCatchUpFrames: 0,
+  schedulerRotationCatchUpFrames: 0,
+  schedulerSavePendingCatchUpFrames: 0,
+  queueFullRetryAttempts: 0,
+  recoveredQueueFullFrames: 0,
+  lastRotationLatenessBeforeMs: null,
+  lastRotationLatenessAfterMs: null,
   freshOutputFrames: 0,
   heldOutputFrames: 0,
   supersededSourceUpdates: 0,
@@ -401,6 +419,7 @@ const initialSaveReplayStatus: SaveReplayStatus = {
   requestedDurationSeconds: 0,
   actualSavedDurationSeconds: null,
   saveRequestTimestampMs: null,
+  saveRequestQpc100ns: null,
   selectedSegmentCount: 0,
   selectedSegmentSequenceNumbers: [],
   actualEarliestTimestampMs: null,
@@ -1140,7 +1159,11 @@ export function ReplayPage() {
               <Diagnostic label="Video timeline start QPC" value={formatOptionalCount(replayStatus.videoTimelineStartQpc100ns)} />
               <Diagnostic label="CFR output / expected index" value={`${formatOptionalCount(replayStatus.schedulerCurrentOutputFrameIndex)} / ${formatOptionalCount(replayStatus.schedulerExpectedOutputFrameIndex)}`} />
               <Diagnostic label="Scheduler late current / worst" value={formatMetricPair(replayStatus.schedulerCurrentLatenessMs, replayStatus.schedulerWorstLatenessMs)} />
+              <Diagnostic label="Catch-up wakeups / max burst" value={`${replayStatus.schedulerCatchUpWakeups} / ${replayStatus.schedulerMaxCatchUpBurst}`} />
               <Diagnostic label="Scheduler catch-up frames" value={String(replayStatus.schedulerCatchUpFrames)} />
+              <Diagnostic label="Catch-up during rotation" value={String(replayStatus.schedulerRotationCatchUpFrames)} />
+              <Diagnostic label="Catch-up while Save pending" value={String(replayStatus.schedulerSavePendingCatchUpFrames)} />
+              <Diagnostic label="Rotation late before / after" value={formatMetricPair(replayStatus.lastRotationLatenessBeforeMs, replayStatus.lastRotationLatenessAfterMs)} />
               <Diagnostic label="Fresh / held output frames" value={`${replayStatus.freshOutputFrames} / ${replayStatus.heldOutputFrames}`} />
               <Diagnostic label="Superseded WGC updates" value={String(replayStatus.supersededSourceUpdates)} />
               <Diagnostic label="Missed realtime outputs" value={String(replayStatus.missedRealtimeOutputFrames)} />
@@ -1158,7 +1181,8 @@ export function ReplayPage() {
               <Diagnostic label="GPU copy avg / worst" value={formatMetricPair(replayStatus.averageGpuCopyDurationMs, replayStatus.worstGpuCopyDurationMs)} />
               <Diagnostic label="Encoder queue depth / max" value={`${replayStatus.encoderQueueDepth} / ${replayStatus.maximumEncoderQueueDepth}`} />
               <Diagnostic label="Encoder queue capacity" value={String(replayStatus.encoderQueueCapacity)} />
-              <Diagnostic label="Queue-full / dropped frames" value={`${replayStatus.encoderQueueFullEvents} / ${replayStatus.deliberatelyDroppedFrames}`} />
+              <Diagnostic label="Queue refusals / retry attempts" value={`${replayStatus.encoderQueueFullEvents} / ${replayStatus.queueFullRetryAttempts}`} />
+              <Diagnostic label="Recovered queue-full frames" value={String(replayStatus.recoveredQueueFullFrames)} />
               <Diagnostic label="WGC frame pool" value={`${replayStatus.framePoolCreationMethod} · ${replayStatus.framePoolBufferCount} buffers`} />
               <Diagnostic label="send_frame > 16.67 / 33.33 ms" value={`${replayStatus.sendFrameOver16_67Ms} / ${replayStatus.sendFrameOver33_33Ms}`} />
               <Diagnostic label="send_frame > 50 / 100 ms" value={`${replayStatus.sendFrameOver50Ms} / ${replayStatus.sendFrameOver100Ms}`} />
@@ -1236,7 +1260,7 @@ export function ReplayPage() {
                     <span>{segment.freshOutputFrameCount} fresh / {segment.heldOutputFrameCount} held</span>
                     <span>{segment.sourceFrameGapMs === null ? "final" : `${segment.sourceFrameGapMs.toFixed(2)} ms source gap`}</span>
                     <span>{segment.encoderCreationTimeMs.toFixed(2)} ms create</span>
-                    <span>{formatBytes(segment.fileSize)}</span>
+                    <span>{formatBytes(segment.fileSize)} / {segment.averageBitrateMbps.toFixed(2)} Mbps</span>
                   </div>
                 ))
               ) : (
@@ -1279,7 +1303,12 @@ export function ReplayPage() {
                   <span>{saveReplayStatus.selectedSegmentCount} segments</span>
                   <span>{saveReplayStatus.codec ?? "Unknown codec"}</span>
                   {saveReplayStatus.fileSize !== null && (
-                    <span>{formatBytes(saveReplayStatus.fileSize)}</span>
+                    <span>
+                      {formatBytes(saveReplayStatus.fileSize)} / {formatAverageBitrate(
+                        saveReplayStatus.fileSize,
+                        saveReplayStatus.actualSavedDurationSeconds,
+                      )}
+                    </span>
                   )}
                 </div>
               )}
@@ -1302,6 +1331,7 @@ export function ReplayPage() {
               {saveReplayStatus.videoTimeline && (
                 <div className="timeline-consistency-report">
                   <small>Saved-replay timeline consistency</small>
+                  <code>Immutable Save QPC anchor {saveReplayStatus.saveRequestQpc100ns ?? "n/a"}</code>
                   <code>Raw WGC QPC {saveReplayStatus.videoTimeline.rawCaptureStartQpc100ns}→{saveReplayStatus.videoTimeline.rawCaptureEndQpc100ns} ({format100nsSeconds(saveReplayStatus.videoTimeline.rawCaptureSpan100ns)} s)</code>
                   <code>Realtime video QPC {saveReplayStatus.videoTimeline.clipCaptureStartQpc100ns}→{saveReplayStatus.videoTimeline.clipCaptureEndQpc100ns}</code>
                   <code>Final playback 0.000→{format100nsSeconds(saveReplayStatus.videoTimeline.clipPlaybackDuration100ns)} s · source delivery gaps preserved by held CFR frames</code>
@@ -1375,7 +1405,7 @@ function formatSaveJobMessage(state: SaveJobState) {
   const messages: Record<SaveJobState, string> = {
     idle: "Ready to save available replay video.",
     preparing: "Preparing replay...",
-    finalizingCurrentSegment: "Finalizing current segment...",
+    finalizingCurrentSegment: "Waiting for the next prewarmed segment boundary...",
     assembling: "Saving replay...",
     completed: "Replay saved",
     error: "Replay save failed",
@@ -1435,6 +1465,11 @@ function formatBytes(bytes: number) {
   if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KB`;
   if (bytes < 1_073_741_824) return `${(bytes / 1_048_576).toFixed(1)} MB`;
   return `${(bytes / 1_073_741_824).toFixed(2)} GB`;
+}
+
+function formatAverageBitrate(bytes: number, durationSeconds: number) {
+  if (durationSeconds <= 0) return "n/a";
+  return `${(bytes * 8 / durationSeconds / 1_000_000).toFixed(2)} Mbps`;
 }
 
 function format100nsSeconds(value: number) {

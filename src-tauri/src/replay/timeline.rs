@@ -239,6 +239,7 @@ mod tests {
             height: 1440,
             frame_rate: 60,
             file_size: 1,
+            average_bitrate_mbps: 0.000004,
             finalized: true,
             finalization_time_ms: 0.0,
             rotation_gap_ms: None,
