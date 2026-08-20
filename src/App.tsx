@@ -6,9 +6,11 @@ import { ClipsPage } from "./pages/ClipsPage";
 import { EditorPage } from "./pages/EditorPage";
 import { ReplayPage } from "./pages/ReplayPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import type { ClipListItem } from "./types/clips";
 
 function App() {
   const [activePage, setActivePage] = useState<PageId>("replay");
+  const [editorClip, setEditorClip] = useState<ClipListItem | null>(null);
   const [hotkeyFeedback, setHotkeyFeedback] = useState<{ success: boolean; message: string } | null>(null);
 
   useEffect(() => {
@@ -32,16 +34,31 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [hotkeyFeedback]);
 
+  function navigate(page: PageId) {
+    if (page !== "editor" || activePage !== "editor") setEditorClip(null);
+    setActivePage(page);
+  }
+
+  function openEditor(clip: ClipListItem) {
+    setEditorClip(clip);
+    setActivePage("editor");
+  }
+
+  function closeEditor() {
+    setEditorClip(null);
+    setActivePage("clips");
+  }
+
   const pages: Record<PageId, React.ReactNode> = {
     replay: <ReplayPage />,
-    clips: <ClipsPage />,
-    editor: <EditorPage />,
+    clips: <ClipsPage onEditClip={openEditor} />,
+    editor: <EditorPage clip={editorClip} onBackToClips={closeEditor} />,
     settings: <SettingsPage />,
   };
 
   return (
     <div className="app-shell">
-      <Sidebar activePage={activePage} onNavigate={setActivePage} />
+      <Sidebar activePage={activePage} onNavigate={navigate} />
       <main className="app-content">{pages[activePage]}</main>
       {hotkeyFeedback && (
         <div className={`hotkey-feedback ${hotkeyFeedback.success ? "hotkey-feedback-success" : "hotkey-feedback-error"}`} role="status" aria-live="polite">

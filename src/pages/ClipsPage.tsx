@@ -15,7 +15,7 @@ import type {
 } from "../types/clips";
 import { audioLabel, errorMessage, formatBytes, formatDuration100ns, formatFps } from "../types/clips";
 
-export function ClipsPage() {
+export function ClipsPage({ onEditClip }: { onEditClip: (clip: ClipListItem) => void }) {
   const [search, setSearch] = useState("");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [sortOrder, setSortOrder] = useState<ClipSortOrder>("newestFirst");
@@ -152,7 +152,7 @@ export function ClipsPage() {
                   <div className="clip-card-facts"><span>{formatDuration100ns(clip.duration100ns)}</span><span>{formatBytes(clip.fileSizeBytes)}</span><span>{formatFps(clip.fpsNumerator, clip.fpsDenominator)} FPS</span>{clip.captureTargetLabel && <span>{clip.captureTargetLabel}</span>}</div>
                   {clip.audioTracks.length > 0 && <div className="clip-audio-badges">{clip.audioTracks.map((track) => <span key={track.streamIndex}>{audioLabel(track)}</span>)}</div>}
                   <div className="clip-card-actions">
-                    <button className="clip-play-button" type="button" onClick={() => setPlayingClip(clip)}>▶ Play</button><button type="button" onClick={() => void clipAction("open_clip_file", clip)}>Open Externally</button><button type="button" onClick={() => void clipAction("open_clip_folder", clip)}>Folder</button><button type="button" onClick={() => void renameClip(clip)}>Rename</button><button className="danger" type="button" onClick={() => void deleteClip(clip)}>Delete</button>
+                    <button className="clip-play-button" type="button" onClick={() => setPlayingClip(clip)}>▶ Play</button><button className="clip-edit-button" type="button" onClick={() => onEditClip(clip)}>Edit</button><button type="button" onClick={() => void clipAction("open_clip_file", clip)}>Open Externally</button><button type="button" onClick={() => void clipAction("open_clip_folder", clip)}>Folder</button><button type="button" onClick={() => void renameClip(clip)}>Rename</button><button className="danger" type="button" onClick={() => void deleteClip(clip)}>Delete</button>
                   </div>
                 </div>
               </article>
