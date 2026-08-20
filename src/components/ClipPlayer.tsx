@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type { ClipActionResponse, ClipListItem, ClipPlaybackInfo, ClipPlaybackInfoResponse, PrepareClipMediaResponse } from "../types/clips";
-import { audioLabel, errorMessage, formatBytes, formatTime } from "../types/clips";
+import { errorMessage, formatBytes, formatTime } from "../types/clips";
 import { clampMediaTime, mediaTimeToPercent, planPlaybackSourceSwitch, playbackIntent, playerShortcut, toggledMuteState, volumePlan } from "../utils/playerControls";
 
 type PlayerState = "idle" | "loading" | "playing" | "paused" | "preparingProxy" | "error";
-type PlaybackSource = "Master" | "H264 Proxy" | "Audio Preview";
+type PlaybackSource = "Master" | "H264 Proxy";
 type PlayerIconName = "play" | "pause" | "volume" | "muted" | "fullscreen" | "exitFullscreen";
 type Props = { clip: ClipListItem; onClose: () => void };
 type Source = { path: string; kind: PlaybackSource; revision: number };
@@ -23,8 +23,6 @@ export function ClipPlayer({ clip, onClose }: Props) {
   const [info, setInfo] = useState<ClipPlaybackInfo | null>(null);
   const [source, setSource] = useState<Source | null>(null);
   const [playerState, setPlayerState] = useState<PlayerState>("idle");
-  const [selectedAudio, setSelectedAudio] = useState("combined");
-  const [selectedAudioRole, setSelectedAudioRole] = useState("Combined");
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(clip.duration100ns / 10_000_000);
   const [volume, setVolume] = useState(1);
@@ -139,7 +137,7 @@ export function ClipPlayer({ clip, onClose }: Props) {
     };
   }, [clearControlsTimer, clip.id]);
 
-  const prepareMedia = useCallback(async (streamIndex?: number, retry = false) => {
+  const prepareMedia = useCallback(async (retry = false) => {
     if (seekWatchdog.current !== undefined) window.clearTimeout(seekWatchdog.current);
     seekWatchdog.current = undefined;
     const video = videoRef.current;
@@ -150,18 +148,14 @@ export function ClipPlayer({ clip, onClose }: Props) {
     showControls();
     while (mountedRef.current && generationToken.current === token) {
       try {
-        const command = streamIndex === undefined ? "prepare_clip_preview" : "prepare_clip_audio_preview";
-        const request = streamIndex === undefined
-          ? { clipId: clip.id, retry, currentTimeSeconds: switchPlan.restoreAtSeconds, wasPlaying: switchPlan.resumePlaying }
-          : { clipId: clip.id, streamIndex, retry, currentTimeSeconds: switchPlan.restoreAtSeconds, wasPlaying: switchPlan.resumePlaying };
-        const response = await invoke<PrepareClipMediaResponse>(command, { request });
+        const request = { clipId: clip.id, retry, currentTimeSeconds: switchPlan.restoreAtSeconds, wasPlaying: switchPlan.resumePlaying };
+        const response = await invoke<PrepareClipMediaResponse>("prepare_clip_preview", { request });
         retry = false;
         if (!mountedRef.current || generationToken.current !== token) return;
         setGeneration(response);
         if (response.artifact.state === "ready" && response.artifact.filePath) {
           pendingRestore.current = { time: response.restoreAtSeconds, play: response.resumePlaying };
-          setSelectedAudioRole(response.selectedAudioRole ?? "Combined");
-          setSource({ path: response.artifact.filePath, kind: streamIndex === undefined ? "H264 Proxy" : "Audio Preview", revision: ++sourceRevision.current });
+          setSource({ path: response.artifact.filePath, kind: "H264 Proxy", revision: ++sourceRevision.current });
           setPlayerState("loading");
           return;
         }
@@ -252,23 +246,6 @@ export function ClipPlayer({ clip, onClose }: Props) {
     seekWatchdog.current = undefined;
   }
 
-  function switchAudio(value: string) {
-    setSelectedAudio(value);
-    const video = videoRef.current;
-    const switchPlan = planPlaybackSourceSwitch(video?.currentTime ?? currentTimeRef.current, video?.duration || durationRef.current, video?.paused ?? true, volumeRef.current, mutedRef.current);
-    if (value === "combined") {
-      setSelectedAudioRole("Combined");
-      if (directAttempt === "success" && info) {
-        generationToken.current += 1;
-        pendingRestore.current = { time: switchPlan.restoreAtSeconds, play: switchPlan.resumePlaying };
-        setSource({ path: info.masterPath, kind: "Master", revision: ++sourceRevision.current });
-        setPlayerState("loading");
-      } else void prepareMedia();
-      return;
-    }
-    void prepareMedia(Number(value));
-  }
-
   async function trustedAction(command: "open_clip_file" | "open_clip_folder") {
     const response = await invoke<ClipActionResponse>(command, { request: { clipId: clip.id } });
     if (!response.success) { setPlayerError(response.errorMessage ?? "The requested clip action failed."); setPlayerState("error"); }
@@ -276,7 +253,7 @@ export function ClipPlayer({ clip, onClose }: Props) {
 
   function retryPreparation() {
     fallbackStarted.current = true;
-    void prepareMedia(selectedAudio === "combined" ? undefined : Number(selectedAudio), true);
+    void prepareMedia(true);
   }
 
   const seekPercent = mediaTimeToPercent(currentTime, duration);
@@ -313,7 +290,7 @@ export function ClipPlayer({ clip, onClose }: Props) {
             onError={playbackFailed}
           />}
           {!source && playerState !== "error" && <div className="clip-player-message">Loading SlickClip media...</div>}
-          {playerState === "preparingProxy" && <div className="clip-player-message"><span className="player-spinner" />Preparing {selectedAudio === "combined" ? "H.264 Preview" : "Audio Preview"}...</div>}
+          {playerState === "preparingProxy" && <div className="clip-player-message"><span className="player-spinner" />Preparing H.264 Preview...</div>}
           {playerState === "error" && <div className="clip-player-message clip-player-error">
             <strong>Playback unavailable</strong><span>{playerError}</span>
             <div><button type="button" onClick={retryPreparation}>Retry Preview</button><button type="button" onClick={() => void trustedAction("open_clip_file")}>Open Externally</button></div>
@@ -332,19 +309,13 @@ export function ClipPlayer({ clip, onClose }: Props) {
                 <input className="player-range player-volume-range" type="range" min="0" max="1" step="0.01" value={volume} style={volumeStyle} aria-label="Volume" onChange={(event) => setPlayerVolume(Number(event.target.value))} />
               </div>
               <span className="player-control-spacer" />
-              <label className="player-audio-selector"><span>Audio</span>
-                <select value={selectedAudio} onChange={(event) => switchAudio(event.target.value)}>
-                  <option value="combined">Combined</option>
-                  {info?.audioTracks.filter((track) => track.role !== "Combined").map((track) => <option key={track.streamIndex} value={track.streamIndex}>{audioLabel(track)}</option>)}
-                </select>
-              </label>
               <button className="player-icon-button" type="button" onClick={toggleFullscreen} aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}><PlayerIcon name={isFullscreen ? "exitFullscreen" : "fullscreen"} /></button>
             </div>
           </div>}
         </div>
 
         <div className="clip-player-secondary-actions">
-          <button type="button" onClick={() => { setSelectedAudio("combined"); void prepareMedia(); }}>Use H.264 Preview</button>
+          <button type="button" onClick={() => void prepareMedia()}>Use H.264 Preview</button>
           <button type="button" onClick={() => void trustedAction("open_clip_file")}>Open Externally</button>
           <button type="button" onClick={() => void trustedAction("open_clip_folder")}>Open Folder</button>
         </div>
@@ -360,7 +331,6 @@ export function ClipPlayer({ clip, onClose }: Props) {
           <div><span>Direct attempt</span><code>{directAttempt}{directError ? ` — ${directError}` : ""}</code></div>
           <div><span>Proxy</span><code>{generation?.artifact.state ?? info?.preview.state ?? "unknown"}{(generation?.artifact.fileSizeBytes ?? info?.preview.fileSizeBytes) ? ` · ${formatBytes((generation?.artifact.fileSizeBytes ?? info?.preview.fileSizeBytes)!)}` : ""}{(generation?.artifact.bitrateBps ?? info?.preview.bitrateBps) ? ` · ${((generation?.artifact.bitrateBps ?? info?.preview.bitrateBps)! / 1_000_000).toFixed(2)} Mbps` : ""}{(generation?.artifact.generationDurationMs ?? info?.preview.generationDurationMs) ? ` · ${(generation?.artifact.generationDurationMs ?? info?.preview.generationDurationMs)!.toFixed(0)} ms` : ""}</code></div>
           <div><span>Thumbnail</span><code>{info?.thumbnail.state ?? "unknown"}{info?.thumbnail.fileSizeBytes ? ` · ${formatBytes(info.thumbnail.fileSizeBytes)}` : ""}{info?.thumbnail.generationDurationMs ? ` · ${info.thumbnail.generationDurationMs.toFixed(0)} ms` : ""}</code></div>
-          <div><span>Selected audio</span><code>{selectedAudioRole}</code></div>
           <div><span>Cache root</span><code>{info?.cacheRoot ?? "Loading..."}</code></div>
           <div><span>Player state</span><code>{playerState}</code></div>
         </details>

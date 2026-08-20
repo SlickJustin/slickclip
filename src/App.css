@@ -2612,27 +2612,6 @@ kbd.hotkey-recording {
   flex: 1;
 }
 
-.player-audio-selector {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #aaa2b2;
-  font-size: 9px;
-  font-weight: 650;
-  letter-spacing: .3px;
-  text-transform: uppercase;
-}
-
-.player-audio-selector select {
-  min-width: 145px;
-  height: 32px;
-  border-color: #494151;
-  color: #d8d1de;
-  background: #25222a;
-  font-size: 10px;
-  text-transform: none;
-}
-
 .clip-player-secondary-actions {
   display: flex;
   justify-content: flex-end;
@@ -2722,7 +2701,6 @@ kbd.hotkey-recording {
 @media (max-width: 760px) {
   .player-control-row { flex-wrap: wrap; }
   .player-control-spacer { display: none; }
-  .player-audio-selector { margin-left: auto; }
   .clip-player-secondary-actions { flex-wrap: wrap; }
 }
 
