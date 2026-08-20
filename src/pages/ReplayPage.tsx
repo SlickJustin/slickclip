@@ -111,6 +111,9 @@ type VideoSegmentPlaybackMap = { sequenceNumber: number; sessionStartQpc100ns: n
 type SavedReplayTimeline = { rawCaptureStartQpc100ns: number; rawCaptureEndQpc100ns: number; rawCaptureSpan100ns: number; clipCaptureStartQpc100ns: number; clipCaptureEndQpc100ns: number; clipPlaybackStart100ns: number; clipPlaybackEnd100ns: number; clipPlaybackDuration100ns: number; encodedTimeBaseNumerator: number; encodedTimeBaseDenominator: number; timestampStrategy: string; segmentMaps: VideoSegmentPlaybackMap[] };
 type AudioSnapshotPlan = { trackRole: AudioTrackRole; rawVideoStartQpc100ns: number; rawVideoEndQpc100ns: number; rawVideoSpanMs: number; clipCaptureStartQpc100ns: number; clipCaptureEndQpc100ns: number; clipPlaybackStartMs: number; clipPlaybackEndMs: number; clipPlaybackDurationMs: number; rawAudioStartQpc100ns: number | null; rawAudioEndQpc100ns: number | null; mappedPlaybackStartMs: number | null; mappedPlaybackEndMs: number | null; mappedStartRegion: string | null; mappedEndRegion: string | null; leadingUncoveredMs: number; trailingUncoveredMs: number; trimBeforeClipMs: number; trimAfterClipMs: number; finalClipCoverageMs: number; materialUncoveredThresholdMs: number; hasMaterialUncoveredAudio: boolean; warning: string | null; segmentCount: number; segmentSequenceNumbers: number[] };
 type AudioSaveBarrierTelemetry = { trackRole: AudioTrackRole; sourceState: AudioTrackState; sourceErrorMessage: string | null; requiredVideoEndQpc100ns: number; capturedThroughQpc100ns: number | null; writtenThroughQpc100ns: number | null; finalizedThroughQpc100nsBeforeWait: number | null; finalizedThroughQpc100nsAfterWait: number | null; waitDurationMs: number; explicitWriterCutRequested: boolean; satisfyingSegmentSequence: number | null; timedOut: boolean; errorMessage: string | null };
+type AudioRenderDiagnostics = { trackRole: AudioTrackRole; selectedSegmentSequenceNumbers: number[]; sourceFormat: AudioFormat; sourceFramesAvailable: number; framesTrimmedBefore: number; framesTrimmedAfter: number; leadingSilenceFrames: number; trailingSilenceFrames: number; renderedFrameCount: number; renderedDurationSeconds: number; renderedWavSize: number; warnings: string[] };
+type FinalAudioStreamDiagnostics = { streamIndex: number; title: string; codec: string; sampleRate: number; channels: number; isDefault: boolean; durationSeconds: number | null; bitrateKbps: number | null };
+type FinalMuxDiagnostics = { ffmpegDurationMs: number; ffmpegExitStatus: string; finalStreamCount: number; videoStreamCount: number; audioStreamCount: number; audioTitles: string[]; audioStreams: FinalAudioStreamDiagnostics[]; videoBitrateMbps: number | null; totalBitrateMbps: number | null; containerDurationSeconds: number | null; filterGraph: string | null; verified: boolean };
 
 type TargetTab = "monitor" | "window";
 type SelectedTarget = { targetType: TargetTab; id: string };
@@ -272,7 +275,11 @@ type SaveJobState =
   | "idle"
   | "preparing"
   | "finalizingCurrentSegment"
-  | "assembling"
+  | "assemblingVideo"
+  | "renderingAudio"
+  | "muxing"
+  | "verifying"
+  | "promoting"
   | "completed"
   | "error";
 
@@ -300,6 +307,11 @@ type SaveReplayStatus = {
   internalEncodedDurationSeconds: number | null;
   ffprobeDurationSeconds: number | null;
   internalFfprobeDifferenceMs: number | null;
+  audioRenderDiagnostics: AudioRenderDiagnostics[];
+  finalMux: FinalMuxDiagnostics | null;
+  temporaryWorkspacePath: string | null;
+  temporaryVideoPath: string | null;
+  temporaryArtifactsRetained: boolean;
 };
 
 type SaveReplayCommandResult = {
@@ -444,6 +456,11 @@ const initialSaveReplayStatus: SaveReplayStatus = {
   internalEncodedDurationSeconds: null,
   ffprobeDurationSeconds: null,
   internalFfprobeDifferenceMs: null,
+  audioRenderDiagnostics: [],
+  finalMux: null,
+  temporaryWorkspacePath: null,
+  temporaryVideoPath: null,
+  temporaryArtifactsRetained: false,
 };
 
 export function ReplayPage() {
@@ -1323,9 +1340,49 @@ export function ReplayPage() {
                   )}
                 </div>
               )}
+              {saveReplayStatus.finalMux && (
+                <div className="audio-snapshot-plans">
+                  <small>Verified final MP4 streams</small>
+                  <div className="audio-snapshot-plan">
+                    <strong>Video · {saveReplayStatus.codec ?? "Unknown codec"} · stream copy</strong>
+                    <span>{formatOptionalMetric(saveReplayStatus.finalMux.videoBitrateMbps, "Mbps")} video · {formatOptionalMetric(saveReplayStatus.finalMux.totalBitrateMbps, "Mbps")} total</span>
+                    <span>{saveReplayStatus.finalMux.finalStreamCount} streams · FFmpeg {saveReplayStatus.finalMux.ffmpegExitStatus} · {saveReplayStatus.finalMux.ffmpegDurationMs.toFixed(2)} ms</span>
+                  </div>
+                  {saveReplayStatus.finalMux.audioStreams.map((stream) => (
+                    <div className="audio-snapshot-plan" key={stream.streamIndex}>
+                      <strong>{stream.title}{stream.isDefault ? " · Default" : ""}</strong>
+                      <span>{stream.codec.toUpperCase()} · {stream.sampleRate.toLocaleString()} Hz · {stream.channels === 2 ? "stereo" : `${stream.channels} channels`}</span>
+                      <span>{formatOptionalMetric(stream.durationSeconds, "s")} · {formatOptionalMetric(stream.bitrateKbps, "kbps")}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {saveReplayStatus.audioRenderDiagnostics.length > 0 && (
+                <div className="audio-snapshot-plans">
+                  <small>Exact temporary audio renders</small>
+                  {saveReplayStatus.audioRenderDiagnostics.map((render) => (
+                    <div className={`audio-snapshot-plan${render.warnings.length > 0 ? " warning" : ""}`} key={render.trackRole}>
+                      <strong>{formatAudioRole(render.trackRole)}</strong>
+                      <span>{render.sourceFormat.sampleRate.toLocaleString()} Hz · {render.sourceFormat.channelCount} channels · {render.sourceFormat.sampleFormat}</span>
+                      <span>{render.sourceFramesAvailable.toLocaleString()} source frames · trim {render.framesTrimmedBefore.toLocaleString()} / {render.framesTrimmedAfter.toLocaleString()}</span>
+                      <span>Silence {render.leadingSilenceFrames.toLocaleString()} leading / {render.trailingSilenceFrames.toLocaleString()} trailing</span>
+                      <span>{render.renderedFrameCount.toLocaleString()} rendered frames · {render.renderedDurationSeconds.toFixed(6)} s · {formatBytes(render.renderedWavSize)}</span>
+                      <code>Segments {render.selectedSegmentSequenceNumbers.join(", ")}</code>
+                      {render.warnings.map((warning) => <span className="save-replay-error" key={warning}>{warning}</span>)}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {saveReplayStatus.temporaryArtifactsRetained && (
+                <div className="audio-snapshot-plan warning">
+                  <strong>Development artifacts retained after Save failure</strong>
+                  {saveReplayStatus.temporaryVideoPath && <code>Video-only artifact: {saveReplayStatus.temporaryVideoPath}</code>}
+                  {saveReplayStatus.temporaryWorkspacePath && <code>Workspace: {saveReplayStatus.temporaryWorkspacePath}</code>}
+                </div>
+              )}
               {saveReplayStatus.audioSnapshotPlans.length > 0 && (
                 <div className="audio-snapshot-plans">
-                  <small>Audio selection plan (diagnostic only; saved MP4 remains video-only)</small>
+                  <small>Audio selection plan used by exact Stage 11 rendering</small>
                   {saveReplayStatus.audioSnapshotPlans.map((plan) => (
                     <div className={`audio-snapshot-plan${plan.hasMaterialUncoveredAudio ? " warning" : ""}`} key={plan.trackRole}>
                       <strong>{formatAudioRole(plan.trackRole)}</strong>
@@ -1431,7 +1488,7 @@ function isReplayActive(state: ReplayLifecycleState) {
 }
 
 function isSaveJobActive(state: SaveJobState) {
-  return state === "preparing" || state === "finalizingCurrentSegment" || state === "assembling";
+  return state === "preparing" || state === "finalizingCurrentSegment" || state === "assemblingVideo" || state === "renderingAudio" || state === "muxing" || state === "verifying" || state === "promoting";
 }
 
 function formatSaveJobMessage(state: SaveJobState) {
@@ -1439,7 +1496,11 @@ function formatSaveJobMessage(state: SaveJobState) {
     idle: "Ready to save available replay video.",
     preparing: "Preparing replay...",
     finalizingCurrentSegment: "Waiting for safe video and audio boundaries...",
-    assembling: "Saving replay...",
+    assemblingVideo: "Assembling video without re-encoding...",
+    renderingAudio: "Rendering exact audio tracks...",
+    muxing: "Encoding AAC and muxing tracks...",
+    verifying: "Verifying final MP4 streams...",
+    promoting: "Promoting verified replay atomically...",
     completed: "Replay saved",
     error: "Replay save failed",
   };

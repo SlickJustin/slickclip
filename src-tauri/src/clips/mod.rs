@@ -1,4 +1,5 @@
 mod assembler;
+mod audio_render;
 mod ffmpeg;
 mod save;
 

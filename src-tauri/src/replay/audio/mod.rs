@@ -7,9 +7,11 @@ use serde::{Deserialize, Serialize};
 
 pub use buffer::{
     AudioReplayShared, AudioReplayStatus, AudioSaveBarrierTelemetry, AudioSnapshotPinGuard,
-    AudioSnapshotPlan,
+    AudioSnapshotPlan, AudioSnapshotTrack,
 };
 pub use clock::ReplaySessionClock;
+#[cfg(test)]
+pub use segment::CompletedAudioSegment;
 pub use track::AudioReplaySession;
 
 #[derive(

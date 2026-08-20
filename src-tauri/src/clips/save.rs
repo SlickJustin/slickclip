@@ -10,7 +10,10 @@ use crate::replay::{
     ReplaySaveSnapshot, SavedReplayTimeline,
 };
 
-use super::assembler::{ClipAssembler, FfmpegClipAssembler};
+use super::assembler::{
+    ClipAssemblyFailure, ClipAssemblyPhase, FfmpegClipAssembler, FinalMuxDiagnostics,
+};
+use super::audio_render::AudioRenderDiagnostics;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,7 +21,11 @@ pub enum SaveJobState {
     Idle,
     Preparing,
     FinalizingCurrentSegment,
-    Assembling,
+    AssemblingVideo,
+    RenderingAudio,
+    Muxing,
+    Verifying,
+    Promoting,
     Completed,
     Error,
 }
@@ -27,7 +34,13 @@ impl SaveJobState {
     pub const fn is_active(self) -> bool {
         matches!(
             self,
-            Self::Preparing | Self::FinalizingCurrentSegment | Self::Assembling
+            Self::Preparing
+                | Self::FinalizingCurrentSegment
+                | Self::AssemblingVideo
+                | Self::RenderingAudio
+                | Self::Muxing
+                | Self::Verifying
+                | Self::Promoting
         )
     }
 }
@@ -58,6 +71,11 @@ pub struct SaveReplayStatus {
     pub internal_encoded_duration_seconds: Option<f64>,
     pub ffprobe_duration_seconds: Option<f64>,
     pub internal_ffprobe_difference_ms: Option<f64>,
+    pub audio_render_diagnostics: Vec<AudioRenderDiagnostics>,
+    pub final_mux: Option<FinalMuxDiagnostics>,
+    pub temporary_workspace_path: Option<String>,
+    pub temporary_video_path: Option<String>,
+    pub temporary_artifacts_retained: bool,
 }
 
 impl SaveReplayStatus {
@@ -86,6 +104,11 @@ impl SaveReplayStatus {
             internal_encoded_duration_seconds: None,
             ffprobe_duration_seconds: None,
             internal_ffprobe_difference_ms: None,
+            audio_render_diagnostics: Vec::new(),
+            final_mux: None,
+            temporary_workspace_path: None,
+            temporary_video_path: None,
+            temporary_artifacts_retained: false,
         }
     }
 }
@@ -162,6 +185,11 @@ impl SharedSaveJob {
             internal_encoded_duration_seconds: None,
             ffprobe_duration_seconds: None,
             internal_ffprobe_difference_ms: None,
+            audio_render_diagnostics: Vec::new(),
+            final_mux: None,
+            temporary_workspace_path: None,
+            temporary_video_path: None,
+            temporary_artifacts_retained: false,
         };
     }
 
@@ -216,7 +244,12 @@ impl SharedSaveJob {
         status.internal_encoded_duration_seconds = Some(result.internal_encoded_duration_seconds);
         status.ffprobe_duration_seconds = result.ffprobe_duration_seconds;
         status.internal_ffprobe_difference_ms = result.internal_ffprobe_difference_ms;
+        status.audio_render_diagnostics = result.audio_render_diagnostics;
+        status.final_mux = Some(result.final_mux);
         status.total_save_latency_ms = Some(total_save_latency_ms);
+        status.temporary_workspace_path = None;
+        status.temporary_video_path = None;
+        status.temporary_artifacts_retained = false;
         status.error_message = None;
     }
 
@@ -230,17 +263,24 @@ impl SharedSaveJob {
 
     fn fail_with_audio_barriers(
         &self,
-        error: impl Into<String>,
+        failure: ClipAssemblyFailure,
         barriers: Vec<AudioSaveBarrierTelemetry>,
         total_save_latency_ms: f64,
     ) {
         let mut status = self.lock();
         status.state = SaveJobState::Error;
-        status.error_message = Some(error.into());
+        status.error_message = Some(failure.message);
         status.audio_save_barriers = barriers;
         status.total_save_latency_ms = Some(total_save_latency_ms);
         status.output_path = None;
         status.file_size = None;
+        status.temporary_workspace_path = failure
+            .temporary_workspace_path
+            .map(|path| path.to_string_lossy().into_owned());
+        status.temporary_video_path = failure
+            .temporary_video_path
+            .map(|path| path.to_string_lossy().into_owned());
+        status.temporary_artifacts_retained = failure.temporary_artifacts_retained;
     }
 }
 
@@ -338,27 +378,39 @@ fn run_save_job(
     let save_started = Instant::now();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         shared.set_state(SaveJobState::FinalizingCurrentSegment);
-        let snapshot = replay.snapshot_for_save()?;
+        let snapshot = replay
+            .snapshot_for_save()
+            .map_err(ClipAssemblyFailure::without_artifacts)?;
         shared.set_snapshot(&snapshot);
-        shared.set_state(SaveJobState::Assembling);
-
-        let timestamp = utc_file_timestamp()?;
-        FfmpegClipAssembler.assemble(&snapshot.segments, output_directory, &timestamp)
+        let timestamp = utc_file_timestamp().map_err(ClipAssemblyFailure::without_artifacts)?;
+        FfmpegClipAssembler.assemble(&snapshot, output_directory, &timestamp, &|phase| {
+            shared.set_state(save_state_for_phase(phase))
+        })
     }));
 
     let total_save_latency_ms = save_started.elapsed().as_secs_f64() * 1_000.0;
     match result {
         Ok(Ok(result)) => shared.complete(result, total_save_latency_ms),
-        Ok(Err(error)) => shared.fail_with_audio_barriers(
-            error,
+        Ok(Err(failure)) => shared.fail_with_audio_barriers(
+            failure,
             replay.status().audio.save_barriers,
             total_save_latency_ms,
         ),
         Err(_) => shared.fail_with_audio_barriers(
-            "The Save Replay worker panicked.",
+            ClipAssemblyFailure::without_artifacts("The Save Replay worker panicked."),
             replay.status().audio.save_barriers,
             total_save_latency_ms,
         ),
+    }
+}
+
+fn save_state_for_phase(phase: ClipAssemblyPhase) -> SaveJobState {
+    match phase {
+        ClipAssemblyPhase::AssemblingVideo => SaveJobState::AssemblingVideo,
+        ClipAssemblyPhase::RenderingAudio => SaveJobState::RenderingAudio,
+        ClipAssemblyPhase::Muxing => SaveJobState::Muxing,
+        ClipAssemblyPhase::Verifying => SaveJobState::Verifying,
+        ClipAssemblyPhase::Promoting => SaveJobState::Promoting,
     }
 }
 
@@ -408,7 +460,11 @@ mod tests {
         for state in [
             SaveJobState::Preparing,
             SaveJobState::FinalizingCurrentSegment,
-            SaveJobState::Assembling,
+            SaveJobState::AssemblingVideo,
+            SaveJobState::RenderingAudio,
+            SaveJobState::Muxing,
+            SaveJobState::Verifying,
+            SaveJobState::Promoting,
         ] {
             assert!(duplicate_job_error(state, true).is_some());
         }

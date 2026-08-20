@@ -6,7 +6,12 @@ mod timeline;
 
 use tauri::State;
 
-pub use audio::{AudioSaveBarrierTelemetry, AudioSnapshotPlan};
+#[cfg(test)]
+pub use audio::CompletedAudioSegment;
+pub use audio::{
+    AudioSaveBarrierTelemetry, AudioSnapshotPlan, AudioSnapshotTrack, AudioTrackRole,
+    AudioTrackState,
+};
 pub use buffer::{ReplayBufferManager, ReplayBufferStartRequest, ReplaySaveSnapshot};
 pub use segment::CompletedSegment;
 pub use state::{ReplayBufferStatus, ReplayCommandResult, ReplayLifecycleState};

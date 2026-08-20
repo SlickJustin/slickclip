@@ -4,6 +4,10 @@ use std::process::{Command, Output, Stdio};
 
 use serde::Deserialize;
 
+use crate::replay::AudioTrackRole;
+
+use super::audio_render::RenderedAudioTrack;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -11,6 +15,58 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct FfmpegExecutable {
     program: OsString,
+}
+
+#[derive(Clone, Debug)]
+pub struct AudioMuxCommandPlan {
+    pub arguments: Vec<OsString>,
+    pub filter_graph: String,
+    pub audio_titles: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MediaProbeReport {
+    #[serde(default)]
+    pub streams: Vec<MediaProbeStream>,
+    pub format: Option<MediaProbeFormat>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MediaProbeStream {
+    pub index: u32,
+    pub codec_name: Option<String>,
+    pub profile: Option<String>,
+    pub codec_type: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub r_frame_rate: Option<String>,
+    pub avg_frame_rate: Option<String>,
+    pub sample_rate: Option<String>,
+    pub channels: Option<u16>,
+    pub duration: Option<String>,
+    pub bit_rate: Option<String>,
+    #[serde(default)]
+    pub tags: MediaProbeTags,
+    #[serde(default)]
+    pub disposition: MediaProbeDisposition,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct MediaProbeTags {
+    pub title: Option<String>,
+    pub handler_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct MediaProbeDisposition {
+    #[serde(default, rename = "default")]
+    pub is_default: u8,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MediaProbeFormat {
+    pub duration: Option<String>,
+    pub bit_rate: Option<String>,
 }
 
 impl FfmpegExecutable {
@@ -90,6 +146,52 @@ impl FfmpegExecutable {
             .map_err(|error| format!("Could not launch FFmpeg: {error}"))
     }
 
+    pub fn mux_audio(&self, plan: &AudioMuxCommandPlan) -> Result<Output, String> {
+        let mut command = Command::new(&self.program);
+        command
+            .args(&plan.arguments)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        hide_console_window(&mut command);
+        command
+            .output()
+            .map_err(|error| format!("Could not launch FFmpeg audio mux: {error}"))
+    }
+
+    pub fn inspect_media(&self, output_path: &Path) -> Result<MediaProbeReport, String> {
+        let ffprobe = self.resolve_ffprobe().ok_or_else(|| {
+            "ffprobe is required to verify the Stage 11 video and audio streams.".to_string()
+        })?;
+        let mut command = Command::new(ffprobe);
+        command
+            .arg("-v")
+            .arg("error")
+            .arg("-show_streams")
+            .arg("-show_format")
+            .arg("-show_entries")
+            .arg("stream=index,codec_name,codec_type,profile,width,height,r_frame_rate,avg_frame_rate,sample_rate,channels,duration,bit_rate:stream_tags=title,handler_name:stream_disposition=default:format=duration,bit_rate")
+            .arg("-of")
+            .arg("json")
+            .arg(output_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        hide_console_window(&mut command);
+        let output = command
+            .output()
+            .map_err(|error| format!("Could not launch ffprobe stream verification: {error}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if stderr.is_empty() {
+                format!("ffprobe stream verification exited with {}.", output.status)
+            } else {
+                format!("ffprobe could not inspect the final replay: {stderr}")
+            });
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("Could not parse ffprobe stream verification: {error}"))
+    }
+
     pub fn validate_packet_timeline_if_available(
         &self,
         output_path: &Path,
@@ -160,6 +262,122 @@ impl FfmpegExecutable {
             }
         }
         None
+    }
+}
+
+pub fn build_audio_mux_plan(
+    video_path: &Path,
+    audio_tracks: &[RenderedAudioTrack],
+    duration_100ns: i64,
+    output_path: &Path,
+) -> Result<AudioMuxCommandPlan, String> {
+    if audio_tracks.is_empty() {
+        return Err("An audio mux plan requires at least one rendered source.".to_string());
+    }
+    if duration_100ns <= 0 {
+        return Err("An audio mux plan requires a positive video duration.".to_string());
+    }
+    if audio_tracks
+        .windows(2)
+        .any(|pair| pair[1].track_role <= pair[0].track_role)
+    {
+        return Err("Rendered audio tracks must be in deterministic role order.".to_string());
+    }
+
+    let duration = format!("{:.7}", duration_100ns as f64 / 10_000_000.0);
+    let mut filter_parts = Vec::new();
+    for (index, _) in audio_tracks.iter().enumerate() {
+        filter_parts.push(format!(
+            "[{}:a:0]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS,apad,atrim=duration={duration},asplit=2[mix{index}][individual{index}]",
+            index + 1
+        ));
+    }
+    if audio_tracks.len() == 1 {
+        filter_parts.push("[mix0]anull[combined]".to_string());
+    } else {
+        let inputs = (0..audio_tracks.len())
+            .map(|index| format!("[mix{index}]"))
+            .collect::<String>();
+        filter_parts.push(format!(
+            "{inputs}amix=inputs={}:duration=longest:dropout_transition=0:normalize=1,atrim=duration={duration},asetpts=PTS-STARTPTS[combined]",
+            audio_tracks.len()
+        ));
+    }
+    let filter_graph = filter_parts.join(";");
+
+    let mut arguments = vec![
+        OsString::from("-hide_banner"),
+        OsString::from("-loglevel"),
+        OsString::from("error"),
+        OsString::from("-nostdin"),
+        OsString::from("-i"),
+        video_path.as_os_str().to_os_string(),
+    ];
+    for track in audio_tracks {
+        arguments.push(OsString::from("-i"));
+        arguments.push(track.path.as_os_str().to_os_string());
+    }
+    arguments.extend([
+        OsString::from("-filter_complex"),
+        OsString::from(&filter_graph),
+        OsString::from("-map"),
+        OsString::from("0:v:0"),
+        OsString::from("-map"),
+        OsString::from("[combined]"),
+    ]);
+    for index in 0..audio_tracks.len() {
+        arguments.push(OsString::from("-map"));
+        arguments.push(OsString::from(format!("[individual{index}]")));
+    }
+    arguments.extend([
+        OsString::from("-c:v"),
+        OsString::from("copy"),
+        OsString::from("-c:a"),
+        OsString::from("aac"),
+        OsString::from("-profile:a"),
+        OsString::from("aac_low"),
+        OsString::from("-b:a"),
+        OsString::from("192k"),
+        OsString::from("-ar:a"),
+        OsString::from("48000"),
+        OsString::from("-ac:a"),
+        OsString::from("2"),
+    ]);
+
+    let mut audio_titles = vec!["Combined".to_string()];
+    audio_titles.extend(
+        audio_tracks
+            .iter()
+            .map(|track| track_title(track.track_role).to_string()),
+    );
+    for (index, title) in audio_titles.iter().enumerate() {
+        arguments.push(OsString::from(format!("-metadata:s:a:{index}")));
+        arguments.push(OsString::from(format!("title={title}")));
+        arguments.push(OsString::from(format!("-metadata:s:a:{index}")));
+        arguments.push(OsString::from(format!("handler_name={title}")));
+        arguments.push(OsString::from(format!("-disposition:a:{index}")));
+        arguments.push(OsString::from(if index == 0 { "default" } else { "0" }));
+    }
+    arguments.extend([
+        OsString::from("-movflags"),
+        OsString::from("+faststart"),
+        OsString::from("-n"),
+        output_path.as_os_str().to_os_string(),
+    ]);
+
+    Ok(AudioMuxCommandPlan {
+        arguments,
+        filter_graph,
+        audio_titles,
+    })
+}
+
+pub const fn track_title(role: AudioTrackRole) -> &'static str {
+    match role {
+        AudioTrackRole::Game => "Game",
+        AudioTrackRole::VoiceChat => "Voice Chat",
+        AudioTrackRole::Microphone => "Microphone",
+        AudioTrackRole::Other => "Other",
     }
 }
 
@@ -281,7 +499,55 @@ fn hide_console_window(command: &mut Command) {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_probe_report, ProbeFormat, ProbePacket, ProbeReport, ProbeStream};
+    use std::path::PathBuf;
+
+    use crate::audio::AudioFormatMetadata;
+    use crate::replay::AudioTrackRole;
+
+    use super::super::audio_render::{AudioRenderDiagnostics, RenderedAudioTrack};
+    use super::{
+        build_audio_mux_plan, validate_probe_report, ProbeFormat, ProbePacket, ProbeReport,
+        ProbeStream,
+    };
+
+    fn rendered(role: AudioTrackRole) -> RenderedAudioTrack {
+        RenderedAudioTrack {
+            track_role: role,
+            path: PathBuf::from(format!("{}.wav", role.directory_name())),
+            diagnostics: AudioRenderDiagnostics {
+                track_role: role,
+                selected_segment_sequence_numbers: vec![1],
+                source_format: AudioFormatMetadata {
+                    sample_format: "IEEE float".into(),
+                    format_tag: 3,
+                    sample_rate: 48_000,
+                    channel_count: 2,
+                    bits_per_sample: 32,
+                    valid_bits_per_sample: Some(32),
+                    block_align: 8,
+                    average_bytes_per_second: 384_000,
+                    channel_mask: None,
+                    sub_format: None,
+                },
+                source_frames_available: 48_000,
+                frames_trimmed_before: 0,
+                frames_trimmed_after: 0,
+                leading_silence_frames: 0,
+                trailing_silence_frames: 0,
+                rendered_frame_count: 48_000,
+                rendered_duration_seconds: 1.0,
+                rendered_wav_size: 384_056,
+                warnings: Vec::new(),
+            },
+        }
+    }
+
+    fn arguments(plan: &super::AudioMuxCommandPlan) -> Vec<String> {
+        plan.arguments
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect()
+    }
 
     fn packet(pts: &str, dts: &str, duration: &str) -> ProbePacket {
         ProbePacket {
@@ -339,5 +605,102 @@ mod tests {
             format: None,
         };
         assert!(validate_probe_report(&report).is_err());
+    }
+
+    #[test]
+    fn one_source_plan_stream_copies_video_and_maps_combined_then_individual() {
+        let plan = build_audio_mux_plan(
+            &PathBuf::from("video.mp4"),
+            &[rendered(AudioTrackRole::Microphone)],
+            10_000_000,
+            &PathBuf::from("partial.mp4"),
+        )
+        .unwrap();
+        let args = arguments(&plan);
+        assert!(args.windows(2).any(|pair| pair == ["-c:v", "copy"]));
+        assert!(args.windows(2).any(|pair| pair == ["-c:a", "aac"]));
+        assert!(args.windows(2).any(|pair| pair == ["-b:a", "192k"]));
+        let maps = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-map")
+            .map(|pair| pair[1].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(maps, ["0:v:0", "[combined]", "[individual0]"]);
+        assert_eq!(plan.audio_titles, ["Combined", "Microphone"]);
+        assert!(plan.filter_graph.contains("asplit=2[mix0][individual0]"));
+        assert!(plan.filter_graph.contains("[mix0]anull[combined]"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-disposition:a:0", "default"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-disposition:a:1", "0"]));
+    }
+
+    #[test]
+    fn two_three_and_four_source_filtergraphs_have_deterministic_mix_counts() {
+        let roles = [
+            AudioTrackRole::Game,
+            AudioTrackRole::VoiceChat,
+            AudioTrackRole::Microphone,
+            AudioTrackRole::Other,
+        ];
+        for count in 2..=4 {
+            let tracks = roles[..count]
+                .iter()
+                .copied()
+                .map(rendered)
+                .collect::<Vec<_>>();
+            let plan = build_audio_mux_plan(
+                &PathBuf::from("video.mp4"),
+                &tracks,
+                300_000_000,
+                &PathBuf::from("partial.mp4"),
+            )
+            .unwrap();
+            assert!(plan
+                .filter_graph
+                .contains(&format!("amix=inputs={count}:duration=longest")));
+            assert_eq!(plan.audio_titles.len(), count + 1);
+            assert_eq!(plan.audio_titles[0], "Combined");
+        }
+    }
+
+    #[test]
+    fn disabled_tracks_are_omitted_by_the_rendered_input_list() {
+        let tracks = [
+            rendered(AudioTrackRole::Game),
+            rendered(AudioTrackRole::Microphone),
+        ];
+        let plan = build_audio_mux_plan(
+            &PathBuf::from("video.mp4"),
+            &tracks,
+            300_000_000,
+            &PathBuf::from("partial.mp4"),
+        )
+        .unwrap();
+        assert_eq!(plan.audio_titles, ["Combined", "Game", "Microphone"]);
+        assert!(!plan.audio_titles.iter().any(|title| title == "Voice Chat"));
+    }
+
+    #[test]
+    fn empty_and_out_of_order_audio_inputs_are_rejected() {
+        assert!(build_audio_mux_plan(
+            &PathBuf::from("video.mp4"),
+            &[],
+            10_000_000,
+            &PathBuf::from("partial.mp4"),
+        )
+        .is_err());
+        assert!(build_audio_mux_plan(
+            &PathBuf::from("video.mp4"),
+            &[
+                rendered(AudioTrackRole::Microphone),
+                rendered(AudioTrackRole::Game),
+            ],
+            10_000_000,
+            &PathBuf::from("partial.mp4"),
+        )
+        .is_err());
     }
 }

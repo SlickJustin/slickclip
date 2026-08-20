@@ -112,6 +112,15 @@ pub struct AudioSnapshotPlan {
     pub segment_sequence_numbers: Vec<u64>,
 }
 
+#[derive(Clone, Debug)]
+pub struct AudioSnapshotTrack {
+    pub track_role: AudioTrackRole,
+    pub source_state: AudioTrackState,
+    pub source_error_message: Option<String>,
+    pub format: Option<AudioFormatMetadata>,
+    pub segments: Vec<CompletedAudioSegment>,
+}
+
 struct AudioCoverage {
     leading_uncovered: i64,
     trailing_uncovered: i64,
@@ -344,6 +353,7 @@ pub struct AudioReplayShared {
 
 pub struct AudioSnapshotBarrierResult {
     pub plans: Vec<AudioSnapshotPlan>,
+    pub tracks: Vec<AudioSnapshotTrack>,
     pub pins: AudioSnapshotPinGuard,
     pub barriers: Vec<AudioSaveBarrierTelemetry>,
     pub wait_duration: Duration,
@@ -589,6 +599,7 @@ impl AudioReplayShared {
 
         let mut releases = Vec::new();
         let mut plans = Vec::new();
+        let mut snapshot_tracks = Vec::new();
         for item in pending {
             let selected_after = item
                 .track
@@ -601,12 +612,21 @@ impl AudioReplayShared {
                 .collect::<Vec<_>>();
             let selected = merge_audio_segments(item.preliminary_segments, selected_after);
             plans.push(build_snapshot_plan(&item.track, timeline, &selected));
+            let status = item.track.status();
+            snapshot_tracks.push(AudioSnapshotTrack {
+                track_role: item.track.configuration.role,
+                source_state: status.state,
+                source_error_message: status.error_message,
+                format: status.format,
+                segments: selected,
+            });
             releases.push((Arc::clone(&item.track), item.preliminary_sequences));
             releases.push((item.track, selected_after_sequences));
         }
 
         Ok(AudioSnapshotBarrierResult {
             plans,
+            tracks: snapshot_tracks,
             pins: AudioSnapshotPinGuard { releases },
             barriers,
             wait_duration: barrier_started.elapsed(),

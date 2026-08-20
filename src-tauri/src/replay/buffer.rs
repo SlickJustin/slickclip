@@ -32,7 +32,7 @@ use crate::capture::WGC_FRAME_POOL_BUFFER_COUNT;
 
 use super::audio::{
     AudioReplayConfiguration, AudioReplaySession, AudioReplayShared, AudioSaveBarrierTelemetry,
-    AudioSnapshotPinGuard, AudioSnapshotPlan, ReplaySessionClock,
+    AudioSnapshotPinGuard, AudioSnapshotPlan, AudioSnapshotTrack, ReplaySessionClock,
 };
 use super::segment::{average_bitrate_mbps, CompletedSegment, SegmentRing, VideoFrameTimingPoint};
 use super::state::{
@@ -246,6 +246,7 @@ pub struct ReplaySaveSnapshot {
     pub segments: Vec<CompletedSegment>,
     pub video_timeline: SavedReplayTimeline,
     pub audio_snapshot_plans: Vec<AudioSnapshotPlan>,
+    pub audio_snapshot_tracks: Vec<AudioSnapshotTrack>,
     pub audio_save_barriers: Vec<AudioSaveBarrierTelemetry>,
     pub video_boundary_wait_ms: f64,
     pub audio_barrier_wait_ms: f64,
@@ -1072,6 +1073,7 @@ impl SharedReplay {
             segments,
             video_timeline,
             audio_snapshot_plans: audio.plans,
+            audio_snapshot_tracks: audio.tracks,
             audio_save_barriers: audio.barriers,
             video_boundary_wait_ms,
             audio_barrier_wait_ms: audio.wait_duration.as_secs_f64() * 1_000.0,
