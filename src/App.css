@@ -84,39 +84,16 @@ input:disabled {
 .sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 9px;
+  min-height: 54px;
+  padding: 2px 7px;
 }
 
-.brand-mark {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  place-items: center;
-  border: 1px solid #6b50cb;
-  border-radius: 8px;
-  color: #fff;
-  background: var(--accent);
-  font-size: 17px;
-  font-weight: 700;
-}
-
-.sidebar-brand div {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.sidebar-brand strong {
-  font-size: 18px;
-  letter-spacing: -0.2px;
-}
-
-.sidebar-brand div span {
-  color: var(--text-muted);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 1.4px;
+.sidebar-brand img {
+  display: block;
+  width: 100%;
+  max-width: 174px;
+  height: auto;
+  object-fit: contain;
 }
 
 .sidebar-nav {
@@ -1942,41 +1919,90 @@ kbd.hotkey-recording {
 
 .clips-library-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(285px, 1fr));
   gap: 14px;
   padding: 16px;
 }
 
 .clip-card {
-  display: grid;
-  grid-template-columns: 105px minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid #37323d;
   border-radius: 9px;
   background: #1c1a20;
+  transition: border-color 140ms ease, transform 140ms ease;
+}
+
+.clip-card:hover {
+  border-color: #544862;
+  transform: translateY(-1px);
 }
 
 .clip-card-visual {
+  position: relative;
   display: flex;
-  min-height: 154px;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 0;
+  padding: 0;
   align-items: center;
   justify-content: center;
   flex-direction: column;
   gap: 7px;
-  border-right: 1px solid #37323d;
+  overflow: hidden;
+  border: 0;
+  border-bottom: 1px solid #37323d;
+  border-radius: 0;
   color: #baa9eb;
   background: linear-gradient(145deg, #292333, #19171d);
 }
 
-.clip-card-visual span {
+.clip-card-visual:hover {
+  filter: brightness(1.08);
+}
+
+.clip-card-visual img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.clip-codec-placeholder {
+  display: grid;
+  gap: 7px;
+  place-items: center;
+}
+
+.clip-card-visual strong {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: .7px;
 }
 
-.clip-card-visual small {
+.clip-codec-placeholder small {
   color: #7e7688;
   font-size: 9px;
+}
+
+.clip-play-overlay {
+  position: absolute;
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  padding-left: 3px;
+  border: 1px solid rgba(255, 255, 255, .28);
+  border-radius: 50%;
+  color: #fff;
+  background: rgba(17, 13, 23, .72);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, .35);
+  font-size: 14px;
+  opacity: .88;
+  transition: transform 120ms ease, opacity 120ms ease;
+}
+
+.clip-card-visual:hover .clip-play-overlay {
+  opacity: 1;
+  transform: scale(1.07);
 }
 
 .clip-card-body {
@@ -1991,24 +2017,46 @@ kbd.hotkey-recording {
   gap: 8px;
 }
 
-.clip-card-heading h2 {
-  margin: 0;
+.clip-card-heading > div {
+  min-width: 0;
+  background: transparent;
+}
+
+.clip-title-button {
+  appearance: none;
+  display: block;
+  max-width: 100%;
+  padding: 0;
   overflow: hidden;
+  border: 0;
+  color: #eeeaf1;
+  background: transparent;
+  margin: 0;
   font-size: 13px;
+  font-weight: 700;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.clip-title-button:hover {
+  color: #bdaaff;
 }
 
 .clip-card-heading small {
   display: block;
   margin-top: 4px;
   color: #77717e;
+  background: transparent;
   font-size: 9px;
 }
 
 .favorite-button {
+  appearance: none;
   padding: 0;
+  border: 0;
   color: #5f5966;
+  background: transparent;
   font-size: 19px;
   line-height: 1;
 }
@@ -2030,17 +2078,24 @@ kbd.hotkey-recording {
   padding: 3px 5px;
   border-radius: 4px;
   color: #aaa2b4;
-  background: #29262e;
+  background: transparent;
   font-size: 8px;
 }
 
 .clip-audio-badges span {
   color: #b6a8d5;
-  background: #282231;
+  border: 1px solid #3b3148;
+  background: transparent;
+}
+
+.clip-card ::selection {
+  color: #fff;
+  background: #6547c7;
 }
 
 .clip-card-actions {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 7px;
   margin-top: 12px;
@@ -2060,9 +2115,30 @@ kbd.hotkey-recording {
   border-color: #5a4b75;
 }
 
+.clip-card-actions .clip-play-button {
+  color: #d8ccf7;
+  border-color: #604c82;
+  background: #302640;
+}
+
 .clip-card-actions button.danger:hover {
   color: #e2a1a1;
   border-color: #71464b;
+}
+
+.clip-card-actions button.danger {
+  margin-left: auto;
+  opacity: .66;
+}
+
+.clip-card-actions button.danger:hover,
+.clip-card-actions button.danger:focus-visible {
+  opacity: 1;
+}
+
+.clip-card-visual:focus-visible .clip-play-overlay {
+  opacity: 1;
+  transform: scale(1.07);
 }
 
 .clips-library-footer {
@@ -2087,6 +2163,204 @@ kbd.hotkey-recording {
   overflow-wrap: anywhere;
   color: #81778d;
   font-size: 8px;
+}
+
+.clip-player-backdrop {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(8, 7, 10, .86);
+  backdrop-filter: blur(8px);
+}
+
+.clip-player-modal {
+  display: grid;
+  width: min(1060px, 96vw);
+  max-height: 94vh;
+  overflow: auto;
+  border: 1px solid #494052;
+  border-radius: 13px;
+  color: #e8e3ec;
+  background: #17151a;
+  box-shadow: 0 25px 80px rgba(0, 0, 0, .62);
+}
+
+.clip-player-modal:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  background: #09080b;
+}
+
+.clip-player-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 17px;
+  border-bottom: 1px solid #302c35;
+  background: #1d1a21;
+}
+
+.clip-player-header span {
+  color: #8c7ba7;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .9px;
+  text-transform: uppercase;
+}
+
+.clip-player-header h2 {
+  margin: 3px 0 0;
+  font-size: 15px;
+}
+
+.clip-player-header > button {
+  width: 34px;
+  height: 34px;
+  border: 1px solid #3f3945;
+  border-radius: 7px;
+  color: #a9a2af;
+  background: #262229;
+  font-size: 22px;
+}
+
+.clip-player-stage {
+  position: relative;
+  display: grid;
+  min-height: 360px;
+  place-items: center;
+  overflow: hidden;
+  background: #050506;
+}
+
+.clip-player-stage video {
+  display: block;
+  width: 100%;
+  max-height: min(68vh, 680px);
+  background: #000;
+}
+
+.clip-player-message {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  color: #bbb3c4;
+  background: rgba(8, 7, 10, .82);
+  font-size: 12px;
+}
+
+.clip-player-error {
+  padding: 28px;
+  color: #d8a4a4;
+  text-align: center;
+}
+
+.clip-player-error span {
+  max-width: 680px;
+  line-height: 1.5;
+}
+
+.clip-player-error div,
+.clip-player-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.clip-player-error button,
+.clip-player-actions button {
+  padding: 7px 10px;
+  border: 1px solid #49414f;
+  border-radius: 5px;
+  color: #c8c0cf;
+  background: #29252d;
+  font-size: 9px;
+}
+
+.player-spinner {
+  width: 25px;
+  height: 25px;
+  border: 2px solid #40384a;
+  border-top-color: #9b7ef2;
+  border-radius: 50%;
+  animation: player-spin 700ms linear infinite;
+}
+
+@keyframes player-spin {
+  to { transform: rotate(360deg); }
+}
+
+.clip-player-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px 16px;
+  border-top: 1px solid #302c35;
+  border-bottom: 1px solid #302c35;
+  background: #1d1a21;
+}
+
+.clip-player-time {
+  display: flex;
+  gap: 5px;
+  color: #9b94a2;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 10px;
+}
+
+.clip-player-toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #8e8795;
+  font-size: 9px;
+}
+
+.clip-player-toolbar select {
+  height: 30px;
+  min-width: 150px;
+  font-size: 10px;
+}
+
+.clip-player-diagnostics {
+  padding: 11px 16px 14px;
+  color: #7f7788;
+  background: #151318;
+  font-size: 9px;
+}
+
+.clip-player-diagnostics summary {
+  cursor: pointer;
+  color: #91879e;
+}
+
+.clip-player-diagnostics > div {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 7px;
+}
+
+.clip-player-diagnostics code {
+  overflow-wrap: anywhere;
+  color: #aaa0b5;
+  font-size: 8px;
+}
+
+@media (max-width: 760px) {
+  .clip-player-backdrop { padding: 8px; }
+  .clip-player-toolbar { align-items: stretch; flex-direction: column; }
+  .clip-player-actions { flex-wrap: wrap; }
 }
 
 .replay-audio-panel {
@@ -2163,6 +2437,299 @@ kbd.hotkey-recording {
 
 @media (prefers-reduced-motion: reduce) {
   .toggle-thumb {
+    transition: none;
+  }
+}
+
+/* Stage 13.1 SlickClip player chrome */
+.clip-player-modal {
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+}
+
+.clip-player-header > button {
+  appearance: none;
+}
+
+.clip-player-header > button:hover {
+  border-color: #6853a0;
+  color: #fff;
+  background: #342943;
+}
+
+.clip-player-stage video {
+  height: 100%;
+  object-fit: contain;
+}
+
+.clip-player-modal:fullscreen .clip-player-stage video {
+  max-height: none;
+}
+
+.clip-player-message {
+  z-index: 3;
+}
+
+.slick-player-controls {
+  position: absolute;
+  z-index: 4;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  padding: 20px 17px 12px;
+  color: #eeeaf4;
+  background: linear-gradient(to top, rgba(8, 7, 11, .97), rgba(10, 8, 14, .8) 67%, transparent);
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.slick-player-controls.controls-hidden {
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(5px);
+}
+
+.player-seek-control {
+  display: block;
+  width: 100%;
+}
+
+.player-range {
+  --played: 0%;
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 16px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.player-range::-webkit-slider-runnable-track {
+  height: 5px;
+  border-radius: 5px;
+  background: linear-gradient(to right, #7655e8 0 var(--played), #4b4652 var(--played) var(--buffered, var(--played)), #25232a var(--buffered, var(--played)) 100%);
+}
+
+.player-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -4.5px;
+  border: 2px solid #ece7ff;
+  border-radius: 50%;
+  background: #7655e8;
+  box-shadow: 0 1px 7px rgba(0, 0, 0, .65);
+  transition: transform 100ms ease, background 100ms ease;
+}
+
+.player-range:hover::-webkit-slider-thumb,
+.player-range:focus-visible::-webkit-slider-thumb {
+  background: #9579f4;
+  transform: scale(1.12);
+}
+
+.player-range:focus-visible {
+  outline: 2px solid #9175ef;
+  outline-offset: 2px;
+}
+
+.player-control-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.player-icon-button {
+  appearance: none;
+  display: grid;
+  width: 34px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #45404d;
+  border-radius: 6px;
+  color: #d3ccd9;
+  background: #25222a;
+}
+
+.player-icon-button:hover,
+.player-icon-button[aria-pressed="true"] {
+  border-color: #7359b3;
+  color: #fff;
+  background: #392d4b;
+}
+
+.player-play-button {
+  border-color: #7055b6;
+  color: #fff;
+  background: #493466;
+}
+
+.player-icon-button svg {
+  width: 17px;
+  height: 17px;
+  fill: currentColor;
+}
+
+.player-time {
+  display: flex;
+  min-width: 102px;
+  gap: 5px;
+  color: #c2bbc9;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.player-volume-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.player-volume-range {
+  width: 82px;
+}
+
+.player-volume-range::-webkit-slider-runnable-track {
+  height: 4px;
+  background: linear-gradient(to right, #7655e8 0 var(--played), #29262f var(--played) 100%);
+}
+
+.player-volume-range::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+}
+
+.player-control-spacer {
+  flex: 1;
+}
+
+.player-audio-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #aaa2b2;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: .3px;
+  text-transform: uppercase;
+}
+
+.player-audio-selector select {
+  min-width: 145px;
+  height: 32px;
+  border-color: #494151;
+  color: #d8d1de;
+  background: #25222a;
+  font-size: 10px;
+  text-transform: none;
+}
+
+.clip-player-secondary-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid #302c35;
+  border-bottom: 1px solid #302c35;
+  background: #1b181f;
+}
+
+.clip-player-secondary-actions button,
+.clip-player-error button {
+  appearance: none;
+  padding: 7px 10px;
+  border: 1px solid #49414f;
+  border-radius: 5px;
+  color: #aaa3b1;
+  background: #252229;
+  font-size: 9px;
+}
+
+.clip-player-secondary-actions button:hover,
+.clip-player-error button:hover {
+  border-color: #624f86;
+  color: #ded6e7;
+  background: #2e2837;
+}
+
+.clip-player-diagnostics {
+  max-height: 190px;
+  padding: 10px 16px 13px;
+  overflow: auto;
+  font-size: 9px;
+}
+
+.clip-player-diagnostics summary {
+  color: #9789a8;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: .35px;
+}
+
+.clip-player-diagnostics[open] summary {
+  margin-bottom: 10px;
+  color: #ad9ac4;
+}
+
+.clip-player-diagnostics > div {
+  padding: 3px 0;
+  border-top: 1px solid rgba(255, 255, 255, .035);
+}
+
+.app-content,
+.clip-player-modal,
+.clip-player-diagnostics {
+  scrollbar-color: #6950c5 #151319;
+  scrollbar-width: thin;
+}
+
+.app-content::-webkit-scrollbar,
+.clip-player-modal::-webkit-scrollbar,
+.clip-player-diagnostics::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.app-content::-webkit-scrollbar-track,
+.clip-player-modal::-webkit-scrollbar-track,
+.clip-player-diagnostics::-webkit-scrollbar-track {
+  background: #151319;
+}
+
+.app-content::-webkit-scrollbar-thumb,
+.clip-player-modal::-webkit-scrollbar-thumb,
+.clip-player-diagnostics::-webkit-scrollbar-thumb {
+  border: 2px solid #151319;
+  border-radius: 8px;
+  background: #6049b5;
+}
+
+.app-content::-webkit-scrollbar-thumb:hover,
+.clip-player-modal::-webkit-scrollbar-thumb:hover,
+.clip-player-diagnostics::-webkit-scrollbar-thumb:hover {
+  background: #795ce1;
+}
+
+@media (max-width: 760px) {
+  .player-control-row { flex-wrap: wrap; }
+  .player-control-spacer { display: none; }
+  .player-audio-selector { margin-left: auto; }
+  .clip-player-secondary-actions { flex-wrap: wrap; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clip-card,
+  .slick-player-controls,
+  .player-range::-webkit-slider-thumb {
     transition: none;
   }
 }

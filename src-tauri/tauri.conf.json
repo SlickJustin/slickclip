@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "JustIn Replay",
+        "title": "SlickClip",
         "width": 1200,
         "height": 760,
         "minWidth": 950,
@@ -20,7 +20,15 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$VIDEO/JustIn Replay/Clips/**",
+          "$APPLOCALDATA/Library/Previews/**",
+          "$APPLOCALDATA/Library/Thumbnails/**"
+        ]
+      }
     }
   },
   "bundle": {

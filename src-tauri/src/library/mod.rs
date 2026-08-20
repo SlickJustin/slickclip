@@ -1,4 +1,5 @@
 mod database;
+mod media;
 mod migrations;
 mod models;
 mod reconcile;
@@ -16,11 +17,13 @@ use uuid::Uuid;
 
 pub use models::{
     ClipActionResponse, ClipAudioTrack, ClipIdRequest, ClipListRequest, ClipListResponse,
-    ClipMutationResponse, LibraryTelemetry, ReconcileResponse, RenameClipRequest,
-    SetFavoriteRequest,
+    ClipMutationResponse, ClipPlaybackInfo, ClipPlaybackInfoResponse, LibraryTelemetry,
+    PrepareClipAudioRequest, PrepareClipMediaRequest, PrepareClipMediaResponse, ReconcileResponse,
+    RenameClipRequest, SetFavoriteRequest,
 };
 
 use database::LibraryDatabase;
+use media::{media_response, CacheClip, MediaCacheManager};
 use models::{ClipListItem, ClipUpsert, ReconciliationTelemetry};
 use reconcile::{reconcile, FfprobeMediaInspector};
 use repository::{
@@ -61,10 +64,15 @@ pub struct ClipLibraryManager {
     initialization_error: Arc<Option<String>>,
     telemetry: Arc<Mutex<LibraryTelemetry>>,
     reconciliation_running: Arc<AtomicBool>,
+    media_cache: MediaCacheManager,
 }
 
 impl ClipLibraryManager {
     pub fn initialize(database_path: PathBuf, clips_root: PathBuf) -> Self {
+        let cache_root = database_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| database_path.with_extension("cache"));
         let database_result = LibraryDatabase::initialize(database_path.clone());
         let (database, schema_version, initialization_error) = match database_result {
             Ok((database, version)) => (Some(database), version, None),
@@ -80,6 +88,7 @@ impl ClipLibraryManager {
                 ..Default::default()
             })),
             reconciliation_running: Arc::new(AtomicBool::new(false)),
+            media_cache: MediaCacheManager::new(cache_root),
         };
         manager.refresh_indexed_count();
         manager
@@ -282,11 +291,114 @@ impl ClipLibraryManager {
     }
 
     fn trusted_clip_path(&self, clip_id: &str) -> Result<PathBuf, String> {
+        self.resolved_clip(clip_id).map(|(_, path)| path)
+    }
+
+    fn resolved_clip(&self, clip_id: &str) -> Result<(ClipListItem, PathBuf), String> {
         let database = self.database()?;
         let connection = database.open()?;
         let clip = get_clip(&connection, clip_id)?
             .ok_or_else(|| format!("No library clip exists with ID '{clip_id}'."))?;
-        validate_owned_clip(&self.clips_root, Path::new(&clip.file_path))
+        let path = validate_owned_clip(&self.clips_root, Path::new(&clip.file_path))?;
+        Ok((clip, path))
+    }
+
+    fn cache_clip(&self, clip_id: &str) -> Result<(ClipListItem, CacheClip), String> {
+        let (clip, path) = self.resolved_clip(clip_id)?;
+        let cache_clip = CacheClip::from_library(&clip, path)?;
+        Ok((clip, cache_clip))
+    }
+
+    fn playback_info(&self, clip_id: &str) -> ClipPlaybackInfoResponse {
+        match self.cache_clip(clip_id) {
+            Ok((clip, cache_clip)) => ClipPlaybackInfoResponse {
+                success: true,
+                info: Some(ClipPlaybackInfo {
+                    clip_id: clip.id,
+                    display_name: clip.display_name,
+                    master_path: clip.file_path,
+                    master_codec: clip.video_codec,
+                    width: clip.width,
+                    height: clip.height,
+                    duration_100ns: clip.duration_100ns,
+                    audio_tracks: clip.audio_tracks,
+                    cache_root: self.media_cache.root().to_string_lossy().into_owned(),
+                    preview: self.media_cache.preview_status(&cache_clip),
+                    thumbnail: self.media_cache.thumbnail_status(&cache_clip),
+                }),
+                error_message: None,
+            },
+            Err(error) => ClipPlaybackInfoResponse {
+                success: false,
+                info: None,
+                error_message: Some(error),
+            },
+        }
+    }
+
+    fn request_thumbnail(
+        &self,
+        request: PrepareClipMediaRequest,
+        app: AppHandle,
+    ) -> PrepareClipMediaResponse {
+        match self.cache_clip(&request.clip_id) {
+            Ok((clip, cache_clip)) => media_response(
+                self.media_cache
+                    .request_thumbnail(cache_clip, request.retry, app),
+                "Thumbnail",
+                None,
+                request.current_time_seconds,
+                clip.duration_100ns,
+                request.was_playing,
+            ),
+            Err(error) => media_command_error(error),
+        }
+    }
+
+    fn prepare_preview(
+        &self,
+        request: PrepareClipMediaRequest,
+        app: AppHandle,
+    ) -> PrepareClipMediaResponse {
+        match self.cache_clip(&request.clip_id) {
+            Ok((clip, cache_clip)) => media_response(
+                self.media_cache
+                    .request_preview(cache_clip, request.retry, app),
+                "H264 Proxy",
+                Some("Combined".into()),
+                request.current_time_seconds,
+                clip.duration_100ns,
+                request.was_playing,
+            ),
+            Err(error) => media_command_error(error),
+        }
+    }
+
+    fn prepare_audio(
+        &self,
+        request: PrepareClipAudioRequest,
+        app: AppHandle,
+    ) -> PrepareClipMediaResponse {
+        match self
+            .cache_clip(&request.clip_id)
+            .and_then(|(clip, cache_clip)| {
+                let track = cache_clip.track(request.stream_index)?;
+                Ok((clip, cache_clip, track))
+            }) {
+            Ok((clip, cache_clip, track)) => {
+                let role = track.role.clone();
+                media_response(
+                    self.media_cache
+                        .request_audio(cache_clip, track, request.retry, app),
+                    "Audio Preview",
+                    Some(role),
+                    request.current_time_seconds,
+                    clip.duration_100ns,
+                    request.was_playing,
+                )
+            }
+            Err(error) => media_command_error(error),
+        }
     }
 
     fn open_clip(&self, clip_id: &str) -> ClipActionResponse {
@@ -320,6 +432,7 @@ impl ClipLibraryManager {
                     "The MP4 was deleted, but its database row could not be removed: {error}. Refresh Clips to reconcile it."
                 )
             })?;
+            let _ = self.media_cache.cleanup_clip(clip_id);
             self.refresh_indexed_count();
             Ok(())
         })())
@@ -391,6 +504,23 @@ fn action_result(result: Result<(), String>) -> ClipActionResponse {
             success: false,
             error_message: Some(error),
         },
+    }
+}
+
+fn media_command_error(error: impl Into<String>) -> PrepareClipMediaResponse {
+    let error = error.into();
+    PrepareClipMediaResponse {
+        success: false,
+        artifact: models::CacheArtifactStatus {
+            state: models::CacheArtifactState::Error,
+            error_message: Some(error.clone()),
+            ..Default::default()
+        },
+        playback_source: None,
+        selected_audio_role: None,
+        restore_at_seconds: 0.0,
+        resume_playing: false,
+        error_message: Some(error),
     }
 }
 
@@ -481,6 +611,53 @@ pub async fn delete_clip(
         .map_err(|error| format!("The clip deletion worker failed: {error}"))
 }
 
+#[tauri::command]
+pub async fn get_clip_playback_info(
+    manager: State<'_, ClipLibraryManager>,
+    request: ClipIdRequest,
+) -> Result<ClipPlaybackInfoResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.playback_info(&request.clip_id))
+        .await
+        .map_err(|error| format!("The clip playback-info worker failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn request_clip_thumbnail(
+    manager: State<'_, ClipLibraryManager>,
+    app: AppHandle,
+    request: PrepareClipMediaRequest,
+) -> Result<PrepareClipMediaResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.request_thumbnail(request, app))
+        .await
+        .map_err(|error| format!("The thumbnail request worker failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn prepare_clip_preview(
+    manager: State<'_, ClipLibraryManager>,
+    app: AppHandle,
+    request: PrepareClipMediaRequest,
+) -> Result<PrepareClipMediaResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.prepare_preview(request, app))
+        .await
+        .map_err(|error| format!("The preview request worker failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn prepare_clip_audio_preview(
+    manager: State<'_, ClipLibraryManager>,
+    app: AppHandle,
+    request: PrepareClipAudioRequest,
+) -> Result<PrepareClipMediaResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.prepare_audio(request, app))
+        .await
+        .map_err(|error| format!("The audio-preview request worker failed: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -564,13 +741,103 @@ mod tests {
                 audio_tracks: Vec::new(),
             })
             .unwrap();
+        let cached_preview = manager
+            .media_cache
+            .preview_artifact_for_test(&indexed.clip_id);
+        fs::write(&cached_preview, b"cached preview").unwrap();
 
         assert!(manager.delete(&indexed.clip_id).success);
         assert!(!clip.exists());
+        assert!(!cached_preview.exists());
         assert_eq!(
             count_clips(&manager.database().unwrap().open().unwrap()).unwrap(),
             0
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn trusted_id_resolves_playback_and_missing_source_is_a_controlled_error() {
+        let root = std::env::temp_dir().join(format!("stage13-playback-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let clips = root.join("Clips");
+        fs::create_dir_all(&clips).unwrap();
+        let clip = clips.join("trusted.mp4");
+        let outside = root.join("outside.mp4");
+        fs::write(&clip, b"master").unwrap();
+        fs::write(&outside, b"outside").unwrap();
+        let manager = ClipLibraryManager::initialize(root.join("clips.db"), clips);
+        let indexed = manager
+            .index_saved_clip(SavedClipMetadata {
+                file_path: clip.clone(),
+                created_at_ms: 0,
+                duration_100ns: 10_000_000,
+                requested_duration_seconds: 30,
+                width: 1920,
+                height: 1080,
+                fps_numerator: 60,
+                fps_denominator: 1,
+                video_codec: "h264".into(),
+                video_profile: None,
+                video_bitrate_bps: None,
+                total_bitrate_bps: None,
+                capture_target_label: None,
+                capture_target_type: None,
+                audio_tracks: Vec::new(),
+            })
+            .unwrap();
+        let response = manager.playback_info(&indexed.clip_id);
+        assert!(response.success);
+        assert_eq!(
+            response.info.unwrap().master_path,
+            clip.canonicalize().unwrap().to_string_lossy()
+        );
+        assert!(
+            !manager
+                .playback_info(outside.to_string_lossy().as_ref())
+                .success
+        );
+        assert!(outside.exists());
+
+        fs::remove_file(&clip).unwrap();
+        let missing = manager.playback_info(&indexed.clip_id);
+        assert!(!missing.success);
+        assert!(missing.error_message.unwrap().contains("Could not resolve"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_cleanup_failure_does_not_block_master_deletion() {
+        let root =
+            std::env::temp_dir().join(format!("stage13-delete-cache-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let clips = root.join("Clips");
+        fs::create_dir_all(&clips).unwrap();
+        let clip = clips.join("delete.mp4");
+        fs::write(&clip, b"master").unwrap();
+        let manager = ClipLibraryManager::initialize(root.join("clips.db"), clips);
+        let indexed = manager
+            .index_saved_clip(SavedClipMetadata {
+                file_path: clip.clone(),
+                created_at_ms: 0,
+                duration_100ns: 10_000_000,
+                requested_duration_seconds: 30,
+                width: 1920,
+                height: 1080,
+                fps_numerator: 60,
+                fps_denominator: 1,
+                video_codec: "h264".into(),
+                video_profile: None,
+                video_bitrate_bps: None,
+                total_bitrate_bps: None,
+                capture_target_label: None,
+                capture_target_type: None,
+                audio_tracks: Vec::new(),
+            })
+            .unwrap();
+        fs::write(root.join("Previews"), b"blocks cache directory").unwrap();
+        assert!(manager.delete(&indexed.clip_id).success);
+        assert!(!clip.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

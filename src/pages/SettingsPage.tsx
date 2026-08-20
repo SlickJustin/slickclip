@@ -150,7 +150,7 @@ export function SettingsPage() {
           <div className="hotkey-setting">
             <div className="hotkey-setting-copy">
               <span>Save Replay Hotkey</span>
-              <small>Works globally while JustIn Replay is in the background.</small>
+              <small>Works globally while SlickClip is in the background.</small>
               <div className="hotkey-registration-status">
                 <span className={`hotkey-status-dot ${hotkey.registered ? "hotkey-status-registered" : "hotkey-status-error"}`} />
                 {hotkey.registered ? "Registered" : "Not registered"}
@@ -184,7 +184,7 @@ export function SettingsPage() {
         <SettingsSection title="Storage">
           <div className="settings-row">
             <div><span>Save Location</span><small>Where completed clips will be stored</small></div>
-            <div className="path-value">Videos\Replay</div>
+            <div className="path-value">Videos\JustIn Replay\Clips</div>
           </div>
         </SettingsSection>
 
@@ -196,7 +196,7 @@ export function SettingsPage() {
         </SettingsSection>
 
         <SettingsSection title="Startup">
-          <SettingsToggle label="Start Replay with Windows" checked={toggles.windowsStartup} onChange={(value) => updateToggle("windowsStartup", value)} />
+          <SettingsToggle label="Start SlickClip with Windows" checked={toggles.windowsStartup} onChange={(value) => updateToggle("windowsStartup", value)} />
           <SettingsToggle label="Start Replay Buffer automatically" checked={toggles.bufferStartup} onChange={(value) => updateToggle("bufferStartup", value)} />
         </SettingsSection>
 

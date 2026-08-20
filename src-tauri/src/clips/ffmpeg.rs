@@ -12,6 +12,7 @@ use super::audio_render::RenderedAudioTrack;
 use std::os::windows::process::CommandExt;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
 
 pub struct FfmpegExecutable {
     program: OsString,
@@ -156,6 +157,36 @@ impl FfmpegExecutable {
         command
             .output()
             .map_err(|error| format!("Could not launch FFmpeg audio mux: {error}"))
+    }
+
+    pub(crate) fn run_cache_arguments(
+        &self,
+        arguments: &[OsString],
+        description: &str,
+    ) -> Result<(), String> {
+        let mut command = Command::new(&self.program);
+        command
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        hide_console_window(&mut command);
+        lower_cache_priority(&mut command);
+        let output = command
+            .output()
+            .map_err(|error| format!("Could not launch FFmpeg to {description}: {error}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            format!(
+                "FFmpeg could not {description}; it exited with {}.",
+                output.status
+            )
+        } else {
+            format!("FFmpeg could not {description}: {stderr}")
+        })
     }
 
     pub fn inspect_media(&self, output_path: &Path) -> Result<MediaProbeReport, String> {
@@ -495,6 +526,11 @@ fn probe_ffprobe(program: &OsStr) -> Result<(), String> {
 fn hide_console_window(command: &mut Command) {
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
+}
+
+fn lower_cache_priority(command: &mut Command) {
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
 }
 
 #[cfg(test)]

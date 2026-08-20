@@ -171,6 +171,88 @@ pub struct ClipActionResponse {
     pub error_message: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CacheArtifactState {
+    #[default]
+    Missing,
+    Preparing,
+    Ready,
+    Error,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheArtifactStatus {
+    pub state: CacheArtifactState,
+    pub file_path: Option<String>,
+    pub generation_duration_ms: Option<f64>,
+    pub file_size_bytes: Option<u64>,
+    pub bitrate_bps: Option<u64>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipPlaybackInfo {
+    pub clip_id: String,
+    pub display_name: String,
+    pub master_path: String,
+    pub master_codec: String,
+    pub width: u32,
+    pub height: u32,
+    pub duration_100ns: i64,
+    pub audio_tracks: Vec<ClipAudioTrack>,
+    pub cache_root: String,
+    pub preview: CacheArtifactStatus,
+    pub thumbnail: CacheArtifactStatus,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipPlaybackInfoResponse {
+    pub success: bool,
+    pub info: Option<ClipPlaybackInfo>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareClipMediaRequest {
+    pub clip_id: String,
+    #[serde(default)]
+    pub retry: bool,
+    #[serde(default)]
+    pub current_time_seconds: f64,
+    #[serde(default)]
+    pub was_playing: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareClipAudioRequest {
+    pub clip_id: String,
+    pub stream_index: u32,
+    #[serde(default)]
+    pub retry: bool,
+    #[serde(default)]
+    pub current_time_seconds: f64,
+    #[serde(default)]
+    pub was_playing: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareClipMediaResponse {
+    pub success: bool,
+    pub artifact: CacheArtifactStatus,
+    pub playback_source: Option<String>,
+    pub selected_audio_role: Option<String>,
+    pub restore_at_seconds: f64,
+    pub resume_playing: bool,
+    pub error_message: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClipUpsert {
     pub id: String,

@@ -1,3 +1,5 @@
+import slickClipLogo from "../assets/branding/slickclip-logo.svg";
+
 export type PageId = "replay" | "clips" | "editor" | "settings";
 
 type SidebarProps = {
@@ -16,11 +18,7 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
-        <span className="brand-mark" aria-hidden="true">R</span>
-        <div>
-          <strong>JustIn Replay</strong>
-          <span>DEV BUILD</span>
-        </div>
+        <img src={slickClipLogo} alt="SlickClip" />
       </div>
 
       <nav className="sidebar-nav" aria-label="Primary navigation">
