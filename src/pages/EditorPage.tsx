@@ -1,26 +1,72 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type { ClipListItem, ClipPlaybackInfo, ClipPlaybackInfoResponse, PrepareClipMediaResponse } from "../types/clips";
 import { audioLabel, errorMessage } from "../types/clips";
-import { clampMediaTime, mediaTimeToPercent } from "../utils/playerControls";
+import { isEditableShortcutTarget, mediaTimeToPercent } from "../utils/playerControls";
 import {
+  canDeleteSelectedSegment,
+  canSplitAtPlayhead,
   createEditorSession,
-  formatEditorTime,
+  deleteSelectedSegment,
+  editedTimeToSourceTime,
+  formatEditorTimeUs,
+  microsecondsToSeconds,
+  previewTrimmedSegments,
+  redoEditorEdit,
+  resetEditorEdits,
   resetEditorSession,
-  timelinePositionToSeconds,
+  secondsToMicroseconds,
+  segmentDurationUs,
+  segmentEditedOffsets,
+  selectEditorSegment,
+  sourceTimeToEditedTime,
+  splitAtPlayhead,
   timelineTickTimes,
+  totalEditedDurationUs,
+  trimEditorSegment,
+  undoEditorEdit,
   withEditorDuration,
   withEditorPlaybackState,
-  withEditorPlayhead,
+  withEditorPlayheadUs,
   type EditorPlaybackState,
+  type EditorSegment,
   type EditorSession,
+  type EditorTrimEdge,
 } from "../utils/editorSession";
+
+const BOUNDARY_TOLERANCE_US = 30_000;
+const KEYBOARD_SEEK_US = 1_000_000;
+const KEYBOARD_TRIM_US = 100_000;
 
 type EditorMediaStatus = "loading" | "ready" | "preparingProxy" | "error";
 type EditorMediaSource = { path: string; url: string; kind: "Master" | "H264 Proxy"; revision: number };
-type Props = { clip: ClipListItem | null; onBackToClips: () => void };
+type Props = {
+  clip: ClipListItem | null;
+  onBackToClips: () => void;
+  onDirtyChange: (dirty: boolean) => void;
+};
+type PendingSeek = { segmentId: string; editedTimeUs: number; resumePlaying: boolean };
+type TrimDrag = {
+  pointerId: number;
+  segmentId: string;
+  edge: EditorTrimEdge;
+  startClientX: number;
+  laneWidth: number;
+  initialSourceUs: number;
+  editedDurationUs: number;
+  sourceTimeUs: number;
+  previewSegments: readonly EditorSegment[];
+};
 
-export function EditorPage({ clip, onBackToClips }: Props) {
+export function EditorPage({ clip, onBackToClips, onDirtyChange }: Props) {
   if (!clip) {
     return (
       <div className="page editor-page">
@@ -38,28 +84,46 @@ export function EditorPage({ clip, onBackToClips }: Props) {
     );
   }
 
-  return <ActiveEditor key={clip.id} clip={clip} onBackToClips={onBackToClips} />;
+  return <ActiveEditor key={clip.id} clip={clip} onBackToClips={onBackToClips} onDirtyChange={onDirtyChange} />;
 }
 
-function ActiveEditor({ clip, onBackToClips }: { clip: ClipListItem; onBackToClips: () => void }) {
+function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListItem; onBackToClips: () => void; onDirtyChange: (dirty: boolean) => void }) {
   const [session, setSession] = useState<EditorSession>(() => createEditorSession(clip));
   const [playbackInfo, setPlaybackInfo] = useState<ClipPlaybackInfo | null>(null);
   const [source, setSource] = useState<EditorMediaSource | null>(null);
   const [mediaStatus, setMediaStatus] = useState<EditorMediaStatus>("loading");
   const [mediaError, setMediaError] = useState<string | null>(null);
+  const [trimDrag, setTrimDrag] = useState<TrimDrag | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const timelineLaneRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
   const operationTokenRef = useRef(0);
   const sourceRevisionRef = useRef(0);
   const fallbackStartedRef = useRef(false);
   const seekWatchdogRef = useRef<number | undefined>(undefined);
-  const pendingRestoreRef = useRef({ time: 0, play: false });
+  const playbackFrameRef = useRef<number | undefined>(undefined);
+  const pendingRestoreRef = useRef({ sourceTimeSeconds: 0, play: false });
+  const pendingSeekRef = useRef<PendingSeek | null>(null);
+  const activeSegmentIdRef = useRef<string | null>(session.selectedSegmentId);
+  const editorEndedRef = useRef(false);
+  const trimDragRef = useRef<TrimDrag | null>(null);
   const sessionRef = useRef(session);
 
+  const replaceSession = useCallback((next: EditorSession) => {
+    sessionRef.current = next;
+    setSession(next);
+  }, []);
+
   useEffect(() => { sessionRef.current = session; }, [session]);
+  useEffect(() => { onDirtyChange(session.dirty); }, [onDirtyChange, session.dirty]);
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
 
   const updatePlaybackState = useCallback((state: EditorPlaybackState) => {
-    setSession((current) => withEditorPlaybackState(current, state));
+    setSession((current) => {
+      const next = withEditorPlaybackState(current, state);
+      sessionRef.current = next;
+      return next;
+    });
   }, []);
 
   const failMedia = useCallback((message: string) => {
@@ -82,7 +146,9 @@ function ActiveEditor({ clip, onBackToClips }: { clip: ClipListItem; onBackToCli
   useEffect(() => {
     mountedRef.current = true;
     fallbackStartedRef.current = false;
-    setSession(resetEditorSession(clip));
+    const reset = resetEditorSession(clip);
+    replaceSession(reset);
+    activeSegmentIdRef.current = reset.selectedSegmentId;
     setPlaybackInfo(null);
     setSource(null);
     setMediaError(null);
@@ -94,7 +160,12 @@ function ActiveEditor({ clip, onBackToClips }: { clip: ClipListItem; onBackToCli
         if (!mountedRef.current || operationTokenRef.current !== token) return;
         if (!response.success || !response.info) throw new Error(response.errorMessage ?? "The source clip is unavailable for editing.");
         setPlaybackInfo(response.info);
-        setSession((current) => withEditorDuration(current, response.info!.duration100ns / 10_000_000));
+        setSession((current) => {
+          const next = withEditorDuration(current, response.info!.duration100ns / 10_000_000);
+          sessionRef.current = next;
+          activeSegmentIdRef.current = next.selectedSegmentId;
+          return next;
+        });
         useMediaPath(response.info.masterPath, "Master");
       })
       .catch((cause) => {
@@ -105,18 +176,21 @@ function ActiveEditor({ clip, onBackToClips }: { clip: ClipListItem; onBackToCli
       mountedRef.current = false;
       operationTokenRef.current += 1;
       if (seekWatchdogRef.current !== undefined) window.clearTimeout(seekWatchdogRef.current);
+      if (playbackFrameRef.current !== undefined) window.cancelAnimationFrame(playbackFrameRef.current);
       seekWatchdogRef.current = undefined;
+      playbackFrameRef.current = undefined;
       videoRef.current?.pause();
     };
-  }, [clip, failMedia, useMediaPath]);
+  }, [clip, failMedia, replaceSession, useMediaPath]);
 
   const preparePreview = useCallback(async (retry = false) => {
     if (seekWatchdogRef.current !== undefined) window.clearTimeout(seekWatchdogRef.current);
     seekWatchdogRef.current = undefined;
+    const currentSession = sessionRef.current;
     const video = videoRef.current;
-    const duration = sessionRef.current.source.durationSeconds;
-    const restoreAtSeconds = clampMediaTime(video?.currentTime ?? sessionRef.current.playheadSeconds, duration);
-    const resumePlaying = video ? !video.paused && !video.ended : sessionRef.current.playbackState === "playing";
+    const currentMapping = editedTimeToSourceTime(currentSession.segments, currentSession.playheadUs);
+    const sourceTimeSeconds = video?.currentTime ?? microsecondsToSeconds(currentMapping?.sourceTimeUs ?? 0);
+    const resumePlaying = video ? !video.paused && !video.ended : currentSession.playbackState === "playing";
     const token = ++operationTokenRef.current;
     setMediaError(null);
     setMediaStatus("preparingProxy");
@@ -125,12 +199,12 @@ function ActiveEditor({ clip, onBackToClips }: { clip: ClipListItem; onBackToCli
     while (mountedRef.current && operationTokenRef.current === token) {
       try {
         const response = await invoke<PrepareClipMediaResponse>("prepare_clip_preview", {
-          request: { clipId: clip.id, retry, currentTimeSeconds: restoreAtSeconds, wasPlaying: resumePlaying },
+          request: { clipId: clip.id, retry, currentTimeSeconds: sourceTimeSeconds, wasPlaying: resumePlaying },
         });
         retry = false;
         if (!mountedRef.current || operationTokenRef.current !== token) return;
         if (response.artifact.state === "ready" && response.artifact.filePath) {
-          pendingRestoreRef.current = { time: response.restoreAtSeconds, play: response.resumePlaying };
+          pendingRestoreRef.current = { sourceTimeSeconds: response.restoreAtSeconds, play: response.resumePlaying };
           if (useMediaPath(response.artifact.filePath, "H264 Proxy")) setMediaStatus("loading");
           return;
         }
@@ -146,16 +220,41 @@ function ActiveEditor({ clip, onBackToClips }: { clip: ClipListItem; onBackToCli
     }
   }, [clip.id, failMedia, updatePlaybackState, useMediaPath]);
 
+  const seekVideoToEditedTime = useCallback((targetSession: EditorSession, requestedTimeUs: number, resumePlaying = false) => {
+    const mapping = editedTimeToSourceTime(targetSession.segments, requestedTimeUs);
+    if (!mapping) return;
+    const next = withEditorPlayheadUs(targetSession, mapping.editedTimeUs);
+    replaceSession(next);
+    activeSegmentIdRef.current = mapping.segmentId;
+    editorEndedRef.current = false;
+    const video = videoRef.current;
+    if (!video) return;
+    const sourceTimeSeconds = microsecondsToSeconds(mapping.sourceTimeUs);
+    if (Math.abs(video.currentTime - sourceTimeSeconds) < 0.001 && !video.seeking) {
+      pendingSeekRef.current = null;
+      if (resumePlaying && video.paused) void video.play().catch((cause) => failMedia(errorMessage(cause)));
+      return;
+    }
+    pendingSeekRef.current = { segmentId: mapping.segmentId, editedTimeUs: mapping.editedTimeUs, resumePlaying };
+    video.currentTime = sourceTimeSeconds;
+  }, [failMedia, replaceSession]);
+
   function restoreAfterLoad(video: HTMLVideoElement) {
-    const duration = Number.isFinite(video.duration) && video.duration > 0
+    const mediaDurationSeconds = Number.isFinite(video.duration) && video.duration > 0
       ? video.duration
-      : sessionRef.current.source.durationSeconds;
-    setSession((current) => withEditorDuration(current, duration));
+      : microsecondsToSeconds(sessionRef.current.source.durationUs);
+    const nextSession = withEditorDuration(sessionRef.current, mediaDurationSeconds);
+    replaceSession(nextSession);
     const restore = pendingRestoreRef.current;
-    const nextTime = clampMediaTime(restore.time, duration);
-    video.currentTime = nextTime;
-    setSession((current) => withEditorPlayhead(current, nextTime));
-    pendingRestoreRef.current = { time: 0, play: false };
+    const requestedSourceUs = secondsToMicroseconds(restore.sourceTimeSeconds);
+    const restoredEditedUs = sourceTimeToEditedTime(nextSession.segments, requestedSourceUs) ?? nextSession.playheadUs;
+    const mapping = editedTimeToSourceTime(nextSession.segments, restoredEditedUs);
+    if (mapping) {
+      activeSegmentIdRef.current = mapping.segmentId;
+      video.currentTime = microsecondsToSeconds(mapping.sourceTimeUs);
+      replaceSession(withEditorPlayheadUs(nextSession, mapping.editedTimeUs));
+    }
+    pendingRestoreRef.current = { sourceTimeSeconds: 0, play: false };
     if (restore.play) void video.play().catch(() => updatePlaybackState("paused"));
     else updatePlaybackState("paused");
   }
@@ -174,8 +273,7 @@ function ActiveEditor({ clip, onBackToClips }: { clip: ClipListItem; onBackToCli
     failMedia(message);
   }
 
-  function seekingStarted(video: HTMLVideoElement) {
-    setSession((current) => withEditorPlayhead(current, video.currentTime));
+  function seekingStarted() {
     if (source?.kind !== "Master") return;
     if (seekWatchdogRef.current !== undefined) window.clearTimeout(seekWatchdogRef.current);
     seekWatchdogRef.current = window.setTimeout(() => {
@@ -187,27 +285,249 @@ function ActiveEditor({ clip, onBackToClips }: { clip: ClipListItem; onBackToCli
   function seekingFinished(video: HTMLVideoElement) {
     if (seekWatchdogRef.current !== undefined) window.clearTimeout(seekWatchdogRef.current);
     seekWatchdogRef.current = undefined;
-    setSession((current) => withEditorPlayhead(current, video.currentTime));
+    const pending = pendingSeekRef.current;
+    pendingSeekRef.current = null;
+    if (pending) {
+      activeSegmentIdRef.current = pending.segmentId;
+      replaceSession(withEditorPlayheadUs(sessionRef.current, pending.editedTimeUs));
+      if (pending.resumePlaying && video.paused) void video.play().catch((cause) => failMedia(errorMessage(cause)));
+      return;
+    }
+
+    const sourceTimeUs = secondsToMicroseconds(video.currentTime);
+    const editedTimeUs = sourceTimeToEditedTime(sessionRef.current.segments, sourceTimeUs);
+    if (editedTimeUs !== null) {
+      const mapping = editedTimeToSourceTime(sessionRef.current.segments, editedTimeUs);
+      activeSegmentIdRef.current = mapping?.segmentId ?? null;
+      replaceSession(withEditorPlayheadUs(sessionRef.current, editedTimeUs));
+      return;
+    }
+
+    let nearestEditedUs = 0;
+    let nearestDistanceUs = Number.POSITIVE_INFINITY;
+    for (const offset of segmentEditedOffsets(sessionRef.current.segments)) {
+      const startDistanceUs = Math.abs(sourceTimeUs - offset.segment.sourceStartUs);
+      if (startDistanceUs < nearestDistanceUs) {
+        nearestDistanceUs = startDistanceUs;
+        nearestEditedUs = offset.editedStartUs;
+      }
+      const endDistanceUs = Math.abs(sourceTimeUs - offset.segment.sourceEndUs);
+      if (endDistanceUs < nearestDistanceUs) {
+        nearestDistanceUs = endDistanceUs;
+        nearestEditedUs = offset.editedEndUs;
+      }
+    }
+    seekVideoToEditedTime(sessionRef.current, nearestEditedUs, !video.paused);
   }
 
-  function seekFromTimeline(position: number) {
-    const nextTime = timelinePositionToSeconds(position, 1, session.source.durationSeconds);
-    if (videoRef.current) videoRef.current.currentTime = nextTime;
-    setSession((current) => withEditorPlayhead(current, nextTime));
-  }
+  const synchronizePlaybackPosition = useCallback((video: HTMLVideoElement, sourceTimeSeconds: number) => {
+    if (video.seeking || pendingSeekRef.current) return;
+    const current = sessionRef.current;
+    const offsets = segmentEditedOffsets(current.segments);
+    if (offsets.length === 0) return;
+    const sourceTimeUs = secondsToMicroseconds(sourceTimeSeconds);
+    let active = offsets.find((offset) => offset.segment.id === activeSegmentIdRef.current);
+    if (!active || sourceTimeUs < active.segment.sourceStartUs - BOUNDARY_TOLERANCE_US || sourceTimeUs > active.segment.sourceEndUs + BOUNDARY_TOLERANCE_US) {
+      const editedTimeUs = sourceTimeToEditedTime(current.segments, sourceTimeUs);
+      if (editedTimeUs === null) return;
+      const mapping = editedTimeToSourceTime(current.segments, editedTimeUs);
+      active = offsets[mapping?.segmentIndex ?? 0];
+      activeSegmentIdRef.current = active.segment.id;
+    }
+
+    if (!video.paused && !video.ended && sourceTimeUs >= active.segment.sourceEndUs - BOUNDARY_TOLERANCE_US) {
+      const next = offsets[active.index + 1];
+      if (next) {
+        const resumePlaying = !video.paused;
+        activeSegmentIdRef.current = next.segment.id;
+        pendingSeekRef.current = {
+          segmentId: next.segment.id,
+          editedTimeUs: next.editedStartUs,
+          resumePlaying,
+        };
+        replaceSession(withEditorPlayheadUs(current, next.editedStartUs));
+        video.currentTime = microsecondsToSeconds(next.segment.sourceStartUs);
+        return;
+      }
+      editorEndedRef.current = true;
+      video.pause();
+      video.currentTime = microsecondsToSeconds(active.segment.sourceEndUs);
+      replaceSession(withEditorPlaybackState(withEditorPlayheadUs(current, active.editedEndUs), "ended"));
+      return;
+    }
+
+    const editedTimeUs = active.editedStartUs + Math.max(0, sourceTimeUs - active.segment.sourceStartUs);
+    replaceSession(withEditorPlayheadUs(current, editedTimeUs));
+  }, [replaceSession]);
+
+  const stopPlaybackMonitor = useCallback(() => {
+    if (playbackFrameRef.current !== undefined) window.cancelAnimationFrame(playbackFrameRef.current);
+    playbackFrameRef.current = undefined;
+  }, []);
+
+  const startPlaybackMonitor = useCallback((video: HTMLVideoElement) => {
+    stopPlaybackMonitor();
+    const tick = () => {
+      synchronizePlaybackPosition(video, video.currentTime);
+      if (!video.paused && !video.ended) playbackFrameRef.current = window.requestAnimationFrame(tick);
+      else playbackFrameRef.current = undefined;
+    };
+    playbackFrameRef.current = window.requestAnimationFrame(tick);
+  }, [stopPlaybackMonitor, synchronizePlaybackPosition]);
 
   function togglePlayback() {
     const video = videoRef.current;
     if (!video || mediaStatus === "error" || mediaStatus === "preparingProxy") return;
-    if (video.paused || video.ended) void video.play().catch((cause) => failMedia(errorMessage(cause)));
-    else video.pause();
+    if (!video.paused && !video.ended) {
+      video.pause();
+      return;
+    }
+    const current = sessionRef.current;
+    const editedDurationUs = totalEditedDurationUs(current.segments);
+    const targetUs = current.playheadUs >= editedDurationUs ? 0 : current.playheadUs;
+    seekVideoToEditedTime(current, targetUs, true);
   }
 
-  const duration = session.source.durationSeconds;
-  const timelineFraction = duration > 0 ? session.playheadSeconds / duration : 0;
-  const timelinePercent = mediaTimeToPercent(session.playheadSeconds, duration);
+  function applyEdit(next: EditorSession) {
+    const current = sessionRef.current;
+    if (next === current) return;
+    videoRef.current?.pause();
+    editorEndedRef.current = false;
+    replaceSession(next);
+    seekVideoToEditedTime(next, next.playheadUs);
+  }
+
+  function seekEditedTimeline(requestedTimeUs: number) {
+    seekVideoToEditedTime(sessionRef.current, requestedTimeUs, false);
+  }
+
+  function selectSegment(segmentId: string) {
+    replaceSession(selectEditorSegment(sessionRef.current, segmentId));
+  }
+
+  function beginTrim(event: ReactPointerEvent<HTMLButtonElement>, segment: EditorSegment, edge: EditorTrimEdge) {
+    const laneWidth = timelineLaneRef.current?.getBoundingClientRect().width ?? 0;
+    if (laneWidth <= 0) return;
+    const pointerId = event.pointerId;
+    const startClientX = event.clientX;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(pointerId);
+    videoRef.current?.pause();
+    selectSegment(segment.id);
+    const drag: TrimDrag = {
+      pointerId,
+      segmentId: segment.id,
+      edge,
+      startClientX,
+      laneWidth,
+      initialSourceUs: edge === "start" ? segment.sourceStartUs : segment.sourceEndUs,
+      editedDurationUs: totalEditedDurationUs(sessionRef.current.segments),
+      sourceTimeUs: edge === "start" ? segment.sourceStartUs : segment.sourceEndUs,
+      previewSegments: sessionRef.current.segments,
+    };
+    trimDragRef.current = drag;
+    setTrimDrag(drag);
+  }
+
+  function moveTrim(event: ReactPointerEvent<HTMLButtonElement>) {
+    const pointerId = event.pointerId;
+    const clientX = event.clientX;
+    const drag = trimDragRef.current;
+    if (!drag || drag.pointerId !== pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const deltaUs = Math.round((clientX - drag.startClientX) / drag.laneWidth * drag.editedDurationUs);
+    const previewSegments = previewTrimmedSegments(
+      sessionRef.current.segments,
+      sessionRef.current.source.durationUs,
+      drag.segmentId,
+      drag.edge,
+      drag.initialSourceUs + deltaUs,
+    );
+    const previewSegment = previewSegments.find((segment) => segment.id === drag.segmentId);
+    if (!previewSegment) return;
+    const sourceTimeUs = drag.edge === "start" ? previewSegment.sourceStartUs : previewSegment.sourceEndUs;
+    const nextDrag = { ...drag, sourceTimeUs, previewSegments };
+    trimDragRef.current = nextDrag;
+    setTrimDrag(nextDrag);
+    const video = videoRef.current;
+    if (video) video.currentTime = microsecondsToSeconds(sourceTimeUs);
+  }
+
+  function finishTrim(event: ReactPointerEvent<HTMLButtonElement>, commit: boolean) {
+    const pointerId = event.pointerId;
+    const drag = trimDragRef.current;
+    if (!drag || drag.pointerId !== pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.currentTarget.hasPointerCapture(pointerId)) event.currentTarget.releasePointerCapture(pointerId);
+    trimDragRef.current = null;
+    setTrimDrag(null);
+    if (commit) applyEdit(trimEditorSegment(sessionRef.current, drag.segmentId, drag.edge, drag.sourceTimeUs));
+    else seekVideoToEditedTime(sessionRef.current, sessionRef.current.playheadUs);
+  }
+
+  function keyboardTrim(event: ReactKeyboardEvent<HTMLButtonElement>, segment: EditorSegment, edge: EditorTrimEdge) {
+    const key = event.key;
+    if (key !== "ArrowLeft" && key !== "ArrowRight") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const direction = key === "ArrowLeft" ? -1 : 1;
+    const sourceTimeUs = (edge === "start" ? segment.sourceStartUs : segment.sourceEndUs) + direction * KEYBOARD_TRIM_US;
+    applyEdit(trimEditorSegment(sessionRef.current, segment.id, edge, sourceTimeUs));
+  }
+
+  function confirmReset() {
+    if (!sessionRef.current.dirty) return;
+    if (window.confirm("Reset all timeline edits to the full source clip?")) applyEdit(resetEditorEdits(sessionRef.current));
+  }
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      if (isEditableShortcutTarget(target?.tagName, Boolean(target?.isContentEditable))) return;
+      if (target?.tagName === "BUTTON") return;
+      const key = event.key.toLowerCase();
+      if (event.ctrlKey && key === "z") {
+        event.preventDefault();
+        applyEdit(event.shiftKey ? redoEditorEdit(sessionRef.current) : undoEditorEdit(sessionRef.current));
+        return;
+      }
+      if (event.ctrlKey && key === "y") {
+        event.preventDefault();
+        applyEdit(redoEditorEdit(sessionRef.current));
+        return;
+      }
+      if (event.code === "Space") {
+        event.preventDefault();
+        togglePlayback();
+      } else if (event.key === "Delete") {
+        event.preventDefault();
+        applyEdit(deleteSelectedSegment(sessionRef.current));
+      } else if (!event.ctrlKey && !event.altKey && key === "s") {
+        event.preventDefault();
+        applyEdit(splitAtPlayhead(sessionRef.current));
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        const direction = event.key === "ArrowLeft" ? -1 : 1;
+        const distanceUs = event.shiftKey ? KEYBOARD_SEEK_US * 5 : KEYBOARD_SEEK_US;
+        seekEditedTimeline(sessionRef.current.playheadUs + direction * distanceUs);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
+  const displaySegments = trimDrag?.previewSegments ?? session.segments;
+  const editedDurationUs = totalEditedDurationUs(displaySegments);
+  const authoritativeEditedDurationUs = totalEditedDurationUs(session.segments);
+  const timelinePercent = mediaTimeToPercent(session.playheadUs, authoritativeEditedDurationUs);
   const timelineStyle = { "--editor-playhead": `${timelinePercent}%` } as CSSProperties;
   const audioTracks = playbackInfo?.audioTracks ?? session.source.audioTracks;
+  const splitEnabled = canSplitAtPlayhead(session);
+  const deleteEnabled = canDeleteSelectedSegment(session);
+  const selectedSegment = displaySegments.find((segment) => segment.id === session.selectedSegmentId) ?? null;
 
   return (
     <div className="page editor-page">
@@ -216,7 +536,10 @@ function ActiveEditor({ clip, onBackToClips }: { clip: ClipListItem; onBackToCli
           <button className="editor-back-button" type="button" onClick={onBackToClips}>← Clips</button>
           <div><h1>Editor</h1><p>{session.source.displayName}</p></div>
         </div>
-        <span className="editor-source-safety">Original protected</span>
+        <div className="editor-header-status">
+          {session.dirty && <span className="editor-dirty-state">Unsaved edits</span>}
+          <span className="editor-source-safety">Original protected</span>
+        </div>
       </header>
 
       <div className="editor-workspace">
@@ -234,20 +557,35 @@ function ActiveEditor({ clip, onBackToClips }: { clip: ClipListItem; onBackToCli
               onLoadStart={() => { setMediaStatus("loading"); updatePlaybackState("loading"); }}
               onLoadedMetadata={(event) => restoreAfterLoad(event.currentTarget)}
               onCanPlay={() => setMediaStatus("ready")}
-              onPlay={() => updatePlaybackState("playing")}
-              onPause={() => { if (!videoRef.current?.ended) updatePlaybackState("paused"); }}
-              onEnded={() => updatePlaybackState("ended")}
+              onPlay={(event) => {
+                editorEndedRef.current = false;
+                updatePlaybackState("playing");
+                startPlaybackMonitor(event.currentTarget);
+              }}
+              onPause={() => {
+                stopPlaybackMonitor();
+                if (!editorEndedRef.current && !videoRef.current?.ended) updatePlaybackState("paused");
+              }}
+              onEnded={() => {
+                stopPlaybackMonitor();
+                const current = sessionRef.current;
+                replaceSession(withEditorPlaybackState(withEditorPlayheadUs(current, totalEditedDurationUs(current.segments)), "ended"));
+              }}
               onTimeUpdate={(event) => {
-                const currentTime = event.currentTarget.currentTime;
-                setSession((current) => withEditorPlayhead(current, currentTime));
+                const sourceTimeSeconds = event.currentTarget.currentTime;
+                synchronizePlaybackPosition(event.currentTarget, sourceTimeSeconds);
               }}
               onDurationChange={(event) => {
                 const mediaDuration = event.currentTarget.duration;
                 if (Number.isFinite(mediaDuration) && mediaDuration > 0) {
-                  setSession((current) => withEditorDuration(current, mediaDuration));
+                  setSession((current) => {
+                    const next = withEditorDuration(current, mediaDuration);
+                    sessionRef.current = next;
+                    return next;
+                  });
                 }
               }}
-              onSeeking={(event) => seekingStarted(event.currentTarget)}
+              onSeeking={seekingStarted}
               onSeeked={(event) => seekingFinished(event.currentTarget)}
               onError={playbackFailed}
             />}
@@ -260,7 +598,7 @@ function ActiveEditor({ clip, onBackToClips }: { clip: ClipListItem; onBackToCli
           </div>
           <div className="editor-transport">
             <button type="button" onClick={togglePlayback} disabled={!source || mediaStatus !== "ready"}>{session.playbackState === "playing" ? "Pause" : "Play"}</button>
-            <code>{formatEditorTime(session.playheadSeconds)} / {formatEditorTime(duration)}</code>
+            <code>{formatEditorTimeUs(session.playheadUs)} / {formatEditorTimeUs(authoritativeEditedDurationUs)}</code>
             <span>{session.playbackState}</span>
           </div>
         </section>
@@ -272,31 +610,117 @@ function ActiveEditor({ clip, onBackToClips }: { clip: ClipListItem; onBackToCli
             <div><dt>File</dt><dd title={session.source.filePath}>{session.source.filename}</dd></div>
             <div><dt>Resolution</dt><dd>{session.source.width}×{session.source.height}</dd></div>
             <div><dt>Video</dt><dd>{session.source.videoCodec.toUpperCase()}</dd></div>
-            <div><dt>Duration</dt><dd>{formatEditorTime(duration)}</dd></div>
+            <div><dt>Original</dt><dd>{formatEditorTimeUs(session.source.durationUs)}</dd></div>
+            <div><dt>Edited</dt><dd>{formatEditorTimeUs(authoritativeEditedDurationUs)}</dd></div>
           </dl>
           <div className="editor-source-audio"><span>Saved audio tracks</span><div>{audioTracks.length > 0 ? audioTracks.map((track) => <span key={track.streamIndex}>{audioLabel(track)}</span>) : <small>No audio tracks</small>}</div></div>
-          <div className="editor-safety-note"><strong>Non-destructive session</strong><span>The source MP4 and library metadata remain unchanged.</span></div>
+          <div className="editor-safety-note"><strong>Shared non-destructive cuts</strong><span>The source MP4 stays unchanged. This timeline will govern video and every saved audio track.</span></div>
         </aside>
 
         <section className="editor-timeline-panel" aria-labelledby="editor-timeline-heading">
           <div className="editor-timeline-heading">
-            <div><span className="eyebrow">WORK AREA</span><h2 id="editor-timeline-heading">Source timeline</h2></div>
-            <code>{formatEditorTime(session.playheadSeconds)}</code>
+            <div><span className="eyebrow">EDIT DECISION LIST</span><h2 id="editor-timeline-heading">Edited timeline</h2></div>
+            <code>{formatEditorTimeUs(session.playheadUs)}</code>
           </div>
+
+          <div className="editor-toolbar" aria-label="Timeline editing actions">
+            <button type="button" onClick={() => applyEdit(undoEditorEdit(sessionRef.current))} disabled={session.undoStack.length === 0} title="Undo (Ctrl+Z)">Undo</button>
+            <button type="button" onClick={() => applyEdit(redoEditorEdit(sessionRef.current))} disabled={session.redoStack.length === 0} title="Redo (Ctrl+Shift+Z or Ctrl+Y)">Redo</button>
+            <span className="editor-toolbar-divider" aria-hidden="true" />
+            <button type="button" onClick={() => applyEdit(splitAtPlayhead(sessionRef.current))} disabled={!splitEnabled} title="Split at playhead (S)">Split</button>
+            <button className="editor-delete-segment" type="button" onClick={() => applyEdit(deleteSelectedSegment(sessionRef.current))} disabled={!deleteEnabled} title="Delete selected segment (Delete)">Delete Segment</button>
+            <button type="button" onClick={confirmReset} disabled={!session.dirty}>Reset</button>
+            <div className="editor-duration-status" aria-label="Timeline duration">
+              <span>Original <strong>{formatEditorTimeUs(session.source.durationUs)}</strong></span>
+              <span>Edited <strong>{formatEditorTimeUs(authoritativeEditedDurationUs)}</strong></span>
+            </div>
+          </div>
+
+          {trimDrag && <div className="editor-trim-feedback" role="status">
+            {trimDrag.edge === "start" ? "Trim start" : "Trim end"}: source {formatEditorTimeUs(trimDrag.sourceTimeUs)} · edited {formatEditorTimeUs(editedDurationUs)}
+          </div>}
+
           <div className="editor-timeline-ruler" aria-hidden="true">
-            {timelineTickTimes(duration).map((time, index) => <span key={index}>{formatEditorTime(time)}</span>)}
+            {timelineTickTimes(microsecondsToSeconds(authoritativeEditedDurationUs)).map((time, index) => <span key={index}>{formatEditorTimeUs(secondsToMicroseconds(time))}</span>)}
           </div>
           <div className="editor-timeline-row">
-            <span className="editor-track-label">SOURCE</span>
-            <label className="editor-timeline-lane" style={timelineStyle}>
-              <span className="visually-hidden">Seek editor timeline</span>
-              <span className="editor-source-clip"><span>{session.source.displayName}</span></span>
+            <span className="editor-track-label">RESULT</span>
+            <div className="editor-timeline-lane" ref={timelineLaneRef} style={timelineStyle}>
+              <div className="editor-segment-strip">
+                {displaySegments.map((segment, index) => {
+                  const selected = segment.id === session.selectedSegmentId;
+                  const width = editedDurationUs > 0 ? segmentDurationUs(segment) / editedDurationUs * 100 : 0;
+                  return (
+                    <div
+                      className={`editor-segment${selected ? " editor-segment-selected" : ""}${index > 0 ? " editor-segment-cut" : ""}`}
+                      key={segment.id}
+                      style={{ width: `${width}%` }}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={selected}
+                      aria-label={`Select segment ${index + 1}, source ${formatEditorTimeUs(segment.sourceStartUs)} to ${formatEditorTimeUs(segment.sourceEndUs)}`}
+                      title={`Source ${formatEditorTimeUs(segment.sourceStartUs)} → ${formatEditorTimeUs(segment.sourceEndUs)}`}
+                      onClick={() => selectSegment(segment.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.code === "Space") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          selectSegment(segment.id);
+                        }
+                      }}
+                    >
+                      {selected && <button
+                        className="editor-trim-handle editor-trim-handle-start"
+                        type="button"
+                        aria-label="Trim segment start"
+                        title="Drag to trim segment start"
+                        onPointerDown={(event) => beginTrim(event, segment, "start")}
+                        onPointerMove={moveTrim}
+                        onPointerUp={(event) => finishTrim(event, true)}
+                        onPointerCancel={(event) => finishTrim(event, false)}
+                        onKeyDown={(event) => keyboardTrim(event, segment, "start")}
+                      />}
+                      <span className="editor-segment-label">{index + 1}</span>
+                      {selected && <button
+                        className="editor-trim-handle editor-trim-handle-end"
+                        type="button"
+                        aria-label="Trim segment end"
+                        title="Drag to trim segment end"
+                        onPointerDown={(event) => beginTrim(event, segment, "end")}
+                        onPointerMove={moveTrim}
+                        onPointerUp={(event) => finishTrim(event, true)}
+                        onPointerCancel={(event) => finishTrim(event, false)}
+                        onKeyDown={(event) => keyboardTrim(event, segment, "end")}
+                      />}
+                    </div>
+                  );
+                })}
+              </div>
               <span className="editor-timeline-progress" />
               <span className="editor-timeline-playhead" />
-              <input type="range" min="0" max="1" step="0.0001" value={timelineFraction} disabled={!source || duration <= 0 || mediaStatus !== "ready"} aria-label="Editor timeline playhead" aria-valuetext={`${formatEditorTime(session.playheadSeconds)} of ${formatEditorTime(duration)}`} onChange={(event) => seekFromTimeline(Number(event.target.value))} />
-            </label>
+              <label className="editor-seek-strip">
+                <span className="visually-hidden">Seek edited timeline</span>
+                <input
+                  type="range"
+                  min="0"
+                  max={Math.max(authoritativeEditedDurationUs, 1)}
+                  step="1000"
+                  value={Math.min(session.playheadUs, authoritativeEditedDurationUs)}
+                  disabled={!source || authoritativeEditedDurationUs <= 0 || mediaStatus !== "ready" || Boolean(trimDrag)}
+                  aria-label="Edited timeline playhead"
+                  aria-valuetext={`${formatEditorTimeUs(session.playheadUs)} of ${formatEditorTimeUs(authoritativeEditedDurationUs)}`}
+                  onChange={(event) => {
+                    const editedTimeUs = Number(event.currentTarget.value);
+                    seekEditedTimeline(editedTimeUs);
+                  }}
+                />
+              </label>
+            </div>
           </div>
-          <div className="editor-timeline-footer"><span>Editable range: {formatEditorTime(session.editableRange.startSeconds)} – {formatEditorTime(session.editableRange.endSeconds)}</span><span>Click or drag the timeline to seek.</span></div>
+          <div className="editor-timeline-footer">
+            <span>{session.segments.length} segment{session.segments.length === 1 ? "" : "s"}{selectedSegment ? ` · Selected source ${formatEditorTimeUs(selectedSegment.sourceStartUs)}–${formatEditorTimeUs(selectedSegment.sourceEndUs)}` : ""}</span>
+            <span>Select a segment to trim. Use the lower rail to seek.</span>
+          </div>
         </section>
       </div>
     </div>
