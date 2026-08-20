@@ -1,6 +1,6 @@
 mod assembler;
 mod audio_render;
-mod ffmpeg;
+pub(crate) mod ffmpeg;
 mod save;
 
 use tauri::State;

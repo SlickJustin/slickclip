@@ -4,7 +4,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use tauri::{AppHandle, Emitter};
 
+use crate::library::{ClipAudioTrack, ClipLibraryManager, SavedClipIndexResult, SavedClipMetadata};
 use crate::replay::{
     AudioSaveBarrierTelemetry, AudioSnapshotPlan, ReplayBufferManager, ReplayLifecycleState,
     ReplaySaveSnapshot, SavedReplayTimeline,
@@ -76,6 +78,10 @@ pub struct SaveReplayStatus {
     pub temporary_workspace_path: Option<String>,
     pub temporary_video_path: Option<String>,
     pub temporary_artifacts_retained: bool,
+    pub library_clip_id: Option<String>,
+    pub library_indexed: Option<bool>,
+    pub library_indexing_warning: Option<String>,
+    pub library_insertion_latency_ms: Option<f64>,
 }
 
 impl SaveReplayStatus {
@@ -109,6 +115,10 @@ impl SaveReplayStatus {
             temporary_workspace_path: None,
             temporary_video_path: None,
             temporary_artifacts_retained: false,
+            library_clip_id: None,
+            library_indexed: None,
+            library_indexing_warning: None,
+            library_insertion_latency_ms: None,
         }
     }
 }
@@ -190,6 +200,10 @@ impl SharedSaveJob {
             temporary_workspace_path: None,
             temporary_video_path: None,
             temporary_artifacts_retained: false,
+            library_clip_id: None,
+            library_indexed: None,
+            library_indexing_warning: None,
+            library_insertion_latency_ms: None,
         };
     }
 
@@ -232,7 +246,8 @@ impl SharedSaveJob {
             Some(snapshot.video_timeline.clip_playback_duration_100ns as f64 / 10_000_000.0);
     }
 
-    fn complete(&self, result: super::assembler::ClipAssemblyResult, total_save_latency_ms: f64) {
+    fn complete(&self, outcome: SaveJobOutcome, total_save_latency_ms: f64) {
+        let result = outcome.assembly;
         let mut status = self.lock();
         status.state = SaveJobState::Completed;
         status.actual_saved_duration_seconds = Some(result.actual_duration_seconds);
@@ -250,6 +265,17 @@ impl SharedSaveJob {
         status.temporary_workspace_path = None;
         status.temporary_video_path = None;
         status.temporary_artifacts_retained = false;
+        status.library_clip_id = outcome
+            .index_result
+            .as_ref()
+            .map(|value| value.clip_id.clone());
+        status.library_indexed = Some(outcome.index_result.is_some());
+        status.library_indexing_warning = outcome.index_warning;
+        status.library_insertion_latency_ms = outcome
+            .index_result
+            .as_ref()
+            .map(|value| value.insertion_ms)
+            .or(outcome.failed_index_latency_ms);
         status.error_message = None;
     }
 
@@ -290,15 +316,24 @@ pub struct ClipSaveManager {
     output_directory: Arc<PathBuf>,
     shared: Arc<SharedSaveJob>,
     worker: Arc<Mutex<Option<JoinHandle<()>>>>,
+    library: ClipLibraryManager,
+    app_handle: AppHandle,
 }
 
 impl ClipSaveManager {
-    pub fn new(replay: ReplayBufferManager, output_directory: PathBuf) -> Self {
+    pub fn new(
+        replay: ReplayBufferManager,
+        output_directory: PathBuf,
+        library: ClipLibraryManager,
+        app_handle: AppHandle,
+    ) -> Self {
         Self {
             replay,
             output_directory: Arc::new(output_directory),
             shared: Arc::new(SharedSaveJob::new()),
             worker: Arc::new(Mutex::new(None)),
+            library,
+            app_handle,
         }
     }
 
@@ -339,10 +374,19 @@ impl ClipSaveManager {
         let shared = Arc::clone(&self.shared);
         let replay = self.replay.clone();
         let output_directory = Arc::clone(&self.output_directory);
+        let library = self.library.clone();
+        let app_handle = self.app_handle.clone();
         let thread = match thread::Builder::new()
             .name("justin-replay-save".to_string())
-            .spawn(move || run_save_job(replay, output_directory.as_ref(), shared))
-        {
+            .spawn(move || {
+                run_save_job(
+                    replay,
+                    output_directory.as_ref(),
+                    shared,
+                    library,
+                    app_handle,
+                )
+            }) {
             Ok(thread) => thread,
             Err(error) => {
                 let message = format!("Could not start the Save Replay worker: {error}");
@@ -374,6 +418,8 @@ fn run_save_job(
     replay: ReplayBufferManager,
     output_directory: &PathBuf,
     shared: Arc<SharedSaveJob>,
+    library: ClipLibraryManager,
+    app_handle: AppHandle,
 ) {
     let save_started = Instant::now();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -383,8 +429,36 @@ fn run_save_job(
             .map_err(ClipAssemblyFailure::without_artifacts)?;
         shared.set_snapshot(&snapshot);
         let timestamp = utc_file_timestamp().map_err(ClipAssemblyFailure::without_artifacts)?;
-        FfmpegClipAssembler.assemble(&snapshot, output_directory, &timestamp, &|phase| {
-            shared.set_state(save_state_for_phase(phase))
+        let assembly =
+            FfmpegClipAssembler.assemble(&snapshot, output_directory, &timestamp, &|phase| {
+                shared.set_state(save_state_for_phase(phase))
+            })?;
+        let index_started = Instant::now();
+        let metadata = saved_clip_metadata(&snapshot, &assembly);
+        let (index_result, index_warning, failed_index_latency_ms) = match library
+            .index_saved_clip(metadata)
+        {
+            Ok(indexed) => {
+                let _ = app_handle.emit("clip-library-changed", indexed.clip_id.clone());
+                (Some(indexed), None, None)
+            }
+            Err(error) => {
+                let elapsed = index_started.elapsed().as_secs_f64() * 1_000.0;
+                library.record_saved_clip_index_failure(elapsed);
+                (
+                        None,
+                        Some(format!(
+                            "Replay saved successfully, but library indexing failed: {error}. Refresh Clips to retry discovery."
+                        )),
+                        Some(elapsed),
+                    )
+            }
+        };
+        Ok(SaveJobOutcome {
+            assembly,
+            index_result,
+            index_warning,
+            failed_index_latency_ms,
         })
     }));
 
@@ -401,6 +475,72 @@ fn run_save_job(
             replay.status().audio.save_barriers,
             total_save_latency_ms,
         ),
+    }
+}
+
+struct SaveJobOutcome {
+    assembly: super::assembler::ClipAssemblyResult,
+    index_result: Option<SavedClipIndexResult>,
+    index_warning: Option<String>,
+    failed_index_latency_ms: Option<f64>,
+}
+
+fn saved_clip_metadata(
+    snapshot: &ReplaySaveSnapshot,
+    assembly: &super::assembler::ClipAssemblyResult,
+) -> SavedClipMetadata {
+    let first = &snapshot.segments[0];
+    SavedClipMetadata {
+        file_path: assembly.output_path.clone(),
+        created_at_ms: i64::try_from(snapshot.save_request_timestamp_ms).unwrap_or(i64::MAX),
+        duration_100ns: (assembly.actual_duration_seconds * 10_000_000.0).round() as i64,
+        requested_duration_seconds: snapshot.requested_duration_seconds,
+        width: first.width,
+        height: first.height,
+        fps_numerator: first.frame_rate,
+        fps_denominator: 1,
+        video_codec: assembly.codec.clone(),
+        video_profile: assembly.final_mux.video_profile.clone(),
+        video_bitrate_bps: assembly
+            .final_mux
+            .video_bitrate_mbps
+            .map(|value| (value * 1_000_000.0).round() as u64),
+        total_bitrate_bps: assembly
+            .final_mux
+            .total_bitrate_mbps
+            .map(|value| (value * 1_000_000.0).round() as u64),
+        capture_target_label: snapshot.capture_target_label.clone(),
+        capture_target_type: snapshot.capture_target_type.clone(),
+        audio_tracks: assembly
+            .final_mux
+            .audio_streams
+            .iter()
+            .map(|stream| ClipAudioTrack {
+                stream_index: stream.stream_index,
+                role: library_audio_role(&stream.title).to_string(),
+                title: Some(stream.title.clone()),
+                handler_name: Some(stream.title.clone()),
+                codec: stream.codec.clone(),
+                profile: Some("LC".to_string()),
+                sample_rate: Some(stream.sample_rate),
+                channels: Some(stream.channels),
+                bitrate_bps: stream
+                    .bitrate_kbps
+                    .map(|value| (value * 1_000.0).round() as u64),
+                is_default: stream.is_default,
+            })
+            .collect(),
+    }
+}
+
+fn library_audio_role(title: &str) -> &'static str {
+    match title {
+        "Combined" => "Combined",
+        "Game" => "Game",
+        "Voice Chat" => "VoiceChat",
+        "Microphone" => "Microphone",
+        "Other" => "Other",
+        _ => "Unknown",
     }
 }
 

@@ -2,6 +2,7 @@ mod audio;
 mod capture;
 mod clips;
 mod hotkey;
+mod library;
 mod replay;
 
 use tauri::Manager;
@@ -28,10 +29,21 @@ pub fn run() {
             let replay_manager =
                 replay::ReplayBufferManager::new(replay_root).map_err(std::io::Error::other)?;
             let clips_directory = app.path().video_dir()?.join("JustIn Replay").join("Clips");
+            let library_database = app
+                .path()
+                .app_local_data_dir()?
+                .join("Library")
+                .join("clips.db");
+            let clip_library =
+                library::ClipLibraryManager::initialize(library_database, clips_directory.clone());
+            clip_library.start_initial_reconciliation(app.handle().clone());
             app.manage(clips::ClipSaveManager::new(
                 replay_manager.clone(),
                 clips_directory,
+                clip_library.clone(),
+                app.handle().clone(),
             ));
+            app.manage(clip_library);
             app.manage(replay_manager);
             let audio_tests_directory = app
                 .path()
@@ -57,6 +69,13 @@ pub fn run() {
             replay::get_replay_buffer_status,
             clips::save_replay,
             clips::get_save_replay_status,
+            library::list_clips,
+            library::refresh_clip_library,
+            library::set_clip_favorite,
+            library::rename_clip_display_name,
+            library::open_clip_file,
+            library::open_clip_folder,
+            library::delete_clip,
             hotkey::get_save_replay_hotkey,
             hotkey::set_save_replay_hotkey,
             hotkey::set_hotkey_recorder_active,

@@ -113,7 +113,7 @@ type AudioSnapshotPlan = { trackRole: AudioTrackRole; rawVideoStartQpc100ns: num
 type AudioSaveBarrierTelemetry = { trackRole: AudioTrackRole; sourceState: AudioTrackState; sourceErrorMessage: string | null; requiredVideoEndQpc100ns: number; capturedThroughQpc100ns: number | null; writtenThroughQpc100ns: number | null; finalizedThroughQpc100nsBeforeWait: number | null; finalizedThroughQpc100nsAfterWait: number | null; waitDurationMs: number; explicitWriterCutRequested: boolean; satisfyingSegmentSequence: number | null; timedOut: boolean; errorMessage: string | null };
 type AudioRenderDiagnostics = { trackRole: AudioTrackRole; selectedSegmentSequenceNumbers: number[]; sourceFormat: AudioFormat; sourceFramesAvailable: number; framesTrimmedBefore: number; framesTrimmedAfter: number; leadingSilenceFrames: number; trailingSilenceFrames: number; renderedFrameCount: number; renderedDurationSeconds: number; renderedWavSize: number; warnings: string[] };
 type FinalAudioStreamDiagnostics = { streamIndex: number; title: string; codec: string; sampleRate: number; channels: number; isDefault: boolean; durationSeconds: number | null; bitrateKbps: number | null };
-type FinalMuxDiagnostics = { ffmpegDurationMs: number; ffmpegExitStatus: string; finalStreamCount: number; videoStreamCount: number; audioStreamCount: number; audioTitles: string[]; audioStreams: FinalAudioStreamDiagnostics[]; videoBitrateMbps: number | null; totalBitrateMbps: number | null; containerDurationSeconds: number | null; filterGraph: string | null; verified: boolean };
+type FinalMuxDiagnostics = { ffmpegDurationMs: number; ffmpegExitStatus: string; finalStreamCount: number; videoStreamCount: number; audioStreamCount: number; audioTitles: string[]; audioStreams: FinalAudioStreamDiagnostics[]; videoBitrateMbps: number | null; videoProfile: string | null; totalBitrateMbps: number | null; containerDurationSeconds: number | null; filterGraph: string | null; verified: boolean };
 
 type TargetTab = "monitor" | "window";
 type SelectedTarget = { targetType: TargetTab; id: string };
@@ -312,6 +312,10 @@ type SaveReplayStatus = {
   temporaryWorkspacePath: string | null;
   temporaryVideoPath: string | null;
   temporaryArtifactsRetained: boolean;
+  libraryClipId: string | null;
+  libraryIndexed: boolean | null;
+  libraryIndexingWarning: string | null;
+  libraryInsertionLatencyMs: number | null;
 };
 
 type SaveReplayCommandResult = {
@@ -461,6 +465,10 @@ const initialSaveReplayStatus: SaveReplayStatus = {
   temporaryWorkspacePath: null,
   temporaryVideoPath: null,
   temporaryArtifactsRetained: false,
+  libraryClipId: null,
+  libraryIndexed: null,
+  libraryIndexingWarning: null,
+  libraryInsertionLatencyMs: null,
 };
 
 export function ReplayPage() {
@@ -1324,6 +1332,12 @@ export function ReplayPage() {
               )}
               {saveReplayStatus.outputPath && (
                 <code>{saveReplayStatus.outputPath}</code>
+              )}
+              {saveReplayStatus.libraryIndexingWarning && (
+                <span className="save-replay-error">{saveReplayStatus.libraryIndexingWarning}</span>
+              )}
+              {saveReplayStatus.libraryIndexed && (
+                <small>Clips library indexed · ID {saveReplayStatus.libraryClipId} · {formatOptionalMetric(saveReplayStatus.libraryInsertionLatencyMs, "ms")}</small>
               )}
               {saveReplayStatus.actualSavedDurationSeconds !== null && (
                 <div className="saved-replay-details">

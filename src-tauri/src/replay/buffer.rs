@@ -26,7 +26,8 @@ use crate::capture::encoder::{
     WindowsCaptureFileBackend,
 };
 use crate::capture::targets::{
-    resolve_target, CaptureTargetRequest, NativeCaptureTarget, ResolvedCaptureTarget,
+    resolve_target, CaptureTargetRequest, CaptureTargetType, NativeCaptureTarget,
+    ResolvedCaptureTarget,
 };
 use crate::capture::WGC_FRAME_POOL_BUFFER_COUNT;
 
@@ -243,6 +244,8 @@ pub struct ReplaySaveSnapshot {
     pub save_request_timestamp_ms: u64,
     pub save_request_qpc_100ns: i64,
     pub requested_duration_seconds: u32,
+    pub capture_target_label: Option<String>,
+    pub capture_target_type: Option<String>,
     pub segments: Vec<CompletedSegment>,
     pub video_timeline: SavedReplayTimeline,
     pub audio_snapshot_plans: Vec<AudioSnapshotPlan>,
@@ -284,6 +287,7 @@ struct ReplayInner {
     error_message: Option<String>,
     target_id: Option<String>,
     target_label: Option<String>,
+    target_type: Option<String>,
     requested_encoder: Option<String>,
     actual_encoder: Option<String>,
     replay_duration_seconds: u32,
@@ -328,6 +332,7 @@ impl ReplayInner {
             error_message: None,
             target_id: None,
             target_label: None,
+            target_type: None,
             requested_encoder: None,
             actual_encoder: None,
             replay_duration_seconds: 0,
@@ -626,6 +631,13 @@ impl SharedReplay {
             error_message: None,
             target_id: Some(request.target.id.clone()),
             target_label: None,
+            target_type: Some(
+                match request.target.target_type {
+                    CaptureTargetType::Monitor => "monitor",
+                    CaptureTargetType::Window => "window",
+                }
+                .to_string(),
+            ),
             requested_encoder: Some(request.encoder.result_name().to_string()),
             actual_encoder: None,
             replay_duration_seconds: request.replay_duration_seconds,
@@ -1023,7 +1035,13 @@ impl SharedReplay {
         video_boundary_wait_ms: f64,
         save_started: Instant,
     ) -> Result<ReplaySaveSnapshot, String> {
-        let (segments, requested_duration_seconds, sequence_numbers) = {
+        let (
+            segments,
+            requested_duration_seconds,
+            capture_target_label,
+            capture_target_type,
+            sequence_numbers,
+        ) = {
             let mut inner = self.lock();
             let requested_duration_seconds = inner.replay_duration_seconds;
             let segments = inner.ring.select_suffix_through(
@@ -1049,7 +1067,13 @@ impl SharedReplay {
             for sequence_number in &sequence_numbers {
                 *inner.pins.entry(*sequence_number).or_insert(0) += 1;
             }
-            (segments, requested_duration_seconds, sequence_numbers)
+            (
+                segments,
+                requested_duration_seconds,
+                inner.target_label.clone(),
+                inner.target_type.clone(),
+                sequence_numbers,
+            )
         };
 
         let video_pins = SegmentPinGuard {
@@ -1070,6 +1094,8 @@ impl SharedReplay {
             save_request_timestamp_ms,
             save_request_qpc_100ns,
             requested_duration_seconds,
+            capture_target_label,
+            capture_target_type,
             segments,
             video_timeline,
             audio_snapshot_plans: audio.plans,
