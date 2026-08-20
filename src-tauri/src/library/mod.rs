@@ -401,6 +401,33 @@ impl ClipLibraryManager {
         }
     }
 
+    fn prepare_editor_audio(
+        &self,
+        request: PrepareClipAudioRequest,
+        app: AppHandle,
+    ) -> PrepareClipMediaResponse {
+        match self
+            .cache_clip(&request.clip_id)
+            .and_then(|(clip, cache_clip)| {
+                let track = cache_clip.track(request.stream_index)?;
+                Ok((clip, cache_clip, track))
+            }) {
+            Ok((clip, cache_clip, track)) => {
+                let role = track.role.clone();
+                media_response(
+                    self.media_cache
+                        .request_editor_audio(cache_clip, track, request.retry, app),
+                    "Editor Audio Stem",
+                    Some(role),
+                    request.current_time_seconds,
+                    clip.duration_100ns,
+                    request.was_playing,
+                )
+            }
+            Err(error) => media_command_error(error),
+        }
+    }
+
     fn open_clip(&self, clip_id: &str) -> ClipActionResponse {
         action_result((|| {
             let path = self.trusted_clip_path(clip_id)?;
@@ -656,6 +683,18 @@ pub async fn prepare_clip_audio_preview(
     tauri::async_runtime::spawn_blocking(move || manager.prepare_audio(request, app))
         .await
         .map_err(|error| format!("The audio-preview request worker failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn prepare_editor_audio_preview(
+    manager: State<'_, ClipLibraryManager>,
+    app: AppHandle,
+    request: PrepareClipAudioRequest,
+) -> Result<PrepareClipMediaResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.prepare_editor_audio(request, app))
+        .await
+        .map_err(|error| format!("The Editor audio-preview request worker failed: {error}"))
 }
 
 #[cfg(test)]

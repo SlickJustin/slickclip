@@ -80,6 +80,7 @@ pub fn run() {
             library::request_clip_thumbnail,
             library::prepare_clip_preview,
             library::prepare_clip_audio_preview,
+            library::prepare_editor_audio_preview,
             hotkey::get_save_replay_hotkey,
             hotkey::set_save_replay_hotkey,
             hotkey::set_hotkey_recorder_active,

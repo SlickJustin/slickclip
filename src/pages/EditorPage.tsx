@@ -12,6 +12,21 @@ import type { ClipListItem, ClipPlaybackInfo, ClipPlaybackInfoResponse, PrepareC
 import { audioLabel, errorMessage } from "../types/clips";
 import { isEditableShortcutTarget, mediaTimeToPercent } from "../utils/playerControls";
 import {
+  AUDIO_DRIFT_THRESHOLD_MS,
+  audioDriftCorrectionPlan,
+  createEditorMixer,
+  effectiveTrackGain,
+  isEditorDirty,
+  isEditorMixerDirty,
+  resetEditorAudio,
+  toggleEditorTrackMute,
+  toggleEditorTrackSolo,
+  withEditorTrackAvailability,
+  withEditorTrackGain,
+  type EditorAudioTrack,
+  type EditorMixerState,
+} from "../utils/editorMixer";
+import {
   canDeleteSelectedSegment,
   canSplitAtPlayhead,
   createEditorSession,
@@ -54,6 +69,14 @@ type Props = {
   onDirtyChange: (dirty: boolean) => void;
 };
 type PendingSeek = { segmentId: string; editedTimeUs: number; resumePlaying: boolean };
+type EditorAudioRuntime = {
+  element: HTMLAudioElement;
+  sourceNode: MediaElementAudioSourceNode;
+  gainNode: GainNode;
+};
+type AudioContextStatus = "idle" | "suspended" | "running" | "blocked";
+type AudioSyncTelemetry = { maxDriftMs: number; resyncCount: number };
+type AudioSyncTelemetryRuntime = AudioSyncTelemetry & { lastPublishedAtMs: number };
 type TrimDrag = {
   pointerId: number;
   segmentId: string;
@@ -94,6 +117,10 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
   const [mediaStatus, setMediaStatus] = useState<EditorMediaStatus>("loading");
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [trimDrag, setTrimDrag] = useState<TrimDrag | null>(null);
+  const [mixer, setMixer] = useState<EditorMixerState>(() => createEditorMixer(clip.audioTracks));
+  const [audioContextStatus, setAudioContextStatus] = useState<AudioContextStatus>("idle");
+  const [audioRuntimeMessage, setAudioRuntimeMessage] = useState<string | null>(null);
+  const [audioTelemetry, setAudioTelemetry] = useState<AudioSyncTelemetry>({ maxDriftMs: 0, resyncCount: 0 });
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineLaneRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
@@ -108,14 +135,33 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
   const editorEndedRef = useRef(false);
   const trimDragRef = useRef<TrimDrag | null>(null);
   const sessionRef = useRef(session);
+  const mixerRef = useRef(mixer);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioRuntimeRef = useRef(new Map<string, EditorAudioRuntime>());
+  const audioPrepareGenerationRef = useRef(0);
+  const audioTrackAttemptRef = useRef(new Map<string, number>());
+  const audioTelemetryRef = useRef<AudioSyncTelemetryRuntime>({ maxDriftMs: 0, resyncCount: 0, lastPublishedAtMs: 0 });
 
   const replaceSession = useCallback((next: EditorSession) => {
     sessionRef.current = next;
     setSession(next);
   }, []);
 
+  const replaceMixer = useCallback((next: EditorMixerState) => {
+    mixerRef.current = next;
+    setMixer(next);
+  }, []);
+
+  const updateMixer = useCallback((update: (current: EditorMixerState) => EditorMixerState) => {
+    const next = update(mixerRef.current);
+    mixerRef.current = next;
+    setMixer(next);
+  }, []);
+
   useEffect(() => { sessionRef.current = session; }, [session]);
-  useEffect(() => { onDirtyChange(session.dirty); }, [onDirtyChange, session.dirty]);
+  useEffect(() => { mixerRef.current = mixer; }, [mixer]);
+  const editorDirty = isEditorDirty(session.dirty, mixer);
+  useEffect(() => { onDirtyChange(editorDirty); }, [editorDirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
 
   const updatePlaybackState = useCallback((state: EditorPlaybackState) => {
@@ -142,6 +188,244 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
       return false;
     }
   }, [failMedia]);
+
+  const pauseAudioFollowers = useCallback(() => {
+    for (const runtime of audioRuntimeRef.current.values()) runtime.element.pause();
+  }, []);
+
+  const seekAudioFollowers = useCallback((sourceTimeSeconds: number) => {
+    const safeTimeSeconds = Number.isFinite(sourceTimeSeconds) ? Math.max(0, sourceTimeSeconds) : 0;
+    for (const runtime of audioRuntimeRef.current.values()) {
+      if (Math.abs(runtime.element.currentTime - safeTimeSeconds) >= 0.001) {
+        runtime.element.currentTime = safeTimeSeconds;
+      }
+    }
+  }, []);
+
+  const disposeAllEditorAudio = useCallback(() => {
+    for (const runtime of audioRuntimeRef.current.values()) {
+      runtime.element.onerror = null;
+      runtime.element.pause();
+      runtime.element.removeAttribute("src");
+      runtime.element.load();
+      runtime.sourceNode.disconnect();
+      runtime.gainNode.disconnect();
+    }
+    audioRuntimeRef.current.clear();
+    const context = audioContextRef.current;
+    audioContextRef.current = null;
+    if (context) {
+      context.onstatechange = null;
+      if (context.state !== "closed") void context.close().catch(() => undefined);
+    }
+  }, []);
+
+  const ensureAudioContext = useCallback(() => {
+    let context = audioContextRef.current;
+    if (!context || context.state === "closed") {
+      const newContext = new AudioContext();
+      context = newContext;
+      audioContextRef.current = newContext;
+      newContext.onstatechange = () => {
+        if (audioContextRef.current !== newContext) return;
+        setAudioContextStatus(newContext.state === "running" ? "running" : "suspended");
+      };
+    }
+    setAudioContextStatus(context.state === "running" ? "running" : "suspended");
+    return context;
+  }, []);
+
+  const installEditorAudioRuntime = useCallback((track: EditorAudioTrack, filePath: string, generation: number) => {
+    if (audioPrepareGenerationRef.current !== generation) return;
+    try {
+      const context = ensureAudioContext();
+      const element = new Audio();
+      element.crossOrigin = "anonymous";
+      element.preload = "auto";
+      element.src = `${convertFileSrc(filePath)}?editor-audio=${track.streamIndex}`;
+      const sourceNode = context.createMediaElementSource(element);
+      const gainNode = context.createGain();
+      sourceNode.connect(gainNode);
+      gainNode.connect(context.destination);
+      const currentTrack = mixerRef.current.tracks.find((candidate) => candidate.id === track.id) ?? track;
+      gainNode.gain.value = effectiveTrackGain(currentTrack, mixerRef.current.tracks);
+      const runtime = { element, sourceNode, gainNode };
+      audioRuntimeRef.current.set(track.id, runtime);
+      element.onerror = () => {
+        if (audioRuntimeRef.current.get(track.id) !== runtime) return;
+        audioRuntimeRef.current.delete(track.id);
+        element.pause();
+        sourceNode.disconnect();
+        gainNode.disconnect();
+        const code = element.error?.code;
+        updateMixer((current) => withEditorTrackAvailability(
+          current,
+          track.id,
+          "error",
+          `WebView2 could not decode this prepared audio track${code ? ` (media error ${code})` : ""}.`,
+        ));
+      };
+      updateMixer((current) => withEditorTrackAvailability(current, track.id, "ready"));
+    } catch (cause) {
+      updateMixer((current) => withEditorTrackAvailability(
+        current,
+        track.id,
+        "error",
+        `SlickClip could not initialize this Editor audio track: ${errorMessage(cause)}`,
+      ));
+    }
+  }, [ensureAudioContext, updateMixer]);
+
+  const prepareEditorAudioTrack = useCallback(async (track: EditorAudioTrack, retry = false) => {
+    const generation = audioPrepareGenerationRef.current;
+    const attempt = (audioTrackAttemptRef.current.get(track.id) ?? 0) + 1;
+    audioTrackAttemptRef.current.set(track.id, attempt);
+    updateMixer((current) => withEditorTrackAvailability(current, track.id, "preparing"));
+
+    while (audioPrepareGenerationRef.current === generation && audioTrackAttemptRef.current.get(track.id) === attempt) {
+      try {
+        const response = await invoke<PrepareClipMediaResponse>("prepare_editor_audio_preview", {
+          request: {
+            clipId: clip.id,
+            streamIndex: track.streamIndex,
+            retry,
+            currentTimeSeconds: 0,
+            wasPlaying: false,
+          },
+        });
+        retry = false;
+        if (audioPrepareGenerationRef.current !== generation || audioTrackAttemptRef.current.get(track.id) !== attempt) return;
+        if (response.artifact.state === "ready" && response.artifact.filePath) {
+          installEditorAudioRuntime(track, response.artifact.filePath, generation);
+          return;
+        }
+        if (!response.success || response.artifact.state === "error") {
+          updateMixer((current) => withEditorTrackAvailability(
+            current,
+            track.id,
+            "error",
+            response.errorMessage ?? response.artifact.errorMessage ?? "This Editor audio track could not be prepared.",
+          ));
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 800));
+      } catch (cause) {
+        if (audioPrepareGenerationRef.current === generation && audioTrackAttemptRef.current.get(track.id) === attempt) {
+          updateMixer((current) => withEditorTrackAvailability(
+            current,
+            track.id,
+            "error",
+            `Editor audio preparation failed: ${errorMessage(cause)}`,
+          ));
+        }
+        return;
+      }
+    }
+  }, [clip.id, installEditorAudioRuntime, updateMixer]);
+
+  useEffect(() => {
+    const generation = ++audioPrepareGenerationRef.current;
+    disposeAllEditorAudio();
+    audioTrackAttemptRef.current.clear();
+    const nextMixer = createEditorMixer(clip.audioTracks);
+    replaceMixer(nextMixer);
+    setAudioContextStatus("idle");
+    setAudioRuntimeMessage(null);
+    const initialTelemetry = { maxDriftMs: 0, resyncCount: 0, lastPublishedAtMs: 0 };
+    audioTelemetryRef.current = initialTelemetry;
+    setAudioTelemetry({ maxDriftMs: 0, resyncCount: 0 });
+    for (const track of nextMixer.tracks) void prepareEditorAudioTrack(track);
+
+    return () => {
+      if (audioPrepareGenerationRef.current === generation) audioPrepareGenerationRef.current += 1;
+      audioTrackAttemptRef.current.clear();
+      disposeAllEditorAudio();
+    };
+  }, [clip.audioTracks, disposeAllEditorAudio, prepareEditorAudioTrack, replaceMixer]);
+
+  useEffect(() => {
+    const context = audioContextRef.current;
+    for (const track of mixer.tracks) {
+      const runtime = audioRuntimeRef.current.get(track.id);
+      if (!runtime) continue;
+      const gain = effectiveTrackGain(track, mixer.tracks);
+      if (context && context.state !== "closed") runtime.gainNode.gain.setValueAtTime(gain, context.currentTime);
+      else runtime.gainNode.gain.value = gain;
+    }
+  }, [mixer]);
+
+  const playAudioFollowersAt = useCallback((sourceTimeSeconds: number) => {
+    const generation = audioPrepareGenerationRef.current;
+    seekAudioFollowers(sourceTimeSeconds);
+    const context = audioContextRef.current;
+    let resumePromise: Promise<void> | null = null;
+    try {
+      if (context && context.state !== "running") resumePromise = context.resume();
+    } catch (cause) {
+      setAudioContextStatus("blocked");
+      setAudioRuntimeMessage(`Editor audio could not start: ${errorMessage(cause)}`);
+    }
+
+    const playAttempts = [...audioRuntimeRef.current.values()].map((runtime) => {
+      try {
+        return runtime.element.play();
+      } catch (cause) {
+        return Promise.reject(cause);
+      }
+    });
+    void Promise.allSettled([
+      ...(resumePromise ? [resumePromise] : []),
+      ...playAttempts,
+    ]).then((results) => {
+      if (audioPrepareGenerationRef.current !== generation) return;
+      const failures = results.filter((result) => result.status === "rejected");
+      if (failures.length > 0 || (context && context.state !== "running")) {
+        setAudioContextStatus("blocked");
+        setAudioRuntimeMessage("Editor audio is blocked or suspended. Press Play again to allow audio playback.");
+        return;
+      }
+      if (context) setAudioContextStatus("running");
+      setAudioRuntimeMessage(null);
+    });
+  }, [seekAudioFollowers]);
+
+  const startSynchronizedPlayback = useCallback((video: HTMLVideoElement, sourceTimeSeconds: number) => {
+    playAudioFollowersAt(sourceTimeSeconds);
+    if (video.paused || video.ended) void video.play().catch((cause) => failMedia(errorMessage(cause)));
+  }, [failMedia, playAudioFollowersAt]);
+
+  const readyAudioRuntimeKey = mixer.tracks
+    .filter((track) => track.availability === "ready")
+    .map((track) => track.id)
+    .join("|");
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (readyAudioRuntimeKey && video && !video.paused && !video.ended) {
+      playAudioFollowersAt(video.currentTime);
+    }
+  }, [playAudioFollowersAt, readyAudioRuntimeKey]);
+
+  const monitorAudioDrift = useCallback((videoTimeSeconds: number) => {
+    const telemetry = audioTelemetryRef.current;
+    let corrected = false;
+    for (const runtime of audioRuntimeRef.current.values()) {
+      const audio = runtime.element;
+      if (audio.paused || audio.ended || audio.seeking) continue;
+      const plan = audioDriftCorrectionPlan(videoTimeSeconds, audio.currentTime, AUDIO_DRIFT_THRESHOLD_MS);
+      telemetry.maxDriftMs = Math.max(telemetry.maxDriftMs, plan.driftMs);
+      if (plan.shouldCorrect && plan.correctedTimeSeconds !== null) {
+        audio.currentTime = plan.correctedTimeSeconds;
+        telemetry.resyncCount += 1;
+        corrected = true;
+      }
+    }
+    const now = performance.now();
+    if (corrected || now - telemetry.lastPublishedAtMs >= 500) {
+      telemetry.lastPublishedAtMs = now;
+      setAudioTelemetry({ maxDriftMs: telemetry.maxDriftMs, resyncCount: telemetry.resyncCount });
+    }
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -230,14 +514,18 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
     const video = videoRef.current;
     if (!video) return;
     const sourceTimeSeconds = microsecondsToSeconds(mapping.sourceTimeUs);
+    const shouldPlay = resumePlaying || (!video.paused && !video.ended);
+    seekAudioFollowers(sourceTimeSeconds);
+    if (!shouldPlay) pauseAudioFollowers();
     if (Math.abs(video.currentTime - sourceTimeSeconds) < 0.001 && !video.seeking) {
       pendingSeekRef.current = null;
-      if (resumePlaying && video.paused) void video.play().catch((cause) => failMedia(errorMessage(cause)));
+      if (shouldPlay) startSynchronizedPlayback(video, sourceTimeSeconds);
       return;
     }
-    pendingSeekRef.current = { segmentId: mapping.segmentId, editedTimeUs: mapping.editedTimeUs, resumePlaying };
+    pendingSeekRef.current = { segmentId: mapping.segmentId, editedTimeUs: mapping.editedTimeUs, resumePlaying: shouldPlay };
     video.currentTime = sourceTimeSeconds;
-  }, [failMedia, replaceSession]);
+    if (shouldPlay) startSynchronizedPlayback(video, sourceTimeSeconds);
+  }, [pauseAudioFollowers, replaceSession, seekAudioFollowers, startSynchronizedPlayback]);
 
   function restoreAfterLoad(video: HTMLVideoElement) {
     const mediaDurationSeconds = Number.isFinite(video.duration) && video.duration > 0
@@ -251,11 +539,13 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
     const mapping = editedTimeToSourceTime(nextSession.segments, restoredEditedUs);
     if (mapping) {
       activeSegmentIdRef.current = mapping.segmentId;
-      video.currentTime = microsecondsToSeconds(mapping.sourceTimeUs);
+      const sourceTimeSeconds = microsecondsToSeconds(mapping.sourceTimeUs);
+      video.currentTime = sourceTimeSeconds;
+      seekAudioFollowers(sourceTimeSeconds);
       replaceSession(withEditorPlayheadUs(nextSession, mapping.editedTimeUs));
     }
     pendingRestoreRef.current = { sourceTimeSeconds: 0, play: false };
-    if (restore.play) void video.play().catch(() => updatePlaybackState("paused"));
+    if (restore.play) startSynchronizedPlayback(video, video.currentTime);
     else updatePlaybackState("paused");
   }
 
@@ -274,6 +564,8 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
   }
 
   function seekingStarted() {
+    const video = videoRef.current;
+    if (video) seekAudioFollowers(video.currentTime);
     if (source?.kind !== "Master") return;
     if (seekWatchdogRef.current !== undefined) window.clearTimeout(seekWatchdogRef.current);
     seekWatchdogRef.current = window.setTimeout(() => {
@@ -290,9 +582,15 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
     if (pending) {
       activeSegmentIdRef.current = pending.segmentId;
       replaceSession(withEditorPlayheadUs(sessionRef.current, pending.editedTimeUs));
-      if (pending.resumePlaying && video.paused) void video.play().catch((cause) => failMedia(errorMessage(cause)));
+      seekAudioFollowers(video.currentTime);
+      if (pending.resumePlaying) startSynchronizedPlayback(video, video.currentTime);
+      else pauseAudioFollowers();
       return;
     }
+
+    seekAudioFollowers(video.currentTime);
+    if (!video.paused && !video.ended) playAudioFollowersAt(video.currentTime);
+    else pauseAudioFollowers();
 
     const sourceTimeUs = secondsToMicroseconds(video.currentTime);
     const editedTimeUs = sourceTimeToEditedTime(sessionRef.current.segments, sourceTimeUs);
@@ -346,19 +644,24 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
           resumePlaying,
         };
         replaceSession(withEditorPlayheadUs(current, next.editedStartUs));
-        video.currentTime = microsecondsToSeconds(next.segment.sourceStartUs);
+        const nextSourceTimeSeconds = microsecondsToSeconds(next.segment.sourceStartUs);
+        seekAudioFollowers(nextSourceTimeSeconds);
+        video.currentTime = nextSourceTimeSeconds;
         return;
       }
       editorEndedRef.current = true;
       video.pause();
+      pauseAudioFollowers();
       video.currentTime = microsecondsToSeconds(active.segment.sourceEndUs);
+      seekAudioFollowers(video.currentTime);
       replaceSession(withEditorPlaybackState(withEditorPlayheadUs(current, active.editedEndUs), "ended"));
       return;
     }
 
+    if (!video.paused && !video.ended) monitorAudioDrift(sourceTimeSeconds);
     const editedTimeUs = active.editedStartUs + Math.max(0, sourceTimeUs - active.segment.sourceStartUs);
     replaceSession(withEditorPlayheadUs(current, editedTimeUs));
-  }, [replaceSession]);
+  }, [monitorAudioDrift, pauseAudioFollowers, replaceSession, seekAudioFollowers]);
 
   const stopPlaybackMonitor = useCallback(() => {
     if (playbackFrameRef.current !== undefined) window.cancelAnimationFrame(playbackFrameRef.current);
@@ -380,6 +683,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
     if (!video || mediaStatus === "error" || mediaStatus === "preparingProxy") return;
     if (!video.paused && !video.ended) {
       video.pause();
+      pauseAudioFollowers();
       return;
     }
     const current = sessionRef.current;
@@ -392,6 +696,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
     const current = sessionRef.current;
     if (next === current) return;
     videoRef.current?.pause();
+    pauseAudioFollowers();
     editorEndedRef.current = false;
     replaceSession(next);
     seekVideoToEditedTime(next, next.playheadUs);
@@ -414,6 +719,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
     event.stopPropagation();
     event.currentTarget.setPointerCapture(pointerId);
     videoRef.current?.pause();
+    pauseAudioFollowers();
     selectSegment(segment.id);
     const drag: TrimDrag = {
       pointerId,
@@ -452,7 +758,11 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
     trimDragRef.current = nextDrag;
     setTrimDrag(nextDrag);
     const video = videoRef.current;
-    if (video) video.currentTime = microsecondsToSeconds(sourceTimeUs);
+    if (video) {
+      const sourceTimeSeconds = microsecondsToSeconds(sourceTimeUs);
+      video.currentTime = sourceTimeSeconds;
+      seekAudioFollowers(sourceTimeSeconds);
+    }
   }
 
   function finishTrim(event: ReactPointerEvent<HTMLButtonElement>, commit: boolean) {
@@ -528,6 +838,21 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
   const splitEnabled = canSplitAtPlayhead(session);
   const deleteEnabled = canDeleteSelectedSegment(session);
   const selectedSegment = displaySegments.find((segment) => segment.id === session.selectedSegmentId) ?? null;
+  const readyAudioTrackCount = mixer.tracks.filter((track) => track.availability === "ready").length;
+  const preparingAudioTrackCount = mixer.tracks.filter((track) => track.availability === "preparing").length;
+  const failedAudioTrackCount = mixer.tracks.filter((track) => track.availability === "error" || track.availability === "unavailable").length;
+  const allAudioTracksFailed = mixer.tracks.length > 0 && failedAudioTrackCount === mixer.tracks.length;
+  const mixerStatus = mixer.tracks.length === 0
+    ? "No Editor audio tracks"
+    : allAudioTracksFailed
+      ? "Audio unavailable"
+      : preparingAudioTrackCount > 0
+        ? `Preparing audio tracks (${readyAudioTrackCount}/${mixer.tracks.length} ready)`
+        : audioContextStatus === "blocked"
+          ? "Audio blocked — press Play again"
+          : audioContextStatus === "running"
+            ? "Ready · Audio active"
+            : "Ready · Audio starts when you press Play";
 
   return (
     <div className="page editor-page">
@@ -537,7 +862,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
           <div><h1>Editor</h1><p>{session.source.displayName}</p></div>
         </div>
         <div className="editor-header-status">
-          {session.dirty && <span className="editor-dirty-state">Unsaved edits</span>}
+          {editorDirty && <span className="editor-dirty-state">Unsaved edits</span>}
           <span className="editor-source-safety">Original protected</span>
         </div>
       </header>
@@ -551,25 +876,34 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
               ref={videoRef}
               src={source.url}
               controls
+              muted
               playsInline
               preload="metadata"
               aria-label={`Editor preview for ${session.source.displayName}`}
-              onLoadStart={() => { setMediaStatus("loading"); updatePlaybackState("loading"); }}
+              onLoadStart={() => { pauseAudioFollowers(); setMediaStatus("loading"); updatePlaybackState("loading"); }}
               onLoadedMetadata={(event) => restoreAfterLoad(event.currentTarget)}
               onCanPlay={() => setMediaStatus("ready")}
               onPlay={(event) => {
+                const sourceTimeSeconds = event.currentTarget.currentTime;
                 editorEndedRef.current = false;
                 updatePlaybackState("playing");
+                playAudioFollowersAt(sourceTimeSeconds);
                 startPlaybackMonitor(event.currentTarget);
               }}
               onPause={() => {
                 stopPlaybackMonitor();
+                pauseAudioFollowers();
                 if (!editorEndedRef.current && !videoRef.current?.ended) updatePlaybackState("paused");
               }}
               onEnded={() => {
                 stopPlaybackMonitor();
+                pauseAudioFollowers();
                 const current = sessionRef.current;
                 replaceSession(withEditorPlaybackState(withEditorPlayheadUs(current, totalEditedDurationUs(current.segments)), "ended"));
+              }}
+              onVolumeChange={(event) => {
+                const video = event.currentTarget;
+                if (!video.muted) video.muted = true;
               }}
               onTimeUpdate={(event) => {
                 const sourceTimeSeconds = event.currentTarget.currentTime;
@@ -616,6 +950,80 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
           <div className="editor-source-audio"><span>Saved audio tracks</span><div>{audioTracks.length > 0 ? audioTracks.map((track) => <span key={track.streamIndex}>{audioLabel(track)}</span>) : <small>No audio tracks</small>}</div></div>
           <div className="editor-safety-note"><strong>Shared non-destructive cuts</strong><span>The source MP4 stays unchanged. This timeline will govern video and every saved audio track.</span></div>
         </aside>
+
+        <section className="editor-mixer-panel" aria-labelledby="editor-mixer-heading">
+          <div className="editor-mixer-heading">
+            <div><span className="eyebrow">AUDIO MIXER</span><h2 id="editor-mixer-heading">Editor stems</h2></div>
+            <div className="editor-mixer-actions">
+              <span className={allAudioTracksFailed ? "editor-mixer-status editor-mixer-status-error" : "editor-mixer-status"}>{mixerStatus}</span>
+              <button
+                type="button"
+                onClick={() => updateMixer(resetEditorAudio)}
+                disabled={!isEditorMixerDirty(mixer)}
+                title="Restore all Editor audio tracks to 100%, unmuted, and unsoloed"
+              >Reset Audio</button>
+            </div>
+          </div>
+
+          {mixer.tracks.length > 0 ? <div className="editor-mixer-tracks">
+            {mixer.tracks.map((track) => <div className="editor-mixer-track" key={track.id}>
+              <div className="editor-mixer-track-name">
+                <strong>{track.title}</strong>
+                {track.role === "CombinedFallback" && <small>Combined fallback</small>}
+                <span className={`editor-audio-availability editor-audio-availability-${track.availability}`}>{track.availability}</span>
+              </div>
+              <div className="editor-mixer-toggles">
+                <button
+                  type="button"
+                  className={track.muted ? "editor-mixer-toggle active" : "editor-mixer-toggle"}
+                  aria-label={`Mute ${track.title}`}
+                  aria-pressed={track.muted}
+                  title={`Mute ${track.title}`}
+                  onClick={() => updateMixer((current) => toggleEditorTrackMute(current, track.id))}
+                >M</button>
+                <button
+                  type="button"
+                  className={track.solo ? "editor-mixer-toggle active solo" : "editor-mixer-toggle"}
+                  aria-label={`Solo ${track.title}`}
+                  aria-pressed={track.solo}
+                  title={`Solo ${track.title}`}
+                  onClick={() => updateMixer((current) => toggleEditorTrackSolo(current, track.id))}
+                >S</button>
+              </div>
+              <label className={track.gainPercent > 100 ? "editor-mixer-gain amplified" : "editor-mixer-gain"}>
+                <span className="visually-hidden">{track.title} volume</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="300"
+                  step="1"
+                  value={track.gainPercent}
+                  aria-label={`${track.title} volume`}
+                  aria-valuetext={`${track.gainPercent}%`}
+                  onChange={(event) => {
+                    const gainPercent = Number(event.currentTarget.value);
+                    updateMixer((current) => withEditorTrackGain(current, track.id, gainPercent));
+                  }}
+                />
+                <output>{track.gainPercent}%</output>
+              </label>
+              {track.availability === "error" && <div className="editor-mixer-track-error" role="alert">
+                <span>{track.errorMessage ?? "This track is unavailable."}</span>
+                <button type="button" onClick={() => void prepareEditorAudioTrack(track, true)}>Retry</button>
+              </div>}
+            </div>)}
+          </div> : <p className="editor-mixer-empty">This clip has no saved audio streams available to the Editor.</p>}
+
+          {allAudioTracksFailed && <p className="editor-mixer-error" role="alert">No Editor audio track could be prepared. Video remains muted so SlickClip does not pretend the stem mix is active or silently substitute Combined audio.</p>}
+          {!allAudioTracksFailed && failedAudioTrackCount > 0 && <p className="editor-mixer-warning">{failedAudioTrackCount} track{failedAudioTrackCount === 1 ? " is" : "s are"} unavailable. Ready tracks can still be previewed.</p>}
+          {audioRuntimeMessage && <p className="editor-mixer-warning" role="status">{audioRuntimeMessage}</p>}
+          <div className="editor-audio-diagnostics" aria-label="Editor audio synchronization diagnostics">
+            <span>Video clock authoritative</span>
+            <span>Correction threshold {AUDIO_DRIFT_THRESHOLD_MS} ms</span>
+            <span>Max drift {audioTelemetry.maxDriftMs.toFixed(1)} ms</span>
+            <span>Resyncs {audioTelemetry.resyncCount}</span>
+          </div>
+        </section>
 
         <section className="editor-timeline-panel" aria-labelledby="editor-timeline-heading">
           <div className="editor-timeline-heading">

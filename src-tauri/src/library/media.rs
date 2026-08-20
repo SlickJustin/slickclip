@@ -43,6 +43,7 @@ enum JobKey {
     Thumbnail(String),
     Preview(String),
     Audio(String, u32),
+    EditorAudio(String, u32),
 }
 
 #[derive(Clone)]
@@ -54,6 +55,10 @@ enum CacheJob {
         track: ClipAudioTrack,
         video_source: PathBuf,
     },
+    EditorAudio {
+        clip: CacheClip,
+        track: ClipAudioTrack,
+    },
 }
 
 impl CacheJob {
@@ -62,6 +67,9 @@ impl CacheJob {
             Self::Thumbnail(clip) => JobKey::Thumbnail(clip.id.clone()),
             Self::Preview(clip) => JobKey::Preview(clip.id.clone()),
             Self::Audio { clip, track, .. } => JobKey::Audio(clip.id.clone(), track.stream_index),
+            Self::EditorAudio { clip, track } => {
+                JobKey::EditorAudio(clip.id.clone(), track.stream_index)
+            }
         }
     }
 
@@ -72,6 +80,11 @@ impl CacheJob {
             Self::Audio { clip, track, .. } => {
                 (clip.id.clone(), "audioPreview", Some(track.stream_index))
             }
+            Self::EditorAudio { clip, track } => (
+                clip.id.clone(),
+                "editorAudioPreview",
+                Some(track.stream_index),
+            ),
         };
         CacheChangedEvent {
             clip_id,
@@ -84,7 +97,7 @@ impl CacheJob {
     fn clip_id(&self) -> &str {
         match self {
             Self::Thumbnail(clip) | Self::Preview(clip) => &clip.id,
-            Self::Audio { clip, .. } => &clip.id,
+            Self::Audio { clip, .. } | Self::EditorAudio { clip, .. } => &clip.id,
         }
     }
 }
@@ -333,6 +346,20 @@ impl MediaCacheManager {
         .unwrap_or_else(cache_error)
     }
 
+    pub fn request_editor_audio(
+        &self,
+        clip: CacheClip,
+        track: ClipAudioTrack,
+        retry: bool,
+        app: AppHandle,
+    ) -> CacheArtifactStatus {
+        let paths = match self.editor_audio_paths(&clip.id, track.stream_index) {
+            Ok(value) => value,
+            Err(error) => return cache_error(error),
+        };
+        self.request_artifact(CacheJob::EditorAudio { clip, track }, paths, retry, app)
+    }
+
     pub fn cleanup_clip(&self, clip_id: &str) -> Result<(), String> {
         let id = normalized_clip_id(clip_id)?;
         self.lock_runtime().deleted_clips.insert(id.clone());
@@ -365,7 +392,7 @@ impl MediaCacheManager {
         let key = job.key();
         let fingerprint = match &job {
             CacheJob::Thumbnail(clip) | CacheJob::Preview(clip) => &clip.fingerprint,
-            CacheJob::Audio { clip, .. } => &clip.fingerprint,
+            CacheJob::Audio { clip, .. } | CacheJob::EditorAudio { clip, .. } => &clip.fingerprint,
         };
         let current = self.artifact_status(&paths, fingerprint, &key);
         if current.state == CacheArtifactState::Preparing
@@ -439,7 +466,9 @@ impl MediaCacheManager {
         let senders = runtime.senders.as_ref().expect("cache senders initialized");
         let sender = match key {
             JobKey::Thumbnail(_) => &senders.thumbnails,
-            JobKey::Preview(_) | JobKey::Audio(_, _) => &senders.interactive,
+            JobKey::Preview(_) | JobKey::Audio(_, _) | JobKey::EditorAudio(_, _) => {
+                &senders.interactive
+            }
         };
         match sender.try_send(job) {
             Ok(()) => Ok(()),
@@ -488,6 +517,15 @@ impl MediaCacheManager {
                     "prepare the selected audio track",
                 )
             }
+            CacheJob::EditorAudio { clip, track } => {
+                let paths = self.editor_audio_paths(&clip.id, track.stream_index)?;
+                self.generate(
+                    clip,
+                    &paths,
+                    build_editor_audio_plan(clip, track, paths.partial.clone()),
+                    "prepare an Editor audio stem",
+                )
+            }
         };
         if let Err(error) = &result {
             let (clip, paths) = match job {
@@ -495,6 +533,9 @@ impl MediaCacheManager {
                 CacheJob::Preview(clip) => (clip, self.preview_paths(&clip.id)?),
                 CacheJob::Audio { clip, track, .. } => {
                     (clip, self.audio_paths(&clip.id, track.stream_index)?)
+                }
+                CacheJob::EditorAudio { clip, track } => {
+                    (clip, self.editor_audio_paths(&clip.id, track.stream_index)?)
                 }
             };
             let failure = ArtifactFailure {
@@ -622,6 +663,22 @@ impl MediaCacheManager {
             partial: root.join(format!("audio-{stream_index}.partial.mp4")),
             metadata: root.join(format!("audio-{stream_index}.meta.json")),
             failure: root.join(format!("audio-{stream_index}.error.json")),
+        })
+    }
+
+    fn editor_audio_paths(
+        &self,
+        clip_id: &str,
+        stream_index: u32,
+    ) -> Result<ArtifactPaths, String> {
+        let id = normalized_clip_id(clip_id)?;
+        let root = self.previews_root()?.join(id);
+        fs::create_dir_all(&root).map_err(cache_io_error)?;
+        Ok(ArtifactPaths {
+            artifact: root.join(format!("editor-audio-{stream_index}.m4a")),
+            partial: root.join(format!("editor-audio-{stream_index}.partial.m4a")),
+            metadata: root.join(format!("editor-audio-{stream_index}.meta.json")),
+            failure: root.join(format!("editor-audio-{stream_index}.error.json")),
         })
     }
 
@@ -826,6 +883,51 @@ fn build_audio_preview_plan(
     })
 }
 
+fn build_editor_audio_plan(
+    clip: &CacheClip,
+    track: &ClipAudioTrack,
+    output_path: PathBuf,
+) -> Result<FfmpegCachePlan, String> {
+    clip.track(track.stream_index)?;
+    let mut arguments = os_arguments([
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-nostdin".into(),
+        "-i".into(),
+        clip.master_path.as_os_str().to_os_string(),
+        "-map".into(),
+        format!("0:{}", track.stream_index).into(),
+        "-vn".into(),
+    ]);
+    if track.codec.trim().eq_ignore_ascii_case("aac") {
+        arguments.extend(os_arguments(["-c:a".into(), "copy".into()]));
+    } else {
+        arguments.extend(os_arguments([
+            "-c:a".into(),
+            "aac".into(),
+            "-profile:a".into(),
+            "aac_low".into(),
+            "-b:a".into(),
+            "160k".into(),
+            "-ar".into(),
+            "48000".into(),
+        ]));
+    }
+    arguments.extend(os_arguments([
+        "-metadata:s:a:0".into(),
+        format!("title={}", display_audio_role(track)).into(),
+        "-movflags".into(),
+        "+faststart".into(),
+        "-y".into(),
+        output_path.as_os_str().to_os_string(),
+    ]));
+    Ok(FfmpegCachePlan {
+        arguments,
+        output_path,
+    })
+}
+
 fn display_audio_role(track: &ClipAudioTrack) -> String {
     match track.role.as_str() {
         "VoiceChat" => "Voice Chat".into(),
@@ -959,6 +1061,7 @@ mod tests {
         let id = Uuid::new_v4().to_string();
         let thumbnail = manager.thumbnail_paths(&id).unwrap();
         let preview = manager.preview_paths(&id).unwrap();
+        let editor_audio = manager.editor_audio_paths(&id, 3).unwrap();
         assert_eq!(
             thumbnail.artifact.parent().unwrap(),
             root.join("Thumbnails").canonicalize().unwrap()
@@ -967,8 +1070,14 @@ mod tests {
             preview.artifact.parent().unwrap().parent().unwrap(),
             root.join("Previews").canonicalize().unwrap()
         );
+        assert_eq!(editor_audio.artifact.parent(), preview.artifact.parent());
+        assert_eq!(
+            editor_audio.artifact.file_name().unwrap(),
+            "editor-audio-3.m4a"
+        );
         assert!(manager.thumbnail_paths("../escape").is_err());
         assert!(manager.preview_paths("C:\\escape").is_err());
+        assert!(manager.editor_audio_paths("../escape", 3).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1011,7 +1120,10 @@ mod tests {
         assert!(manager.reserve_for_test(JobKey::Preview(id.clone())));
         assert!(!manager.reserve_for_test(JobKey::Preview(id.clone())));
         assert!(manager.reserve_for_test(JobKey::Thumbnail(id.clone())));
-        assert!(!manager.reserve_for_test(JobKey::Thumbnail(id)));
+        assert!(!manager.reserve_for_test(JobKey::Thumbnail(id.clone())));
+        assert!(manager.reserve_for_test(JobKey::EditorAudio(id.clone(), 3)));
+        assert!(!manager.reserve_for_test(JobKey::EditorAudio(id.clone(), 3)));
+        assert!(manager.reserve_for_test(JobKey::EditorAudio(id, 4)));
     }
 
     #[test]
@@ -1064,6 +1176,79 @@ mod tests {
     }
 
     #[test]
+    fn editor_audio_plan_stream_copies_aac_and_reencodes_other_codecs() {
+        let id = Uuid::new_v4().to_string();
+        let mut source = clip(&id, PathBuf::from("master.mp4"), "hevc");
+        let aac = track(3, "VoiceChat");
+        let copied = string_arguments(
+            &build_editor_audio_plan(&source, &aac, PathBuf::from("editor-audio-3.partial.m4a"))
+                .unwrap(),
+        );
+        assert!(copied.windows(2).any(|pair| pair == ["-map", "0:3"]));
+        assert!(copied.windows(2).any(|pair| pair == ["-c:a", "copy"]));
+        assert!(copied.iter().any(|value| value == "-vn"));
+        assert_eq!(copied.last().unwrap(), "editor-audio-3.partial.m4a");
+
+        let mut opus = track(3, "VoiceChat");
+        opus.codec = "opus".into();
+        source.audio_tracks = vec![opus.clone()];
+        let encoded = string_arguments(
+            &build_editor_audio_plan(&source, &opus, PathBuf::from("editor-audio-3.partial.m4a"))
+                .unwrap(),
+        );
+        assert!(encoded.windows(2).any(|pair| pair == ["-c:a", "aac"]));
+        assert!(encoded.windows(2).any(|pair| pair == ["-ar", "48000"]));
+        assert!(build_editor_audio_plan(
+            &source,
+            &track(99, "Unknown"),
+            PathBuf::from("missing.m4a")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn editor_audio_fingerprint_invalidation_is_stream_specific() {
+        let root = root("editor-audio-fingerprint");
+        let _ = fs::remove_dir_all(&root);
+        let manager = MediaCacheManager::new(root.clone());
+        let id = Uuid::new_v4().to_string();
+        let mut source = clip(&id, root.join("master.mp4"), "hevc");
+        let first = manager.editor_audio_paths(&id, 3).unwrap();
+        let second = manager.editor_audio_paths(&id, 4).unwrap();
+        assert_ne!(first.artifact, second.artifact);
+        fs::write(&first.artifact, b"m4a").unwrap();
+        write_json_atomic(
+            &first.metadata,
+            &ArtifactMetadata {
+                fingerprint: source.fingerprint.clone(),
+                generation_duration_ms: 1.0,
+                file_size_bytes: 3,
+                bitrate_bps: Some(160_000),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            manager
+                .artifact_status(
+                    &first,
+                    &source.fingerprint,
+                    &JobKey::EditorAudio(id.clone(), 3)
+                )
+                .state,
+            CacheArtifactState::Ready
+        );
+        source.fingerprint.file_modified_at_ms += 1;
+        assert_eq!(
+            manager
+                .artifact_status(&first, &source.fingerprint, &JobKey::EditorAudio(id, 3))
+                .state,
+            CacheArtifactState::Missing
+        );
+        assert!(!first.artifact.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn thumbnail_plan_uses_a_representative_bounded_frame_and_safe_output_argument() {
         let id = Uuid::new_v4().to_string();
         let clip = clip(&id, PathBuf::from("master.mp4"), "hevc");
@@ -1094,12 +1279,15 @@ mod tests {
         let manager = MediaCacheManager::new(root.clone());
         let id = Uuid::new_v4().to_string();
         let paths = manager.preview_paths(&id).unwrap();
+        let editor_audio = manager.editor_audio_paths(&id, 3).unwrap();
         fs::write(&paths.artifact, b"preview").unwrap();
+        fs::write(&editor_audio.artifact, b"audio").unwrap();
         let outside = root.with_file_name("stage13-outside-sentinel");
         fs::write(&outside, b"keep").unwrap();
         assert!(manager.cleanup_clip("../outside").is_err());
         manager.cleanup_clip(&id).unwrap();
         assert!(!paths.artifact.exists());
+        assert!(!editor_audio.artifact.exists());
         assert!(outside.exists());
         fs::remove_dir_all(root).unwrap();
         fs::remove_file(outside).unwrap();

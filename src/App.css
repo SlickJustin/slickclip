@@ -1754,6 +1754,7 @@ kbd.hotkey-recording {
 
 .editor-preview-panel,
 .editor-source-panel,
+.editor-mixer-panel,
 .editor-timeline-panel {
   border: 1px solid var(--border);
   border-radius: 9px;
@@ -1871,6 +1872,7 @@ kbd.hotkey-recording {
 }
 
 .editor-source-panel h2,
+.editor-mixer-panel h2,
 .editor-timeline-panel h2 {
   margin: 0;
   font-size: 14px;
@@ -1942,6 +1944,195 @@ kbd.hotkey-recording {
 
 .editor-safety-note strong {
   color: #bdb3ca;
+}
+
+.editor-mixer-panel {
+  grid-column: 1 / -1;
+  padding: 15px 16px 12px;
+}
+
+.editor-mixer-heading,
+.editor-mixer-actions,
+.editor-mixer-toggles,
+.editor-audio-diagnostics {
+  display: flex;
+  align-items: center;
+}
+
+.editor-mixer-heading {
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.editor-mixer-actions {
+  gap: 10px;
+}
+
+.editor-mixer-actions button,
+.editor-mixer-track-error button {
+  padding: 6px 9px;
+  border: 1px solid #4b405b;
+  border-radius: 5px;
+  color: #c9bdd8;
+  background: #27212f;
+  font-size: 9px;
+}
+
+.editor-mixer-actions button:disabled {
+  color: #6f6876;
+  border-color: #37333c;
+  background: #211f24;
+}
+
+.editor-mixer-status {
+  color: #968da1;
+  font-size: 9px;
+}
+
+.editor-mixer-status-error,
+.editor-mixer-track-error,
+.editor-mixer-error {
+  color: #d79aa2;
+}
+
+.editor-mixer-tracks {
+  display: grid;
+  gap: 6px;
+  margin-top: 13px;
+}
+
+.editor-mixer-track {
+  display: grid;
+  grid-template-columns: minmax(150px, .55fr) 66px minmax(250px, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 45px;
+  padding: 7px 9px;
+  border: 1px solid #302c36;
+  border-radius: 6px;
+  background: #18161c;
+}
+
+.editor-mixer-track-name {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 3px 7px;
+  min-width: 0;
+}
+
+.editor-mixer-track-name strong {
+  overflow: hidden;
+  color: #d2ccd7;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-mixer-track-name small {
+  color: #9c87c7;
+  font-size: 8px;
+}
+
+.editor-audio-availability {
+  grid-column: 1 / -1;
+  color: #77717d;
+  font-size: 8px;
+  text-transform: capitalize;
+}
+
+.editor-audio-availability-ready {
+  color: #79aa91;
+}
+
+.editor-audio-availability-error,
+.editor-audio-availability-unavailable {
+  color: #c1848c;
+}
+
+.editor-mixer-toggles {
+  gap: 5px;
+}
+
+.editor-mixer-toggle {
+  width: 28px;
+  height: 27px;
+  padding: 0;
+  border: 1px solid #403a49;
+  border-radius: 5px;
+  color: #89828f;
+  background: #242128;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.editor-mixer-toggle.active {
+  border-color: #7c5fc4;
+  color: #e0d5f8;
+  background: #463568;
+}
+
+.editor-mixer-toggle.active.solo {
+  border-color: #9575e4;
+  background: #5a4388;
+}
+
+.editor-mixer-gain {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) 46px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.editor-mixer-gain input {
+  width: 100%;
+  accent-color: #7452dd;
+}
+
+.editor-mixer-gain output {
+  color: #bdb5c6;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  text-align: right;
+}
+
+.editor-mixer-gain.amplified output {
+  color: #b9a0f5;
+}
+
+.editor-mixer-track-error {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 3px;
+  font-size: 9px;
+}
+
+.editor-mixer-empty,
+.editor-mixer-error,
+.editor-mixer-warning {
+  margin: 12px 0 0;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.editor-mixer-empty,
+.editor-mixer-warning {
+  color: #8f8796;
+}
+
+.editor-audio-diagnostics {
+  flex-wrap: wrap;
+  gap: 5px 13px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid #2a2730;
+  color: #6f6976;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 8px;
 }
 
 .editor-timeline-panel {
@@ -2064,7 +2255,28 @@ kbd.hotkey-recording {
 @media (max-width: 1080px) {
   .editor-workspace { grid-template-columns: 1fr; }
   .editor-source-panel { grid-row: 2; }
-  .editor-timeline-panel { grid-row: 3; }
+  .editor-mixer-panel { grid-row: 3; }
+  .editor-timeline-panel { grid-row: 4; }
+}
+
+@media (max-width: 760px) {
+  .editor-mixer-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .editor-mixer-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .editor-mixer-track {
+    grid-template-columns: minmax(0, 1fr) 66px;
+  }
+
+  .editor-mixer-gain {
+    grid-column: 1 / -1;
+  }
 }
 
 .editor-header-status,
