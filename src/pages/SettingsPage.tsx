@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { AudioCaptureTest } from "../components/AudioCaptureTest";
 import { Toggle } from "../components/Toggle";
 
@@ -7,6 +8,7 @@ type HotkeyState = {
   registered: boolean;
   currentCombination: string;
   lastRegistrationError: string | null;
+  testing: boolean;
 };
 
 type HotkeyCommandResult = {
@@ -19,6 +21,7 @@ const initialHotkeyState: HotkeyState = {
   registered: false,
   currentCombination: "Ctrl + Shift + F10",
   lastRegistrationError: null,
+  testing: false,
 };
 
 type SettingSelectProps = {
@@ -55,6 +58,20 @@ export function SettingsPage() {
   }, []);
 
   useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let disposed = false;
+    void listen<{ success: boolean; message: string }>("save-replay-hotkey-test-result", (event) => {
+      setHotkey((current) => ({ ...current, testing: false }));
+      setHotkeyMessage({ text: event.payload.message, success: event.payload.success });
+    }).then((cleanup) => { if (disposed) cleanup(); else unlisten = cleanup; });
+    return () => {
+      disposed = true;
+      unlisten?.();
+      void invoke("cancel_hotkey_test");
+    };
+  }, []);
+
+  useEffect(() => {
     if (!recordingHotkey) return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -88,6 +105,20 @@ export function SettingsPage() {
       const state = await invoke<HotkeyState>("set_hotkey_recorder_active", { active: true });
       setHotkey(state);
       setRecordingHotkey(true);
+    } catch (error) {
+      setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false });
+    }
+  }
+
+  async function testHotkey() {
+    setHotkeyMessage(null);
+    try {
+      const result = await invoke<HotkeyCommandResult>("begin_hotkey_test");
+      setHotkey(result.state);
+      setHotkeyMessage({
+        text: result.success ? `Press ${result.state.currentCombination}…` : result.errorMessage ?? "The hotkey cannot be tested.",
+        success: result.success,
+      });
     } catch (error) {
       setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false });
     }
@@ -168,6 +199,7 @@ export function SettingsPage() {
               >
                 {recordingHotkey ? "Cancel" : hotkeyPending ? "Registering..." : "Change"}
               </button>
+              <button className="secondary-button" type="button" disabled={!hotkey.registered || recordingHotkey || hotkeyPending || hotkey.testing} onClick={() => void testHotkey()}>{hotkey.testing ? "Listening…" : "Test Hotkey"}</button>
             </div>
           </div>
           {(hotkeyMessage || hotkey.lastRegistrationError) && (

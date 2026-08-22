@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "node --test tests/playerControls.test.ts tests/editorSession.test.ts tests/editorMixer.test.ts tests/editorExport.test.ts",
+    "test": "node --test tests/playerControls.test.ts tests/editorSession.test.ts tests/editorMixer.test.ts tests/editorExport.test.ts tests/watchProgress.test.ts tests/libraryPreferences.test.ts",
     "preview": "vite preview",
     "tauri": "tauri"
   },

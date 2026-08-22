@@ -13,13 +13,17 @@ function App() {
   const [editorClip, setEditorClip] = useState<ClipListItem | null>(null);
   const [editorDirty, setEditorDirty] = useState(false);
   const [exportPlaybackClip, setExportPlaybackClip] = useState<ClipListItem | null>(null);
-  const [hotkeyFeedback, setHotkeyFeedback] = useState<{ success: boolean; message: string } | null>(null);
+  const [toast, setToast] = useState<{ success: boolean; title: string; message: string } | null>(null);
+
+  const showToast = useCallback((title: string, message: string, success: boolean) => {
+    setToast({ title, message, success });
+  }, []);
 
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     let disposed = false;
     void listen<{ success: boolean; message: string }>("save-replay-hotkey-feedback", (event) => {
-      setHotkeyFeedback(event.payload);
+      setToast({ title: event.payload.success ? "Replay save" : "Could not save replay", message: event.payload.message, success: event.payload.success });
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
@@ -31,10 +35,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!hotkeyFeedback) return;
-    const timer = window.setTimeout(() => setHotkeyFeedback(null), 3_500);
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 3_800);
     return () => window.clearTimeout(timer);
-  }, [hotkeyFeedback]);
+  }, [toast]);
 
   const navigate = useCallback((page: PageId) => {
     const leavingDirtyEditor = activePage === "editor" && page !== "editor" && editorDirty;
@@ -65,8 +69,8 @@ function App() {
 
   const pages: Record<PageId, React.ReactNode> = {
     replay: <ReplayPage />,
-    clips: <ClipsPage onEditClip={openEditor} playClip={exportPlaybackClip} onPlayClipConsumed={() => setExportPlaybackClip(null)} />,
-    editor: <EditorPage clip={editorClip} onBackToClips={closeEditor} onPlayExport={playExport} onDirtyChange={setEditorDirty} />,
+    clips: <ClipsPage onEditClip={openEditor} playClip={exportPlaybackClip} onPlayClipConsumed={() => setExportPlaybackClip(null)} onToast={showToast} />,
+    editor: <EditorPage clip={editorClip} onBackToClips={closeEditor} onPlayExport={playExport} onDirtyChange={setEditorDirty} onToast={showToast} />,
     settings: <SettingsPage />,
   };
 
@@ -74,9 +78,9 @@ function App() {
     <div className="app-shell">
       <Sidebar activePage={activePage} onNavigate={navigate} />
       <main className="app-content">{pages[activePage]}</main>
-      {hotkeyFeedback && (
-        <div className={`hotkey-feedback ${hotkeyFeedback.success ? "hotkey-feedback-success" : "hotkey-feedback-error"}`} role="status" aria-live="polite">
-          {hotkeyFeedback.message}
+      {toast && (
+        <div className={`hotkey-feedback ${toast.success ? "hotkey-feedback-success" : "hotkey-feedback-error"}`} role="status" aria-live="polite">
+          <strong>{toast.title}</strong><span>{toast.message}</span>
         </div>
       )}
     </div>

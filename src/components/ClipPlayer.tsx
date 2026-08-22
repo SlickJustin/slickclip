@@ -1,13 +1,21 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import type { ClipActionResponse, ClipListItem, ClipPlaybackInfo, ClipPlaybackInfoResponse, PrepareClipMediaResponse } from "../types/clips";
+import type { ClipActionResponse, ClipListItem, ClipMutationResponse, ClipPlaybackInfo, ClipPlaybackInfoResponse, PrepareClipMediaResponse, UiPreferences, UiPreferencesPatch } from "../types/clips";
 import { errorMessage, formatBytes, formatTime } from "../types/clips";
 import { clampMediaTime, mediaTimeToPercent, planPlaybackSourceSwitch, playbackIntent, playerShortcut, toggledMuteState, volumePlan } from "../utils/playerControls";
+import { addPlayedTime } from "../utils/watchProgress";
 
 type PlayerState = "idle" | "loading" | "playing" | "paused" | "preparingProxy" | "error";
 type PlaybackSource = "Master" | "H264 Proxy";
 type PlayerIconName = "play" | "pause" | "volume" | "muted" | "fullscreen" | "exitFullscreen";
-type Props = { clip: ClipListItem; onClose: () => void };
+type Props = {
+  clip: ClipListItem;
+  preferences: UiPreferences;
+  onPreferencesChange: (patch: UiPreferencesPatch) => Promise<void>;
+  onClipUpdated: (clip: ClipListItem) => void;
+  onCopy: () => void;
+  onClose: () => void;
+};
 type Source = { path: string; kind: PlaybackSource; revision: number };
 
 function PlayerIcon({ name }: { name: PlayerIconName }) {
@@ -19,14 +27,14 @@ function PlayerIcon({ name }: { name: PlayerIconName }) {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v2H6v5H4zm9 0h7v7h-2V6h-5zM4 13h2v5h5v2H4zm14 0h2v7h-7v-2h5z" /></svg>;
 }
 
-export function ClipPlayer({ clip, onClose }: Props) {
+export function ClipPlayer({ clip, preferences, onPreferencesChange, onClipUpdated, onCopy, onClose }: Props) {
   const [info, setInfo] = useState<ClipPlaybackInfo | null>(null);
   const [source, setSource] = useState<Source | null>(null);
   const [playerState, setPlayerState] = useState<PlayerState>("idle");
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(clip.duration100ns / 10_000_000);
-  const [volume, setVolume] = useState(1);
-  const [muted, setMuted] = useState(false);
+  const [volume, setVolume] = useState(preferences.playerVolume);
+  const [muted, setMuted] = useState(preferences.playerMuted);
   const [bufferedPercent, setBufferedPercent] = useState(0);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -45,9 +53,25 @@ export function ClipPlayer({ clip, onClose }: Props) {
   const controlsTimer = useRef<number | undefined>(undefined);
   const currentTimeRef = useRef(0);
   const durationRef = useRef(duration);
-  const volumeRef = useRef(1);
-  const mutedRef = useRef(false);
-  const lastAudibleVolume = useRef(1);
+  const volumeRef = useRef(preferences.playerVolume);
+  const mutedRef = useRef(preferences.playerMuted);
+  const lastAudibleVolume = useRef(preferences.playerLastAudibleVolume);
+  const volumePreferenceTimer = useRef<number | undefined>(undefined);
+  const watchedSeconds = useRef(0);
+  const watchCounted = useRef(false);
+  const lastPlaybackTime = useRef<number | null>(null);
+
+  const persistPlayerState = useCallback((delayMs = 0) => {
+    if (volumePreferenceTimer.current !== undefined) window.clearTimeout(volumePreferenceTimer.current);
+    volumePreferenceTimer.current = window.setTimeout(() => {
+      volumePreferenceTimer.current = undefined;
+      void onPreferencesChange({
+        playerVolume: volumeRef.current,
+        playerMuted: mutedRef.current,
+        playerLastAudibleVolume: lastAudibleVolume.current,
+      });
+    }, delayMs);
+  }, [onPreferencesChange]);
 
   const clearControlsTimer = useCallback(() => {
     if (controlsTimer.current !== undefined) window.clearTimeout(controlsTimer.current);
@@ -91,8 +115,9 @@ export function ClipPlayer({ clip, onClose }: Props) {
     setVolume(next.volume);
     setMuted(next.muted);
     if (videoRef.current) { videoRef.current.volume = next.volume; videoRef.current.muted = next.muted; }
+    persistPlayerState(220);
     showControls();
-  }, [showControls]);
+  }, [persistPlayerState, showControls]);
 
   const toggleMute = useCallback(() => {
     let nextMuted = toggledMuteState(mutedRef.current, volumeRef.current);
@@ -106,8 +131,9 @@ export function ClipPlayer({ clip, onClose }: Props) {
     mutedRef.current = nextMuted;
     setMuted(nextMuted);
     if (videoRef.current) videoRef.current.muted = nextMuted;
+    persistPlayerState();
     showControls();
-  }, [showControls]);
+  }, [persistPlayerState, showControls]);
 
   const toggleFullscreen = useCallback(() => {
     if (document.fullscreenElement) void document.exitFullscreen();
@@ -133,9 +159,15 @@ export function ClipPlayer({ clip, onClose }: Props) {
       mountedRef.current = false;
       generationToken.current += 1;
       if (seekWatchdog.current !== undefined) window.clearTimeout(seekWatchdog.current);
+      if (volumePreferenceTimer.current !== undefined) window.clearTimeout(volumePreferenceTimer.current);
+      void onPreferencesChange({
+        playerVolume: volumeRef.current,
+        playerMuted: mutedRef.current,
+        playerLastAudibleVolume: lastAudibleVolume.current,
+      });
       clearControlsTimer();
     };
-  }, [clearControlsTimer, clip.id]);
+  }, [clearControlsTimer, clip.id, onPreferencesChange]);
 
   const prepareMedia = useCallback(async (retry = false) => {
     if (seekWatchdog.current !== undefined) window.clearTimeout(seekWatchdog.current);
@@ -231,6 +263,7 @@ export function ClipPlayer({ clip, onClose }: Props) {
   }
 
   function seekingStarted() {
+    lastPlaybackTime.current = null;
     if (source?.kind !== "Master") return;
     if (seekWatchdog.current !== undefined) window.clearTimeout(seekWatchdog.current);
     seekWatchdog.current = window.setTimeout(() => {
@@ -244,6 +277,26 @@ export function ClipPlayer({ clip, onClose }: Props) {
   function seekingFinished() {
     if (seekWatchdog.current !== undefined) window.clearTimeout(seekWatchdog.current);
     seekWatchdog.current = undefined;
+    lastPlaybackTime.current = videoRef.current?.currentTime ?? null;
+  }
+
+  function trackMeaningfulPlayback(video: HTMLVideoElement, allowEnded = false) {
+    const current = video.currentTime;
+    const previous = lastPlaybackTime.current;
+    lastPlaybackTime.current = current;
+    if (watchCounted.current || (!allowEnded && video.paused) || video.seeking || previous === null) return;
+    const elapsed = current - previous;
+    if (elapsed <= 0) return;
+    const progress = addPlayedTime(watchedSeconds.current, elapsed, video.duration || durationRef.current, false);
+    watchedSeconds.current = progress.accumulatedSeconds;
+    if (!progress.reachedThreshold) return;
+    watchCounted.current = true;
+    void invoke<ClipMutationResponse>("record_clip_watch_command", { request: { clipId: clip.id } })
+      .then((response) => {
+        if (response.success && response.clip) onClipUpdated(response.clip);
+        else console.warn("SlickClip watch metadata update failed:", response.errorMessage);
+      })
+      .catch((cause) => console.warn("SlickClip watch metadata update failed:", cause));
   }
 
   async function trustedAction(command: "open_clip_file" | "open_clip_folder") {
@@ -279,9 +332,10 @@ export function ClipPlayer({ clip, onClose }: Props) {
             onLoadStart={() => setPlayerState("loading")}
             onLoadedMetadata={(event) => { const mediaDuration = event.currentTarget.duration || durationRef.current; durationRef.current = mediaDuration; setDuration(mediaDuration); restoreAfterLoad(); }}
             onCanPlay={directPlaybackReady}
-            onPlay={() => setPlayerState("playing")}
-            onPause={() => setPlayerState("paused")}
-            onTimeUpdate={(event) => { currentTimeRef.current = event.currentTarget.currentTime; setCurrentTime(event.currentTarget.currentTime); }}
+            onPlay={(event) => { lastPlaybackTime.current = event.currentTarget.currentTime; setPlayerState("playing"); }}
+            onPause={(event) => { trackMeaningfulPlayback(event.currentTarget, true); lastPlaybackTime.current = null; setPlayerState("paused"); }}
+            onEnded={(event) => { trackMeaningfulPlayback(event.currentTarget, true); lastPlaybackTime.current = null; setPlayerState("paused"); }}
+            onTimeUpdate={(event) => { currentTimeRef.current = event.currentTarget.currentTime; setCurrentTime(event.currentTarget.currentTime); trackMeaningfulPlayback(event.currentTarget); }}
             onDurationChange={(event) => { if (Number.isFinite(event.currentTarget.duration)) { durationRef.current = event.currentTarget.duration; setDuration(event.currentTarget.duration); } }}
             onProgress={updateBuffered}
             onSeeking={seekingStarted}
@@ -315,6 +369,7 @@ export function ClipPlayer({ clip, onClose }: Props) {
         </div>
 
         <div className="clip-player-secondary-actions">
+          <button type="button" onClick={onCopy}>Copy Clip</button>
           <button type="button" onClick={() => void prepareMedia()}>Use H.264 Preview</button>
           <button type="button" onClick={() => void trustedAction("open_clip_file")}>Open Externally</button>
           <button type="button" onClick={() => void trustedAction("open_clip_folder")}>Open Folder</button>

@@ -17,6 +17,7 @@ export type ClipListItem = {
   filename: string;
   displayName: string;
   createdAtMs: number;
+  libraryAddedAtMs: number;
   fileModifiedAtMs: number;
   fileSizeBytes: number;
   duration100ns: number;
@@ -35,6 +36,10 @@ export type ClipListItem = {
   importedExistingFile: boolean;
   audioStreamCount: number;
   defaultAudioStreamTitle: string | null;
+  metadataVersion: number;
+  playCount: number;
+  lastWatchedAtMs: number | null;
+  collectionIds: string[];
   audioTracks: ClipAudioTrack[];
 };
 
@@ -65,7 +70,35 @@ export type ClipListResponse = {
   success: boolean;
   clips: ClipListItem[];
   totalCount: number;
+  summary: LibrarySummary | null;
   telemetry: LibraryTelemetry;
+  errorMessage: string | null;
+};
+
+export type LibrarySummary = {
+  clipCount: number;
+  totalSizeBytes: number;
+  favoritesCount: number;
+  collectionsCount: number;
+};
+
+export type CollectionSummary = {
+  id: string;
+  name: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+  clipCount: number;
+};
+
+export type CollectionsResponse = {
+  success: boolean;
+  collections: CollectionSummary[];
+  errorMessage: string | null;
+};
+
+export type CollectionMutationResponse = {
+  success: boolean;
+  collection: CollectionSummary | null;
   errorMessage: string | null;
 };
 
@@ -176,7 +209,43 @@ export type EditorExportCommandResponse = {
   errorMessage: string | null;
 };
 
-export type ClipSortOrder = "newestFirst" | "oldestFirst" | "nameAscending";
+export type ClipSortOrder = "newestFirst" | "oldestFirst" | "nameAscending" | "nameDescending" | "longestFirst" | "shortestFirst" | "largestFirst" | "smallestFirst" | "mostPlayed" | "recentlyWatched";
+export type ClipsView = "all" | "favorites" | "recentlyWatched";
+export type ClipsGridSize = "compact" | "comfortable" | "large";
+
+export type UiPreferences = {
+  schemaVersion: number;
+  playerVolume: number;
+  playerMuted: boolean;
+  playerLastAudibleVolume: number;
+  clipsSort: ClipSortOrder;
+  clipsFavoritesOnly: boolean;
+  clipsView: ClipsView;
+  clipsGridSize: ClipsGridSize;
+  clipsSearchQuery: string;
+  selectedCollectionId: string | null;
+};
+
+export type UiPreferencesResponse = {
+  success: boolean;
+  preferences: UiPreferences;
+  errorMessage: string | null;
+};
+
+export type UiPreferencesPatch = Partial<Omit<UiPreferences, "schemaVersion">>;
+
+export const defaultUiPreferences: UiPreferences = {
+  schemaVersion: 1,
+  playerVolume: 1,
+  playerMuted: false,
+  playerLastAudibleVolume: 1,
+  clipsSort: "newestFirst",
+  clipsFavoritesOnly: false,
+  clipsView: "all",
+  clipsGridSize: "comfortable",
+  clipsSearchQuery: "",
+  selectedCollectionId: null,
+};
 
 export function audioLabel(track: ClipAudioTrack) {
   if (track.role === "VoiceChat") return "Voice Chat";
@@ -205,6 +274,15 @@ export function formatBytes(bytes: number) {
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+export function formatLastWatched(timestampMs: number, nowMs = Date.now()) {
+  const elapsed = Math.max(0, nowMs - timestampMs);
+  if (elapsed < 60_000) return "Watched just now";
+  if (elapsed < 3_600_000) return `Watched ${Math.floor(elapsed / 60_000)}m ago`;
+  if (elapsed < 86_400_000) return `Watched ${Math.floor(elapsed / 3_600_000)}h ago`;
+  if (elapsed < 172_800_000) return "Watched yesterday";
+  return `Watched ${new Date(timestampMs).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
 }
 
 export function errorMessage(cause: unknown) {

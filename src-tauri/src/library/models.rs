@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 1;
+pub const CURRENT_SCHEMA_VERSION: i64 = 2;
 pub const CLIP_METADATA_VERSION: i64 = 1;
 
 #[derive(Clone, Debug, Serialize)]
@@ -46,6 +46,9 @@ pub struct ClipListItem {
     pub audio_stream_count: u32,
     pub default_audio_stream_title: Option<String>,
     pub metadata_version: i64,
+    pub play_count: u64,
+    pub last_watched_at_ms: Option<i64>,
+    pub collection_ids: Vec<String>,
     pub audio_tracks: Vec<ClipAudioTrack>,
 }
 
@@ -56,6 +59,13 @@ pub enum ClipSortOrder {
     NewestFirst,
     OldestFirst,
     NameAscending,
+    NameDescending,
+    LongestFirst,
+    ShortestFirst,
+    LargestFirst,
+    SmallestFirst,
+    MostPlayed,
+    RecentlyWatched,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -65,6 +75,10 @@ pub struct ClipListRequest {
     pub search_text: Option<String>,
     #[serde(default)]
     pub favorites_only: bool,
+    #[serde(default)]
+    pub recently_watched_only: bool,
+    #[serde(default)]
+    pub collection_id: Option<String>,
     #[serde(default)]
     pub sort_order: ClipSortOrder,
     #[serde(default = "default_limit")]
@@ -86,8 +100,75 @@ impl ClipListRequest {
             .take()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+        self.collection_id = self
+            .collection_id
+            .take()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         self
     }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySummary {
+    pub clip_count: u64,
+    pub total_size_bytes: u64,
+    pub favorites_count: u64,
+    pub collections_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionSummary {
+    pub id: String,
+    pub name: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub clip_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionsResponse {
+    pub success: bool,
+    pub collections: Vec<CollectionSummary>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionMutationResponse {
+    pub success: bool,
+    pub collection: Option<CollectionSummary>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCollectionRequest {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameCollectionRequest {
+    pub collection_id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionIdRequest {
+    pub collection_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetClipCollectionRequest {
+    pub clip_id: String,
+    pub collection_id: String,
+    pub included: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -143,6 +224,7 @@ pub struct ClipListResponse {
     pub success: bool,
     pub clips: Vec<ClipListItem>,
     pub total_count: u64,
+    pub summary: Option<LibrarySummary>,
     pub telemetry: LibraryTelemetry,
     pub error_message: Option<String>,
 }

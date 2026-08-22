@@ -1662,6 +1662,9 @@ mod tests {
             default_audio_stream_title: Some("Combined".into()),
             metadata_version: 1,
             audio_tracks,
+            play_count: 0,
+            last_watched_at_ms: None,
+            collection_ids: Vec::new(),
         }
     }
 

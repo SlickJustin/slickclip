@@ -86,6 +86,7 @@ type Props = {
   onBackToClips: () => void;
   onPlayExport: (clip: ClipListItem) => void;
   onDirtyChange: (dirty: boolean) => void;
+  onToast: (title: string, message: string, success: boolean) => void;
 };
 type PendingSeek = { segmentId: string; editedTimeUs: number; resumePlaying: boolean };
 type EditorAudioRuntime = {
@@ -108,7 +109,7 @@ type TrimDrag = {
   previewSegments: readonly EditorSegment[];
 };
 
-export function EditorPage({ clip, onBackToClips, onPlayExport, onDirtyChange }: Props) {
+export function EditorPage({ clip, onBackToClips, onPlayExport, onDirtyChange, onToast }: Props) {
   if (!clip) {
     return (
       <div className="page editor-page">
@@ -126,10 +127,10 @@ export function EditorPage({ clip, onBackToClips, onPlayExport, onDirtyChange }:
     );
   }
 
-  return <ActiveEditor key={clip.id} clip={clip} onBackToClips={onBackToClips} onPlayExport={onPlayExport} onDirtyChange={onDirtyChange} />;
+  return <ActiveEditor key={clip.id} clip={clip} onBackToClips={onBackToClips} onPlayExport={onPlayExport} onDirtyChange={onDirtyChange} onToast={onToast} />;
 }
 
-function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange }: { clip: ClipListItem; onBackToClips: () => void; onPlayExport: (clip: ClipListItem) => void; onDirtyChange: (dirty: boolean) => void }) {
+function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToast }: { clip: ClipListItem; onBackToClips: () => void; onPlayExport: (clip: ClipListItem) => void; onDirtyChange: (dirty: boolean) => void; onToast: (title: string, message: string, success: boolean) => void }) {
   const [session, setSession] = useState<EditorSession>(() => createEditorSession(clip));
   const [playbackInfo, setPlaybackInfo] = useState<ClipPlaybackInfo | null>(null);
   const [source, setSource] = useState<EditorMediaSource | null>(null);
@@ -282,6 +283,18 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange }: { cl
       request: { clipId: exportedClip.id },
     });
     if (!response.success) setExportCommandError(response.errorMessage ?? "Could not open the export folder.");
+  }
+
+  async function copyExport() {
+    const exportedClip = exportUi.status?.outputClip;
+    if (!exportedClip) return;
+    try {
+      const response = await invoke<ClipActionResponse>("copy_clip_to_clipboard", { request: { clipId: exportedClip.id } });
+      if (!response.success) throw new Error(response.errorMessage ?? "The Windows clipboard rejected the clip.");
+      onToast("Clip copied", "Paste it into Discord with Ctrl+V.", true);
+    } catch (cause) {
+      onToast("Could not copy clip", errorMessage(cause), false);
+    }
   }
 
   const seekAudioFollowers = useCallback((sourceTimeSeconds: number) => {
@@ -1000,6 +1013,7 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange }: { cl
           <p>{exportStatus.indexingWarning ?? "The verified H.264 clip is now in your Clips Library."}</p>
           <div>
             {exportStatus.outputClip && <><button className="primary-button" type="button" onClick={() => onPlayExport(exportStatus.outputClip!)}>Play Export</button>
+            <button className="secondary-button" type="button" onClick={() => void copyExport()}>Copy Clip</button>
             <button className="secondary-button" type="button" onClick={() => void openExportFolder()}>Open Folder</button></>}
             <button className="secondary-button" type="button" onClick={onBackToClips}>Back to Clips</button>
           </div>

@@ -1,3 +1,4 @@
+pub(crate) mod clipboard;
 mod database;
 pub(crate) mod export;
 mod media;
@@ -19,9 +20,10 @@ use uuid::Uuid;
 pub use export::EditorExportManager;
 pub use models::{
     ClipActionResponse, ClipAudioTrack, ClipIdRequest, ClipListRequest, ClipListResponse,
-    ClipMutationResponse, ClipPlaybackInfo, ClipPlaybackInfoResponse, LibraryTelemetry,
+    ClipMutationResponse, ClipPlaybackInfo, ClipPlaybackInfoResponse, CollectionIdRequest,
+    CollectionMutationResponse, CollectionsResponse, CreateCollectionRequest, LibraryTelemetry,
     PrepareClipAudioRequest, PrepareClipMediaRequest, PrepareClipMediaResponse, ReconcileResponse,
-    RenameClipRequest, SetFavoriteRequest,
+    RenameClipRequest, RenameCollectionRequest, SetClipCollectionRequest, SetFavoriteRequest,
 };
 
 use database::LibraryDatabase;
@@ -29,8 +31,9 @@ use media::{media_response, CacheClip, MediaCacheManager};
 use models::{ClipListItem, ClipUpsert, ReconciliationTelemetry};
 use reconcile::{reconcile, FfprobeMediaInspector};
 use repository::{
-    count_clips, delete_clip_row, get_clip, list_clips as query_clips, rename_display_name,
-    set_favorite, upsert_clip,
+    count_clips, create_collection, delete_clip_row, delete_collection, get_clip, library_summary,
+    list_clips as query_clips, list_collections, record_clip_watch, rename_collection,
+    rename_display_name, set_clip_collection, set_favorite, upsert_clip,
 };
 use safety::validate_owned_clip;
 
@@ -201,16 +204,19 @@ impl ClipLibraryManager {
 
     fn list(&self, request: ClipListRequest) -> ClipListResponse {
         let started = Instant::now();
-        let result = self
-            .database()
-            .and_then(|database| query_clips(&database.open()?, request));
+        let result = self.database().and_then(|database| {
+            let connection = database.open()?;
+            let (clips, total_count) = query_clips(&connection, request)?;
+            Ok((clips, total_count, library_summary(&connection)?))
+        });
         let elapsed = started.elapsed().as_secs_f64() * 1_000.0;
         self.lock_telemetry().last_list_query_duration_ms = Some(elapsed);
         match result {
-            Ok((clips, total_count)) => ClipListResponse {
+            Ok((clips, total_count, summary)) => ClipListResponse {
                 success: true,
                 clips,
                 total_count,
+                summary: Some(summary),
                 telemetry: self.telemetry_snapshot(),
                 error_message: None,
             },
@@ -218,6 +224,7 @@ impl ClipLibraryManager {
                 success: false,
                 clips: Vec::new(),
                 total_count: 0,
+                summary: None,
                 telemetry: self.telemetry_snapshot(),
                 error_message: Some(error),
             },
@@ -267,6 +274,72 @@ impl ClipLibraryManager {
         self.mutate_clip(&request.clip_id, |connection| {
             set_favorite(connection, &request.clip_id, request.favorite)
         })
+    }
+
+    fn record_watch(&self, clip_id: &str) -> ClipMutationResponse {
+        let result = self
+            .database()
+            .and_then(|database| record_clip_watch(&database.open()?, clip_id, now_ms()));
+        mutation_result(result)
+    }
+
+    fn collections(&self) -> CollectionsResponse {
+        match self
+            .database()
+            .and_then(|database| list_collections(&database.open()?))
+        {
+            Ok(collections) => CollectionsResponse {
+                success: true,
+                collections,
+                error_message: None,
+            },
+            Err(error) => CollectionsResponse {
+                success: false,
+                collections: Vec::new(),
+                error_message: Some(error),
+            },
+        }
+    }
+
+    fn create_collection(&self, request: CreateCollectionRequest) -> CollectionMutationResponse {
+        let result = validate_collection_name(&request.name).and_then(|name| {
+            let database = self.database()?;
+            create_collection(
+                &database.open()?,
+                &Uuid::new_v4().to_string(),
+                &name,
+                now_ms(),
+            )
+        });
+        collection_mutation_result(result)
+    }
+
+    fn rename_collection(&self, request: RenameCollectionRequest) -> CollectionMutationResponse {
+        let result = validate_collection_name(&request.name).and_then(|name| {
+            let database = self.database()?;
+            rename_collection(&database.open()?, &request.collection_id, &name, now_ms())
+        });
+        collection_mutation_result(result)
+    }
+
+    fn delete_collection(&self, collection_id: &str) -> ClipActionResponse {
+        action_result(
+            self.database()
+                .and_then(|database| delete_collection(&database.open()?, collection_id)),
+        )
+    }
+
+    fn set_collection_membership(&self, request: SetClipCollectionRequest) -> ClipMutationResponse {
+        let result = self.database().and_then(|database| {
+            set_clip_collection(
+                &database.open()?,
+                &request.clip_id,
+                &request.collection_id,
+                request.included,
+                now_ms(),
+            )
+        });
+        mutation_result(result)
     }
 
     fn rename(&self, request: RenameClipRequest) -> ClipMutationResponse {
@@ -546,6 +619,49 @@ fn mutation_error(error: impl Into<String>) -> ClipMutationResponse {
     }
 }
 
+fn collection_mutation_result(
+    result: Result<models::CollectionSummary, String>,
+) -> CollectionMutationResponse {
+    match result {
+        Ok(collection) => CollectionMutationResponse {
+            success: true,
+            collection: Some(collection),
+            error_message: None,
+        },
+        Err(error) => CollectionMutationResponse {
+            success: false,
+            collection: None,
+            error_message: Some(error),
+        },
+    }
+}
+
+fn validate_collection_name(value: &str) -> Result<String, String> {
+    let name = value.trim();
+    if name.is_empty() {
+        return Err("Collection names cannot be empty.".to_string());
+    }
+    if name.chars().count() > 80 {
+        return Err("Collection names may not exceed 80 characters.".to_string());
+    }
+    Ok(name.to_string())
+}
+
+#[cfg(test)]
+mod stage18_tests {
+    use super::validate_collection_name;
+
+    #[test]
+    fn collection_names_are_trimmed_unicode_and_bounded() {
+        assert_eq!(
+            validate_collection_name("  Funny 雪  ").unwrap(),
+            "Funny 雪"
+        );
+        assert!(validate_collection_name("   ").is_err());
+        assert!(validate_collection_name(&"x".repeat(81)).is_err());
+    }
+}
+
 fn action_result(result: Result<(), String>) -> ClipActionResponse {
     match result {
         Ok(()) => ClipActionResponse {
@@ -596,6 +712,71 @@ pub async fn list_clips(
     tauri::async_runtime::spawn_blocking(move || manager.list(request))
         .await
         .map_err(|error| format!("The Clips query worker failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn list_collections_command(
+    manager: State<'_, ClipLibraryManager>,
+) -> Result<CollectionsResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.collections())
+        .await
+        .map_err(|error| format!("The collections query worker failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn create_collection_command(
+    manager: State<'_, ClipLibraryManager>,
+    request: CreateCollectionRequest,
+) -> Result<CollectionMutationResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.create_collection(request))
+        .await
+        .map_err(|error| format!("The collection creation worker failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn rename_collection_command(
+    manager: State<'_, ClipLibraryManager>,
+    request: RenameCollectionRequest,
+) -> Result<CollectionMutationResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.rename_collection(request))
+        .await
+        .map_err(|error| format!("The collection rename worker failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn delete_collection_command(
+    manager: State<'_, ClipLibraryManager>,
+    request: CollectionIdRequest,
+) -> Result<ClipActionResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.delete_collection(&request.collection_id))
+        .await
+        .map_err(|error| format!("The collection deletion worker failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn set_clip_collection_membership(
+    manager: State<'_, ClipLibraryManager>,
+    request: SetClipCollectionRequest,
+) -> Result<ClipMutationResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.set_collection_membership(request))
+        .await
+        .map_err(|error| format!("The collection membership worker failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn record_clip_watch_command(
+    manager: State<'_, ClipLibraryManager>,
+    request: ClipIdRequest,
+) -> Result<ClipMutationResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.record_watch(&request.clip_id))
+        .await
+        .map_err(|error| format!("The watch update worker failed: {error}"))
 }
 
 #[tauri::command]
@@ -963,6 +1144,6 @@ mod tests {
 
     #[test]
     fn schema_version_constant_is_current() {
-        assert_eq!(CURRENT_SCHEMA_VERSION, 1);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 2);
     }
 }

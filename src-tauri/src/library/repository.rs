@@ -5,7 +5,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, Tra
 
 use super::models::{
     ClipAudioTrack, ClipFingerprint, ClipListItem, ClipListRequest, ClipSortOrder, ClipUpsert,
-    CLIP_METADATA_VERSION,
+    CollectionSummary, LibrarySummary, CLIP_METADATA_VERSION,
 };
 
 pub fn upsert_clip(connection: &mut Connection, clip: &ClipUpsert) -> Result<String, String> {
@@ -151,6 +151,13 @@ pub fn list_clips(
     if request.favorites_only {
         clauses.push("favorite = 1".to_string());
     }
+    if request.recently_watched_only {
+        clauses.push("last_watched_at_ms IS NOT NULL".to_string());
+    }
+    if let Some(collection_id) = request.collection_id {
+        clauses.push("EXISTS (SELECT 1 FROM clip_collections cc WHERE cc.clip_id = clips.id AND cc.collection_id = ?)".to_string());
+        values.push(Value::Text(collection_id));
+    }
     let where_sql = if clauses.is_empty() {
         String::new()
     } else {
@@ -166,6 +173,13 @@ pub fn list_clips(
         ClipSortOrder::NewestFirst => "created_at_ms DESC, id DESC",
         ClipSortOrder::OldestFirst => "created_at_ms ASC, id ASC",
         ClipSortOrder::NameAscending => "display_name COLLATE NOCASE ASC, created_at_ms DESC",
+        ClipSortOrder::NameDescending => "display_name COLLATE NOCASE DESC, created_at_ms DESC",
+        ClipSortOrder::LongestFirst => "duration_100ns DESC, created_at_ms DESC",
+        ClipSortOrder::ShortestFirst => "duration_100ns ASC, created_at_ms DESC",
+        ClipSortOrder::LargestFirst => "file_size_bytes DESC, created_at_ms DESC",
+        ClipSortOrder::SmallestFirst => "file_size_bytes ASC, created_at_ms DESC",
+        ClipSortOrder::MostPlayed => "play_count DESC, last_watched_at_ms DESC, created_at_ms DESC",
+        ClipSortOrder::RecentlyWatched => "last_watched_at_ms DESC, created_at_ms DESC",
     };
     let sql = format!(
         "SELECT id, file_path, filename, display_name, created_at_ms, library_added_at_ms,
@@ -173,7 +187,7 @@ pub fn list_clips(
                 width, height, fps_numerator, fps_denominator, video_codec, video_profile,
                 video_bitrate_bps, total_bitrate_bps, capture_target_label, capture_target_type,
                 favorite, imported_existing_file, audio_stream_count, default_audio_stream_title,
-                metadata_version
+                metadata_version, play_count, last_watched_at_ms
          FROM clips{where_sql} ORDER BY {order} LIMIT ? OFFSET ?"
     );
     let mut query_values = values;
@@ -187,6 +201,7 @@ pub fn list_clips(
         .collect::<Result<Vec<_>, _>>()
         .map_err(database_error)?;
     load_audio_tracks(connection, &mut clips)?;
+    load_collection_ids(connection, &mut clips)?;
     Ok((clips, u64::try_from(total).unwrap_or(0)))
 }
 
@@ -198,7 +213,7 @@ pub fn get_clip(connection: &Connection, clip_id: &str) -> Result<Option<ClipLis
                     width, height, fps_numerator, fps_denominator, video_codec, video_profile,
                     video_bitrate_bps, total_bitrate_bps, capture_target_label, capture_target_type,
                     favorite, imported_existing_file, audio_stream_count, default_audio_stream_title,
-                    metadata_version
+                    metadata_version, play_count, last_watched_at_ms
              FROM clips WHERE id = ?1",
         )
         .map_err(database_error)?;
@@ -210,6 +225,7 @@ pub fn get_clip(connection: &Connection, clip_id: &str) -> Result<Option<ClipLis
         return Ok(None);
     };
     load_audio_tracks(connection, std::slice::from_mut(&mut clip))?;
+    load_collection_ids(connection, std::slice::from_mut(&mut clip))?;
     Ok(Some(clip))
 }
 
@@ -295,6 +311,154 @@ pub fn count_clips(connection: &Connection) -> Result<u64, String> {
     Ok(u64::try_from(value).unwrap_or(0))
 }
 
+pub fn library_summary(connection: &Connection) -> Result<LibrarySummary, String> {
+    connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(file_size_bytes), 0),
+                    COALESCE(SUM(CASE WHEN favorite = 1 THEN 1 ELSE 0 END), 0),
+                    (SELECT COUNT(*) FROM collections)
+             FROM clips",
+            [],
+            |row| {
+                Ok(LibrarySummary {
+                    clip_count: from_i64(row.get(0)?),
+                    total_size_bytes: from_i64(row.get(1)?),
+                    favorites_count: from_i64(row.get(2)?),
+                    collections_count: from_i64(row.get(3)?),
+                })
+            },
+        )
+        .map_err(database_error)
+}
+
+pub fn record_clip_watch(
+    connection: &Connection,
+    clip_id: &str,
+    watched_at_ms: i64,
+) -> Result<ClipListItem, String> {
+    require_one(
+        connection
+            .execute(
+                "UPDATE clips SET play_count = play_count + 1, last_watched_at_ms = ?1 WHERE id = ?2",
+                params![watched_at_ms, clip_id],
+            )
+            .map_err(database_error)?,
+        clip_id,
+    )?;
+    get_clip(connection, clip_id)?
+        .ok_or_else(|| "The watched clip disappeared from the Library.".to_string())
+}
+
+pub fn list_collections(connection: &Connection) -> Result<Vec<CollectionSummary>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT c.id, c.name, c.created_at_ms, c.updated_at_ms, COUNT(cc.clip_id)
+             FROM collections c LEFT JOIN clip_collections cc ON cc.collection_id = c.id
+             GROUP BY c.id ORDER BY c.name COLLATE NOCASE ASC",
+        )
+        .map_err(database_error)?;
+    let collections = statement
+        .query_map([], map_collection_row)
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)?;
+    Ok(collections)
+}
+
+pub fn get_collection(
+    connection: &Connection,
+    collection_id: &str,
+) -> Result<Option<CollectionSummary>, String> {
+    connection
+        .query_row(
+            "SELECT c.id, c.name, c.created_at_ms, c.updated_at_ms, COUNT(cc.clip_id)
+             FROM collections c LEFT JOIN clip_collections cc ON cc.collection_id = c.id
+             WHERE c.id = ?1 GROUP BY c.id",
+            [collection_id],
+            map_collection_row,
+        )
+        .optional()
+        .map_err(database_error)
+}
+
+pub fn create_collection(
+    connection: &Connection,
+    id: &str,
+    name: &str,
+    now_ms: i64,
+) -> Result<CollectionSummary, String> {
+    connection
+        .execute(
+            "INSERT INTO collections(id, name, created_at_ms, updated_at_ms) VALUES(?1, ?2, ?3, ?3)",
+            params![id, name, now_ms],
+        )
+        .map_err(collection_database_error)?;
+    get_collection(connection, id)?
+        .ok_or_else(|| "The created collection could not be loaded.".to_string())
+}
+
+pub fn rename_collection(
+    connection: &Connection,
+    collection_id: &str,
+    name: &str,
+    now_ms: i64,
+) -> Result<CollectionSummary, String> {
+    let changed = connection
+        .execute(
+            "UPDATE collections SET name = ?1, updated_at_ms = ?2 WHERE id = ?3",
+            params![name, now_ms, collection_id],
+        )
+        .map_err(collection_database_error)?;
+    if changed != 1 {
+        return Err(format!("No collection exists with ID '{collection_id}'."));
+    }
+    get_collection(connection, collection_id)?
+        .ok_or_else(|| "The renamed collection could not be loaded.".to_string())
+}
+
+pub fn delete_collection(connection: &Connection, collection_id: &str) -> Result<(), String> {
+    let changed = connection
+        .execute("DELETE FROM collections WHERE id = ?1", [collection_id])
+        .map_err(database_error)?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(format!("No collection exists with ID '{collection_id}'."))
+    }
+}
+
+pub fn set_clip_collection(
+    connection: &Connection,
+    clip_id: &str,
+    collection_id: &str,
+    included: bool,
+    now_ms: i64,
+) -> Result<ClipListItem, String> {
+    if get_clip(connection, clip_id)?.is_none() {
+        return Err(format!("No library clip exists with ID '{clip_id}'."));
+    }
+    if get_collection(connection, collection_id)?.is_none() {
+        return Err(format!("No collection exists with ID '{collection_id}'."));
+    }
+    if included {
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO clip_collections(clip_id, collection_id, added_at_ms) VALUES(?1, ?2, ?3)",
+                params![clip_id, collection_id, now_ms],
+            )
+            .map_err(database_error)?;
+    } else {
+        connection
+            .execute(
+                "DELETE FROM clip_collections WHERE clip_id = ?1 AND collection_id = ?2",
+                params![clip_id, collection_id],
+            )
+            .map_err(database_error)?;
+    }
+    get_clip(connection, clip_id)?
+        .ok_or_else(|| "The updated clip disappeared from the Library.".to_string())
+}
+
 fn load_audio_tracks(connection: &Connection, clips: &mut [ClipListItem]) -> Result<(), String> {
     if clips.is_empty() {
         return Ok(());
@@ -350,6 +514,40 @@ fn load_audio_tracks(connection: &Connection, clips: &mut [ClipListItem]) -> Res
     Ok(())
 }
 
+fn load_collection_ids(connection: &Connection, clips: &mut [ClipListItem]) -> Result<(), String> {
+    if clips.is_empty() {
+        return Ok(());
+    }
+    let ids = clips
+        .iter()
+        .enumerate()
+        .map(|(index, clip)| (clip.id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT clip_id, collection_id FROM clip_collections WHERE clip_id IN ({placeholders}) ORDER BY collection_id"
+    );
+    let parameters = ids
+        .keys()
+        .map(|id| Value::Text(id.clone()))
+        .collect::<Vec<_>>();
+    let mut statement = connection.prepare(&sql).map_err(database_error)?;
+    let rows = statement
+        .query_map(params_from_iter(parameters.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(database_error)?;
+    for row in rows {
+        let (clip_id, collection_id) = row.map_err(database_error)?;
+        if let Some(index) = ids.get(&clip_id) {
+            clips[*index].collection_ids.push(collection_id);
+        }
+    }
+    Ok(())
+}
+
 fn map_clip_row(row: &Row<'_>) -> rusqlite::Result<ClipListItem> {
     Ok(ClipListItem {
         id: row.get(0)?,
@@ -379,7 +577,20 @@ fn map_clip_row(row: &Row<'_>) -> rusqlite::Result<ClipListItem> {
         audio_stream_count: u32::try_from(row.get::<_, i64>(22)?).unwrap_or(0),
         default_audio_stream_title: row.get(23)?,
         metadata_version: row.get(24)?,
+        play_count: from_i64(row.get(25)?),
+        last_watched_at_ms: row.get(26)?,
+        collection_ids: Vec::new(),
         audio_tracks: Vec::new(),
+    })
+}
+
+fn map_collection_row(row: &Row<'_>) -> rusqlite::Result<CollectionSummary> {
+    Ok(CollectionSummary {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        created_at_ms: row.get(2)?,
+        updated_at_ms: row.get(3)?,
+        clip_count: from_i64(row.get(4)?),
     })
 }
 
@@ -408,6 +619,15 @@ fn from_i64(value: i64) -> u64 {
 
 fn database_error(error: rusqlite::Error) -> String {
     format!("Clips database operation failed: {error}")
+}
+
+fn collection_database_error(error: rusqlite::Error) -> String {
+    if matches!(error, rusqlite::Error::SqliteFailure(ref value, _) if value.extended_code == 2067)
+    {
+        "A collection with that name already exists.".to_string()
+    } else {
+        database_error(error)
+    }
 }
 
 #[cfg(test)]
@@ -550,5 +770,133 @@ mod tests {
         assert!(saved.favorite);
         assert_eq!(saved.display_name, "Persistent Name");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn collections_watch_sort_filters_cascades_and_summary_compose() {
+        let (mut connection, _) = LibraryDatabase::initialize_in_memory().unwrap();
+        let mut first = clip("first", "C:/Clips/first.mp4", 1);
+        first.display_name = "GTA Snow 雪".into();
+        first.file_size_bytes = 125;
+        first.duration_100ns = 50_000_000;
+        let mut second = clip("second", "C:/Clips/second.mp4", 2);
+        second.file_size_bytes = 250;
+        second.duration_100ns = 100_000_000;
+        let mut third = clip("third", "C:/Clips/third.mp4", 3);
+        third.file_size_bytes = 500;
+        upsert_clip(&mut connection, &first).unwrap();
+        upsert_clip(&mut connection, &second).unwrap();
+        upsert_clip(&mut connection, &third).unwrap();
+        set_favorite(&connection, "first", true).unwrap();
+
+        create_collection(&connection, "funny", "Funny 雪", 10).unwrap();
+        create_collection(&connection, "best", "Best Clips", 11).unwrap();
+        assert!(create_collection(&connection, "duplicate", "FUNNY 雪", 12).is_err());
+        set_clip_collection(&connection, "first", "funny", true, 20).unwrap();
+        set_clip_collection(&connection, "first", "best", true, 21).unwrap();
+        set_clip_collection(&connection, "second", "funny", true, 22).unwrap();
+        set_clip_collection(&connection, "first", "funny", true, 23).unwrap();
+        let membership_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM clip_collections WHERE clip_id='first'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(membership_count, 2);
+
+        let (composed, _) = list_clips(
+            &connection,
+            ClipListRequest {
+                search_text: Some("gta".into()),
+                favorites_only: true,
+                collection_id: Some("funny".into()),
+                sort_order: ClipSortOrder::NameDescending,
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            composed
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["first"]
+        );
+        assert_eq!(composed[0].collection_ids.len(), 2);
+
+        let watched_once = record_clip_watch(&connection, "second", 100).unwrap();
+        assert_eq!(watched_once.play_count, 1);
+        assert_eq!(watched_once.last_watched_at_ms, Some(100));
+        record_clip_watch(&connection, "second", 200).unwrap();
+        record_clip_watch(&connection, "first", 300).unwrap();
+        let (most_played, _) = list_clips(
+            &connection,
+            ClipListRequest {
+                sort_order: ClipSortOrder::MostPlayed,
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(most_played[0].id, "second");
+        let (recent, total) = list_clips(
+            &connection,
+            ClipListRequest {
+                recently_watched_only: true,
+                sort_order: ClipSortOrder::RecentlyWatched,
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(recent[0].id, "first");
+
+        let totals = library_summary(&connection).unwrap();
+        assert_eq!(totals.clip_count, 3);
+        assert_eq!(totals.total_size_bytes, 875);
+        assert_eq!(totals.favorites_count, 1);
+        assert_eq!(totals.collections_count, 2);
+
+        rename_collection(&connection, "funny", "Funny Stuff", 400).unwrap();
+        assert_eq!(
+            get_clip(&connection, "first")
+                .unwrap()
+                .unwrap()
+                .collection_ids
+                .len(),
+            2
+        );
+        set_clip_collection(&connection, "first", "best", false, 401).unwrap();
+        assert_eq!(
+            get_clip(&connection, "first")
+                .unwrap()
+                .unwrap()
+                .collection_ids,
+            ["funny"]
+        );
+        delete_collection(&connection, "funny").unwrap();
+        assert!(get_clip(&connection, "first").unwrap().is_some());
+        assert!(get_clip(&connection, "first")
+            .unwrap()
+            .unwrap()
+            .collection_ids
+            .is_empty());
+
+        set_clip_collection(&connection, "second", "best", true, 500).unwrap();
+        delete_clip_row(&mut connection, "second").unwrap();
+        let orphan_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM clip_collections WHERE clip_id='second'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_count, 0);
+        let totals = library_summary(&connection).unwrap();
+        assert_eq!(totals.clip_count, 2);
+        assert_eq!(totals.total_size_bytes, 625);
     }
 }

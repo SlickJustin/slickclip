@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -8,6 +9,7 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 use crate::clips::{ClipSaveManager, SaveJobState};
 
 pub const DEFAULT_SAVE_REPLAY_HOTKEY: &str = "Ctrl + Shift + F10";
+const HOTKEY_TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,6 +17,7 @@ pub struct HotkeyState {
     pub registered: bool,
     pub current_combination: String,
     pub last_registration_error: Option<String>,
+    pub testing: bool,
 }
 
 #[derive(Serialize)]
@@ -33,6 +36,25 @@ struct HotkeySaveFeedback {
     save_state: SaveJobState,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HotkeyTestFeedback {
+    success: bool,
+    message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShortcutAction {
+    Ignore,
+    SaveReplay,
+    TestSucceeded,
+}
+
+struct ActiveTest {
+    generation: u64,
+    deadline: Instant,
+}
+
 struct ParsedHotkey {
     normalized: String,
     shortcut: Shortcut,
@@ -42,6 +64,8 @@ struct HotkeyInner {
     state: HotkeyState,
     shortcut: Shortcut,
     recorder_active: bool,
+    active_test: Option<ActiveTest>,
+    next_test_generation: u64,
 }
 
 pub struct SaveReplayHotkeyManager {
@@ -58,9 +82,12 @@ impl SaveReplayHotkeyManager {
                     registered: false,
                     current_combination: parsed.normalized,
                     last_registration_error: None,
+                    testing: false,
                 },
                 shortcut: parsed.shortcut,
                 recorder_active: false,
+                active_test: None,
+                next_test_generation: 1,
             }),
         }
     }
@@ -95,6 +122,9 @@ impl SaveReplayHotkeyManager {
     pub fn set_recorder_active(&self, active: bool) -> HotkeyState {
         let mut inner = self.lock();
         inner.recorder_active = active;
+        if active {
+            clear_test(&mut inner);
+        }
         inner.state.clone()
     }
 
@@ -104,6 +134,7 @@ impl SaveReplayHotkeyManager {
             Err(error) => {
                 let mut inner = self.lock();
                 inner.recorder_active = false;
+                clear_test(&mut inner);
                 return HotkeyCommandResult {
                     success: false,
                     state: inner.state.clone(),
@@ -113,6 +144,7 @@ impl SaveReplayHotkeyManager {
         };
 
         let mut inner = self.lock();
+        clear_test(&mut inner);
         if parsed.shortcut == inner.shortcut && inner.state.registered {
             inner.recorder_active = false;
             inner.state.last_registration_error = None;
@@ -156,6 +188,7 @@ impl SaveReplayHotkeyManager {
             registered: true,
             current_combination: parsed.normalized,
             last_registration_error: None,
+            testing: false,
         };
         HotkeyCommandResult {
             success: true,
@@ -164,13 +197,87 @@ impl SaveReplayHotkeyManager {
         }
     }
 
-    pub fn should_handle(&self, shortcut: &Shortcut) -> bool {
-        let inner = self.lock();
-        inner.state.registered && !inner.recorder_active && shortcut == &inner.shortcut
+    fn shortcut_action(&self, shortcut: &Shortcut, now: Instant) -> ShortcutAction {
+        let mut inner = self.lock();
+        if !inner.state.registered || inner.recorder_active || shortcut != &inner.shortcut {
+            return ShortcutAction::Ignore;
+        }
+        if let Some(test) = inner.active_test.take() {
+            inner.state.testing = false;
+            if now <= test.deadline {
+                return ShortcutAction::TestSucceeded;
+            }
+        }
+        ShortcutAction::SaveReplay
+    }
+
+    fn begin_test(&self, timeout: Duration) -> (HotkeyCommandResult, Option<u64>) {
+        let mut inner = self.lock();
+        if !inner.state.registered {
+            let message = inner
+                .state
+                .last_registration_error
+                .clone()
+                .unwrap_or_else(|| "The Save Replay hotkey is not registered.".to_string());
+            return (
+                HotkeyCommandResult {
+                    success: false,
+                    state: inner.state.clone(),
+                    error_message: Some(message),
+                },
+                None,
+            );
+        }
+        if inner.recorder_active {
+            return (
+                HotkeyCommandResult {
+                    success: false,
+                    state: inner.state.clone(),
+                    error_message: Some(
+                        "Finish recording the new shortcut before testing it.".to_string(),
+                    ),
+                },
+                None,
+            );
+        }
+        let generation = inner.next_test_generation;
+        inner.next_test_generation = inner.next_test_generation.wrapping_add(1).max(1);
+        inner.active_test = Some(ActiveTest {
+            generation,
+            deadline: Instant::now() + timeout,
+        });
+        inner.state.testing = true;
+        (
+            HotkeyCommandResult {
+                success: true,
+                state: inner.state.clone(),
+                error_message: None,
+            },
+            Some(generation),
+        )
+    }
+
+    fn expire_test(&self, generation: u64) -> bool {
+        let mut inner = self.lock();
+        let matches = inner
+            .active_test
+            .as_ref()
+            .is_some_and(|test| test.generation == generation && Instant::now() >= test.deadline);
+        if matches {
+            clear_test(&mut inner);
+        }
+        matches
+    }
+
+    pub fn cancel_test(&self) -> HotkeyState {
+        let mut inner = self.lock();
+        clear_test(&mut inner);
+        inner.state.clone()
     }
 
     pub fn unregister(&self, app: &AppHandle) {
         let mut inner = self.lock();
+        clear_test(&mut inner);
         if inner.state.registered {
             if let Err(error) = app.global_shortcut().unregister(inner.shortcut) {
                 inner.state.last_registration_error = Some(format!(
@@ -183,6 +290,11 @@ impl SaveReplayHotkeyManager {
     }
 }
 
+fn clear_test(inner: &mut HotkeyInner) {
+    inner.active_test = None;
+    inner.state.testing = false;
+}
+
 pub fn handle_global_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
     if state != ShortcutState::Pressed {
         return;
@@ -190,8 +302,19 @@ pub fn handle_global_shortcut(app: &AppHandle, shortcut: &Shortcut, state: Short
     let Some(hotkey) = app.try_state::<SaveReplayHotkeyManager>() else {
         return;
     };
-    if !hotkey.should_handle(shortcut) {
-        return;
+    match hotkey.shortcut_action(shortcut, Instant::now()) {
+        ShortcutAction::Ignore => return,
+        ShortcutAction::TestSucceeded => {
+            let _ = app.emit(
+                "save-replay-hotkey-test-result",
+                HotkeyTestFeedback {
+                    success: true,
+                    message: "Hotkey detected ✓".to_string(),
+                },
+            );
+            return;
+        }
+        ShortcutAction::SaveReplay => {}
     }
     let Some(save_manager) = app.try_state::<ClipSaveManager>() else {
         return;
@@ -236,6 +359,38 @@ pub fn set_hotkey_recorder_active(
     active: bool,
 ) -> HotkeyState {
     manager.set_recorder_active(active)
+}
+
+#[tauri::command]
+pub fn begin_hotkey_test(
+    app: AppHandle,
+    manager: tauri::State<'_, SaveReplayHotkeyManager>,
+) -> HotkeyCommandResult {
+    let (result, generation) = manager.begin_test(HOTKEY_TEST_TIMEOUT);
+    if let Some(generation) = generation {
+        std::thread::spawn(move || {
+            std::thread::sleep(HOTKEY_TEST_TIMEOUT);
+            let Some(manager) = app.try_state::<SaveReplayHotkeyManager>() else {
+                return;
+            };
+            if manager.expire_test(generation) {
+                let _ = app.emit(
+                    "save-replay-hotkey-test-result",
+                    HotkeyTestFeedback {
+                        success: false,
+                        message: "Hotkey not detected. Check the binding or possible conflicts."
+                            .to_string(),
+                    },
+                );
+            }
+        });
+    }
+    result
+}
+
+#[tauri::command]
+pub fn cancel_hotkey_test(manager: tauri::State<'_, SaveReplayHotkeyManager>) -> HotkeyState {
+    manager.cancel_test()
 }
 
 fn format_registration_error(combination: &str, error: impl std::fmt::Display) -> String {
@@ -380,7 +535,11 @@ fn parse_key(input: &str) -> Result<(String, Code), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_hotkey, SaveReplayHotkeyManager, DEFAULT_SAVE_REPLAY_HOTKEY};
+    use std::time::{Duration, Instant};
+
+    use super::{
+        parse_hotkey, SaveReplayHotkeyManager, ShortcutAction, DEFAULT_SAVE_REPLAY_HOTKEY,
+    };
 
     #[test]
     fn default_hotkey_is_valid() {
@@ -413,21 +572,74 @@ mod tests {
         assert!(parse_hotkey("Ctrl + MediaPlayPause").is_err());
     }
 
-    #[test]
-    fn recorder_state_suppresses_the_registered_shortcut_without_os_input() {
+    fn manager_with_registered_default() -> (SaveReplayHotkeyManager, super::ParsedHotkey) {
         let manager = SaveReplayHotkeyManager::new();
         let parsed = parse_hotkey(DEFAULT_SAVE_REPLAY_HOTKEY).unwrap();
-        assert!(!manager.should_handle(&parsed.shortcut));
-
         {
             let mut inner = manager.lock();
             inner.state.registered = true;
         }
-        assert!(manager.should_handle(&parsed.shortcut));
+        (manager, parsed)
+    }
+
+    #[test]
+    fn recorder_state_suppresses_the_registered_shortcut_without_os_input() {
+        let (manager, parsed) = manager_with_registered_default();
+        assert_eq!(
+            manager.shortcut_action(&parsed.shortcut, Instant::now()),
+            ShortcutAction::SaveReplay
+        );
 
         manager.set_recorder_active(true);
-        assert!(!manager.should_handle(&parsed.shortcut));
+        assert_eq!(
+            manager.shortcut_action(&parsed.shortcut, Instant::now()),
+            ShortcutAction::Ignore
+        );
         manager.set_recorder_active(false);
-        assert!(manager.should_handle(&parsed.shortcut));
+        assert_eq!(
+            manager.shortcut_action(&parsed.shortcut, Instant::now()),
+            ShortcutAction::SaveReplay
+        );
+    }
+
+    #[test]
+    fn successful_test_consumes_exactly_one_shortcut_press() {
+        let (manager, parsed) = manager_with_registered_default();
+        let (result, _) = manager.begin_test(Duration::from_secs(10));
+        assert!(result.success);
+        assert!(result.state.testing);
+        assert_eq!(
+            manager.shortcut_action(&parsed.shortcut, Instant::now()),
+            ShortcutAction::TestSucceeded
+        );
+        assert_eq!(
+            manager.shortcut_action(&parsed.shortcut, Instant::now()),
+            ShortcutAction::SaveReplay
+        );
+    }
+
+    #[test]
+    fn wrong_shortcut_does_not_complete_test_and_cancel_clears_it() {
+        let (manager, _) = manager_with_registered_default();
+        let wrong = parse_hotkey("Ctrl + Shift + F9").unwrap();
+        manager.begin_test(Duration::from_secs(10));
+        assert_eq!(
+            manager.shortcut_action(&wrong.shortcut, Instant::now()),
+            ShortcutAction::Ignore
+        );
+        assert!(manager.state().testing);
+        assert!(!manager.cancel_test().testing);
+    }
+
+    #[test]
+    fn timeout_clears_test_and_restores_normal_save_behavior() {
+        let (manager, parsed) = manager_with_registered_default();
+        let (_, generation) = manager.begin_test(Duration::ZERO);
+        assert!(manager.expire_test(generation.unwrap()));
+        assert!(!manager.state().testing);
+        assert_eq!(
+            manager.shortcut_action(&parsed.shortcut, Instant::now()),
+            ShortcutAction::SaveReplay
+        );
     }
 }

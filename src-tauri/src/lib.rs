@@ -3,6 +3,7 @@ mod capture;
 mod clips;
 mod hotkey;
 mod library;
+mod preferences;
 mod replay;
 
 use tauri::Manager;
@@ -25,15 +26,12 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            let replay_root = app.path().app_local_data_dir()?.join("ReplayBuffer");
+            let app_data = app.path().app_local_data_dir()?;
+            let replay_root = app_data.join("ReplayBuffer");
             let replay_manager =
                 replay::ReplayBufferManager::new(replay_root).map_err(std::io::Error::other)?;
             let clips_directory = app.path().video_dir()?.join("JustIn Replay").join("Clips");
-            let library_database = app
-                .path()
-                .app_local_data_dir()?
-                .join("Library")
-                .join("clips.db");
+            let library_database = app_data.join("Library").join("clips.db");
             let clip_library =
                 library::ClipLibraryManager::initialize(library_database, clips_directory.clone());
             clip_library.start_initial_reconciliation(app.handle().clone());
@@ -57,6 +55,9 @@ pub fn run() {
                 .join("DevTests")
                 .join("Audio");
             app.manage(audio::AudioCaptureTestManager::new(audio_tests_directory));
+            app.manage(preferences::UiPreferencesManager::initialize(
+                app_data.join("Preferences").join("ui-preferences.json"),
+            ));
             app.manage(hotkey::SaveReplayHotkeyManager::new());
             app.state::<hotkey::SaveReplayHotkeyManager>()
                 .register_initial(app.handle());
@@ -81,6 +82,7 @@ pub fn run() {
             library::open_clip_file,
             library::open_clip_folder,
             library::delete_clip,
+            library::clipboard::copy_clip_to_clipboard,
             library::get_clip_playback_info,
             library::request_clip_thumbnail,
             library::prepare_clip_preview,
@@ -89,9 +91,19 @@ pub fn run() {
             library::export::start_editor_export,
             library::export::cancel_editor_export,
             library::export::get_editor_export_status,
+            library::list_collections_command,
+            library::create_collection_command,
+            library::rename_collection_command,
+            library::delete_collection_command,
+            library::set_clip_collection_membership,
+            library::record_clip_watch_command,
             hotkey::get_save_replay_hotkey,
             hotkey::set_save_replay_hotkey,
             hotkey::set_hotkey_recorder_active,
+            hotkey::begin_hotkey_test,
+            hotkey::cancel_hotkey_test,
+            preferences::get_ui_preferences,
+            preferences::update_ui_preferences,
             audio::list_audio_microphones,
             audio::list_application_audio_processes,
             audio::get_process_loopback_capability,
