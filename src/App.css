@@ -1708,6 +1708,124 @@ kbd.hotkey-recording {
   text-transform: uppercase;
 }
 
+.editor-export-button {
+  min-width: 92px;
+  padding: 7px 12px;
+  font-size: 10px;
+}
+
+.editor-export-status {
+  margin: -4px 0 14px;
+  padding: 12px 14px;
+  border: 1px solid #453959;
+  border-radius: 8px;
+  color: #aaa2b1;
+  background: linear-gradient(135deg, #211b2a, #1b1920);
+  font-size: 10px;
+}
+
+.editor-export-status-complete {
+  border-color: #3f6b58;
+  background: linear-gradient(135deg, #19251f, #1a1c1d);
+}
+
+.editor-export-status-failed {
+  border-color: #6c3f46;
+}
+
+.editor-export-status-cancelled {
+  border-color: #514958;
+}
+
+.editor-export-status-heading,
+.editor-export-status-heading > div,
+.editor-export-success > div {
+  display: flex;
+  align-items: center;
+}
+
+.editor-export-status-heading {
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.editor-export-status-heading > div {
+  gap: 9px;
+}
+
+.editor-export-status-heading strong {
+  color: #ddd4e7;
+  font-size: 11px;
+}
+
+.editor-export-status-heading span {
+  color: #968ca1;
+}
+
+.editor-export-progress {
+  height: 5px;
+  margin-top: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #302b36;
+}
+
+.editor-export-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #6543c5, #9a78ed);
+  transition: width .18s ease-out;
+}
+
+.editor-export-status p {
+  margin: 9px 0 0;
+  color: #918996;
+}
+
+.editor-export-error {
+  color: #d5979f !important;
+}
+
+.editor-export-success > div {
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.editor-export-success button {
+  padding: 6px 10px;
+  font-size: 9px;
+}
+
+.editor-export-diagnostics {
+  margin-top: 10px;
+  color: #7d7584;
+}
+
+.editor-export-diagnostics summary {
+  cursor: pointer;
+}
+
+.editor-export-diagnostics code {
+  display: block;
+  margin-top: 5px;
+  color: #8e8598;
+  font-size: 8px;
+  white-space: normal;
+}
+
+.editor-export-filter-plan {
+  max-height: 92px;
+  overflow: auto;
+  word-break: break-word;
+}
+
+.editor-mixer-toggle:disabled,
+.editor-mixer-gain input:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
 .editor-empty-state {
   display: flex;
   min-height: 420px;

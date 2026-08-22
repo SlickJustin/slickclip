@@ -8,8 +8,26 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import type { ClipListItem, ClipPlaybackInfo, ClipPlaybackInfoResponse, PrepareClipMediaResponse } from "../types/clips";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+  ClipActionResponse,
+  ClipListItem,
+  ClipPlaybackInfo,
+  ClipPlaybackInfoResponse,
+  EditorExportCommandResponse,
+  EditorExportStatus,
+  PrepareClipMediaResponse,
+} from "../types/clips";
 import { audioLabel, errorMessage } from "../types/clips";
+import {
+  adoptEditorExportStatus,
+  applyEditorExportEvent,
+  areEditorControlsLocked,
+  createEditorExportUiState,
+  isEditorExportActive,
+  requestEditorExportCancellation,
+  snapshotEditorExport,
+} from "../utils/editorExport";
 import { isEditableShortcutTarget, mediaTimeToPercent } from "../utils/playerControls";
 import {
   AUDIO_DRIFT_THRESHOLD_MS,
@@ -66,6 +84,7 @@ type EditorMediaSource = { path: string; url: string; kind: "Master" | "H264 Pro
 type Props = {
   clip: ClipListItem | null;
   onBackToClips: () => void;
+  onPlayExport: (clip: ClipListItem) => void;
   onDirtyChange: (dirty: boolean) => void;
 };
 type PendingSeek = { segmentId: string; editedTimeUs: number; resumePlaying: boolean };
@@ -89,7 +108,7 @@ type TrimDrag = {
   previewSegments: readonly EditorSegment[];
 };
 
-export function EditorPage({ clip, onBackToClips, onDirtyChange }: Props) {
+export function EditorPage({ clip, onBackToClips, onPlayExport, onDirtyChange }: Props) {
   if (!clip) {
     return (
       <div className="page editor-page">
@@ -107,10 +126,10 @@ export function EditorPage({ clip, onBackToClips, onDirtyChange }: Props) {
     );
   }
 
-  return <ActiveEditor key={clip.id} clip={clip} onBackToClips={onBackToClips} onDirtyChange={onDirtyChange} />;
+  return <ActiveEditor key={clip.id} clip={clip} onBackToClips={onBackToClips} onPlayExport={onPlayExport} onDirtyChange={onDirtyChange} />;
 }
 
-function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListItem; onBackToClips: () => void; onDirtyChange: (dirty: boolean) => void }) {
+function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange }: { clip: ClipListItem; onBackToClips: () => void; onPlayExport: (clip: ClipListItem) => void; onDirtyChange: (dirty: boolean) => void }) {
   const [session, setSession] = useState<EditorSession>(() => createEditorSession(clip));
   const [playbackInfo, setPlaybackInfo] = useState<ClipPlaybackInfo | null>(null);
   const [source, setSource] = useState<EditorMediaSource | null>(null);
@@ -121,6 +140,9 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
   const [audioContextStatus, setAudioContextStatus] = useState<AudioContextStatus>("idle");
   const [audioRuntimeMessage, setAudioRuntimeMessage] = useState<string | null>(null);
   const [audioTelemetry, setAudioTelemetry] = useState<AudioSyncTelemetry>({ maxDriftMs: 0, resyncCount: 0 });
+  const [exportUi, setExportUi] = useState(createEditorExportUiState);
+  const [exportCommandError, setExportCommandError] = useState<string | null>(null);
+  const exportActive = areEditorControlsLocked(exportUi);
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineLaneRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
@@ -164,6 +186,32 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
   useEffect(() => { onDirtyChange(editorDirty); }, [editorDirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
 
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let disposed = false;
+    const acceptStatus = (status: EditorExportStatus) => {
+      if (status.sourceClipId !== clip.id) return;
+      setExportUi((current) => {
+        if (current.status?.exportId) return applyEditorExportEvent(current, status);
+        return isEditorExportActive(status) ? adoptEditorExportStatus(status) : current;
+      });
+    };
+    void listen<EditorExportStatus>("editor-export-status", (event) => acceptStatus(event.payload))
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      });
+    void invoke<EditorExportStatus>("get_editor_export_status")
+      .then((status) => {
+        if (!disposed) acceptStatus(status);
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [clip.id]);
+
   const updatePlaybackState = useCallback((state: EditorPlaybackState) => {
     setSession((current) => {
       const next = withEditorPlaybackState(current, state);
@@ -192,6 +240,49 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
   const pauseAudioFollowers = useCallback(() => {
     for (const runtime of audioRuntimeRef.current.values()) runtime.element.pause();
   }, []);
+
+  async function startEditorExport() {
+    if (exportActive) return;
+    videoRef.current?.pause();
+    pauseAudioFollowers();
+    setExportCommandError(null);
+    const request = snapshotEditorExport(clip.id, sessionRef.current.segments, mixerRef.current);
+    try {
+      const response = await invoke<EditorExportCommandResponse>("start_editor_export", { request });
+      if (response.status.sourceClipId === clip.id) {
+        setExportUi(adoptEditorExportStatus(response.status));
+      }
+      if (!response.success) {
+        setExportCommandError(response.errorMessage ?? "Could not start the Editor export.");
+      }
+    } catch (cause) {
+      setExportCommandError(`Could not start the Editor export: ${errorMessage(cause)}`);
+    }
+  }
+
+  async function cancelEditorExport() {
+    const exportId = exportUi.status?.exportId;
+    if (!exportId || !exportActive) return;
+    setExportUi(requestEditorExportCancellation);
+    setExportCommandError(null);
+    try {
+      const response = await invoke<EditorExportCommandResponse>("cancel_editor_export", { exportId });
+      if (!response.success) {
+        setExportCommandError(response.errorMessage ?? "Could not cancel the Editor export.");
+      }
+    } catch (cause) {
+      setExportCommandError(`Could not cancel the Editor export: ${errorMessage(cause)}`);
+    }
+  }
+
+  async function openExportFolder() {
+    const exportedClip = exportUi.status?.outputClip;
+    if (!exportedClip) return;
+    const response = await invoke<ClipActionResponse>("open_clip_folder", {
+      request: { clipId: exportedClip.id },
+    });
+    if (!response.success) setExportCommandError(response.errorMessage ?? "Could not open the export folder.");
+  }
 
   const seekAudioFollowers = useCallback((sourceTimeSeconds: number) => {
     const safeTimeSeconds = Number.isFinite(sourceTimeSeconds) ? Math.max(0, sourceTimeSeconds) : 0;
@@ -679,6 +770,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
   }, [stopPlaybackMonitor, synchronizePlaybackPosition]);
 
   function togglePlayback() {
+    if (exportActive) return;
     const video = videoRef.current;
     if (!video || mediaStatus === "error" || mediaStatus === "preparingProxy") return;
     if (!video.paused && !video.ended) {
@@ -693,6 +785,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
   }
 
   function applyEdit(next: EditorSession) {
+    if (exportActive) return;
     const current = sessionRef.current;
     if (next === current) return;
     videoRef.current?.pause();
@@ -703,14 +796,17 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
   }
 
   function seekEditedTimeline(requestedTimeUs: number) {
+    if (exportActive) return;
     seekVideoToEditedTime(sessionRef.current, requestedTimeUs, false);
   }
 
   function selectSegment(segmentId: string) {
+    if (exportActive) return;
     replaceSession(selectEditorSegment(sessionRef.current, segmentId));
   }
 
   function beginTrim(event: ReactPointerEvent<HTMLButtonElement>, segment: EditorSegment, edge: EditorTrimEdge) {
+    if (exportActive) return;
     const laneWidth = timelineLaneRef.current?.getBoundingClientRect().width ?? 0;
     if (laneWidth <= 0) return;
     const pointerId = event.pointerId;
@@ -737,6 +833,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
   }
 
   function moveTrim(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (exportActive) return;
     const pointerId = event.pointerId;
     const clientX = event.clientX;
     const drag = trimDragRef.current;
@@ -789,12 +886,14 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
   }
 
   function confirmReset() {
+    if (exportActive) return;
     if (!sessionRef.current.dirty) return;
     if (window.confirm("Reset all timeline edits to the full source clip?")) applyEdit(resetEditorEdits(sessionRef.current));
   }
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
+      if (exportActive) return;
       const target = event.target as HTMLElement | null;
       if (isEditableShortcutTarget(target?.tagName, Boolean(target?.isContentEditable))) return;
       if (target?.tagName === "BUTTON") return;
@@ -853,6 +952,18 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
           : audioContextStatus === "running"
             ? "Ready · Audio active"
             : "Ready · Audio starts when you press Play";
+  const exportStatus = exportUi.status;
+  const exportPhaseLabel = exportStatus ? ({
+    idle: "Ready to export",
+    preparing: "Preparing export",
+    rendering: "Rendering",
+    verifying: "Verifying output",
+    finalizing: "Adding to Clips",
+    complete: "Export complete",
+    failed: "Export failed",
+    cancelled: "Export cancelled",
+  } as const)[exportStatus.phase] : null;
+  const exportProgress = Math.max(0, Math.min(100, exportStatus?.progressPercent ?? 0));
 
   return (
     <div className="page editor-page">
@@ -864,8 +975,44 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
         <div className="editor-header-status">
           {editorDirty && <span className="editor-dirty-state">Unsaved edits</span>}
           <span className="editor-source-safety">Original protected</span>
+          <button
+            className="primary-button editor-export-button"
+            type="button"
+            disabled={exportActive || session.segments.length === 0}
+            onClick={() => void startEditorExport()}
+          >{exportActive ? "Exporting..." : "Export Clip"}</button>
         </div>
       </header>
+
+      {(exportStatus || exportCommandError) && <section className={`editor-export-status editor-export-status-${exportStatus?.phase ?? "failed"}`} aria-live="polite">
+        <div className="editor-export-status-heading">
+          <div>
+            <strong>{exportPhaseLabel ?? "Could not export clip"}</strong>
+            {exportActive && <span>{exportUi.cancellationRequested ? "Stopping the owned FFmpeg process..." : `${exportProgress.toFixed(0)}%`}</span>}
+            {exportStatus?.phase === "complete" && <span>{exportStatus.outputDisplayName}</span>}
+          </div>
+          {exportActive && <button className="secondary-button" type="button" disabled={exportUi.cancellationRequested} onClick={() => void cancelEditorExport()}>{exportUi.cancellationRequested ? "Cancelling..." : "Cancel Export"}</button>}
+        </div>
+        {exportActive && <div className="editor-export-progress" role="progressbar" aria-label="Editor export progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(exportProgress)}><span style={{ width: `${exportProgress}%` }} /></div>}
+        {(exportStatus?.phase === "failed" || exportCommandError) && <p className="editor-export-error" role="alert">{exportCommandError ?? exportStatus?.errorMessage ?? "Could not export clip."}</p>}
+        {exportStatus?.phase === "cancelled" && <p>The partial export was removed. The source clip and editable session are unchanged.</p>}
+        {exportStatus?.phase === "complete" && <div className="editor-export-success">
+          <p>{exportStatus.indexingWarning ?? "The verified H.264 clip is now in your Clips Library."}</p>
+          <div>
+            {exportStatus.outputClip && <><button className="primary-button" type="button" onClick={() => onPlayExport(exportStatus.outputClip!)}>Play Export</button>
+            <button className="secondary-button" type="button" onClick={() => void openExportFolder()}>Open Folder</button></>}
+            <button className="secondary-button" type="button" onClick={onBackToClips}>Back to Clips</button>
+          </div>
+        </div>}
+        {exportStatus && <details className="editor-export-diagnostics">
+          <summary>Export diagnostics</summary>
+          <code>Phase {exportStatus.phase} · planned {exportStatus.plannedDurationUs ? formatEditorTimeUs(exportStatus.plannedDurationUs) : "pending"} · verified {exportStatus.verifiedDurationUs ? formatEditorTimeUs(exportStatus.verifiedDurationUs) : "pending"}</code>
+          <code>Encoder {exportStatus.encoder ?? "probing"}{exportStatus.encoderHardware === null ? "" : exportStatus.encoderHardware ? " · hardware" : " · software"}{exportStatus.encoderSettings ? ` · ${exportStatus.encoderSettings}` : ""}</code>
+          <code>Attempts {exportStatus.attemptedEncoders.join(" → ") || "pending"}</code>
+          {exportStatus.filterPlan && <code className="editor-export-filter-plan">{exportStatus.filterPlan}</code>}
+          {exportStatus.diagnostics.map((diagnostic, index) => <code key={index}>{diagnostic}</code>)}
+        </details>}
+      </section>}
 
       <div className="editor-workspace">
         <section className="editor-preview-panel" aria-label="Editor video preview">
@@ -875,7 +1022,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
               key={`${source.kind}:${source.path}:${source.revision}`}
               ref={videoRef}
               src={source.url}
-              controls
+              controls={!exportActive}
               muted
               playsInline
               preload="metadata"
@@ -909,16 +1056,6 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
                 const sourceTimeSeconds = event.currentTarget.currentTime;
                 synchronizePlaybackPosition(event.currentTarget, sourceTimeSeconds);
               }}
-              onDurationChange={(event) => {
-                const mediaDuration = event.currentTarget.duration;
-                if (Number.isFinite(mediaDuration) && mediaDuration > 0) {
-                  setSession((current) => {
-                    const next = withEditorDuration(current, mediaDuration);
-                    sessionRef.current = next;
-                    return next;
-                  });
-                }
-              }}
               onSeeking={seekingStarted}
               onSeeked={(event) => seekingFinished(event.currentTarget)}
               onError={playbackFailed}
@@ -927,11 +1064,11 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
             {mediaStatus === "preparingProxy" && <div className="editor-media-message"><span className="player-spinner" />Preparing H.264 editor preview...</div>}
             {mediaStatus === "error" && <div className="editor-media-message editor-media-error" role="alert">
               <strong>Editor preview unavailable</strong><span>{mediaError}</span>
-              <div><button type="button" onClick={() => void preparePreview(true)}>Retry Preview</button><button type="button" onClick={onBackToClips}>Return to Clips</button></div>
+              <div><button type="button" disabled={exportActive} onClick={() => void preparePreview(true)}>Retry Preview</button><button type="button" onClick={onBackToClips}>Return to Clips</button></div>
             </div>}
           </div>
           <div className="editor-transport">
-            <button type="button" onClick={togglePlayback} disabled={!source || mediaStatus !== "ready"}>{session.playbackState === "playing" ? "Pause" : "Play"}</button>
+            <button type="button" onClick={togglePlayback} disabled={exportActive || !source || mediaStatus !== "ready"}>{session.playbackState === "playing" ? "Pause" : "Play"}</button>
             <code>{formatEditorTimeUs(session.playheadUs)} / {formatEditorTimeUs(authoritativeEditedDurationUs)}</code>
             <span>{session.playbackState}</span>
           </div>
@@ -959,7 +1096,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
               <button
                 type="button"
                 onClick={() => updateMixer(resetEditorAudio)}
-                disabled={!isEditorMixerDirty(mixer)}
+                disabled={exportActive || !isEditorMixerDirty(mixer)}
                 title="Restore all Editor audio tracks to 100%, unmuted, and unsoloed"
               >Reset Audio</button>
             </div>
@@ -979,6 +1116,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
                   aria-label={`Mute ${track.title}`}
                   aria-pressed={track.muted}
                   title={`Mute ${track.title}`}
+                  disabled={exportActive}
                   onClick={() => updateMixer((current) => toggleEditorTrackMute(current, track.id))}
                 >M</button>
                 <button
@@ -987,6 +1125,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
                   aria-label={`Solo ${track.title}`}
                   aria-pressed={track.solo}
                   title={`Solo ${track.title}`}
+                  disabled={exportActive}
                   onClick={() => updateMixer((current) => toggleEditorTrackSolo(current, track.id))}
                 >S</button>
               </div>
@@ -998,6 +1137,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
                   max="300"
                   step="1"
                   value={track.gainPercent}
+                  disabled={exportActive}
                   aria-label={`${track.title} volume`}
                   aria-valuetext={`${track.gainPercent}%`}
                   onChange={(event) => {
@@ -1009,7 +1149,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
               </label>
               {track.availability === "error" && <div className="editor-mixer-track-error" role="alert">
                 <span>{track.errorMessage ?? "This track is unavailable."}</span>
-                <button type="button" onClick={() => void prepareEditorAudioTrack(track, true)}>Retry</button>
+                <button type="button" disabled={exportActive} onClick={() => void prepareEditorAudioTrack(track, true)}>Retry</button>
               </div>}
             </div>)}
           </div> : <p className="editor-mixer-empty">This clip has no saved audio streams available to the Editor.</p>}
@@ -1032,12 +1172,12 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
           </div>
 
           <div className="editor-toolbar" aria-label="Timeline editing actions">
-            <button type="button" onClick={() => applyEdit(undoEditorEdit(sessionRef.current))} disabled={session.undoStack.length === 0} title="Undo (Ctrl+Z)">Undo</button>
-            <button type="button" onClick={() => applyEdit(redoEditorEdit(sessionRef.current))} disabled={session.redoStack.length === 0} title="Redo (Ctrl+Shift+Z or Ctrl+Y)">Redo</button>
+            <button type="button" onClick={() => applyEdit(undoEditorEdit(sessionRef.current))} disabled={exportActive || session.undoStack.length === 0} title="Undo (Ctrl+Z)">Undo</button>
+            <button type="button" onClick={() => applyEdit(redoEditorEdit(sessionRef.current))} disabled={exportActive || session.redoStack.length === 0} title="Redo (Ctrl+Shift+Z or Ctrl+Y)">Redo</button>
             <span className="editor-toolbar-divider" aria-hidden="true" />
-            <button type="button" onClick={() => applyEdit(splitAtPlayhead(sessionRef.current))} disabled={!splitEnabled} title="Split at playhead (S)">Split</button>
-            <button className="editor-delete-segment" type="button" onClick={() => applyEdit(deleteSelectedSegment(sessionRef.current))} disabled={!deleteEnabled} title="Delete selected segment (Delete)">Delete Segment</button>
-            <button type="button" onClick={confirmReset} disabled={!session.dirty}>Reset</button>
+            <button type="button" onClick={() => applyEdit(splitAtPlayhead(sessionRef.current))} disabled={exportActive || !splitEnabled} title="Split at playhead (S)">Split</button>
+            <button className="editor-delete-segment" type="button" onClick={() => applyEdit(deleteSelectedSegment(sessionRef.current))} disabled={exportActive || !deleteEnabled} title="Delete selected segment (Delete)">Delete Segment</button>
+            <button type="button" onClick={confirmReset} disabled={exportActive || !session.dirty}>Reset</button>
             <div className="editor-duration-status" aria-label="Timeline duration">
               <span>Original <strong>{formatEditorTimeUs(session.source.durationUs)}</strong></span>
               <span>Edited <strong>{formatEditorTimeUs(authoritativeEditedDurationUs)}</strong></span>
@@ -1066,6 +1206,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
                       role="button"
                       tabIndex={0}
                       aria-pressed={selected}
+                      aria-disabled={exportActive}
                       aria-label={`Select segment ${index + 1}, source ${formatEditorTimeUs(segment.sourceStartUs)} to ${formatEditorTimeUs(segment.sourceEndUs)}`}
                       title={`Source ${formatEditorTimeUs(segment.sourceStartUs)} → ${formatEditorTimeUs(segment.sourceEndUs)}`}
                       onClick={() => selectSegment(segment.id)}
@@ -1080,6 +1221,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
                       {selected && <button
                         className="editor-trim-handle editor-trim-handle-start"
                         type="button"
+                        disabled={exportActive}
                         aria-label="Trim segment start"
                         title="Drag to trim segment start"
                         onPointerDown={(event) => beginTrim(event, segment, "start")}
@@ -1092,6 +1234,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
                       {selected && <button
                         className="editor-trim-handle editor-trim-handle-end"
                         type="button"
+                        disabled={exportActive}
                         aria-label="Trim segment end"
                         title="Drag to trim segment end"
                         onPointerDown={(event) => beginTrim(event, segment, "end")}
@@ -1114,7 +1257,7 @@ function ActiveEditor({ clip, onBackToClips, onDirtyChange }: { clip: ClipListIt
                   max={Math.max(authoritativeEditedDurationUs, 1)}
                   step="1000"
                   value={Math.min(session.playheadUs, authoritativeEditedDurationUs)}
-                  disabled={!source || authoritativeEditedDurationUs <= 0 || mediaStatus !== "ready" || Boolean(trimDrag)}
+                  disabled={exportActive || !source || authoritativeEditedDurationUs <= 0 || mediaStatus !== "ready" || Boolean(trimDrag)}
                   aria-label="Edited timeline playhead"
                   aria-valuetext={`${formatEditorTimeUs(session.playheadUs)} of ${formatEditorTimeUs(authoritativeEditedDurationUs)}`}
                   onChange={(event) => {

@@ -1,4 +1,5 @@
 mod database;
+pub(crate) mod export;
 mod media;
 mod migrations;
 mod models;
@@ -15,6 +16,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
+pub use export::EditorExportManager;
 pub use models::{
     ClipActionResponse, ClipAudioTrack, ClipIdRequest, ClipListRequest, ClipListResponse,
     ClipMutationResponse, ClipPlaybackInfo, ClipPlaybackInfoResponse, LibraryTelemetry,
@@ -115,6 +117,22 @@ impl ClipLibraryManager {
         &self,
         metadata: SavedClipMetadata,
     ) -> Result<SavedClipIndexResult, String> {
+        self.index_clip(metadata, None)
+    }
+
+    pub(crate) fn index_exported_clip(
+        &self,
+        metadata: SavedClipMetadata,
+        display_name: String,
+    ) -> Result<SavedClipIndexResult, String> {
+        self.index_clip(metadata, Some(display_name))
+    }
+
+    fn index_clip(
+        &self,
+        metadata: SavedClipMetadata,
+        display_name_override: Option<String>,
+    ) -> Result<SavedClipIndexResult, String> {
         let started = Instant::now();
         let database = self.database()?;
         let canonical = validate_owned_clip(&self.clips_root, &metadata.file_path)?;
@@ -126,11 +144,13 @@ impl ClipLibraryManager {
             .and_then(|value| value.to_str())
             .ok_or_else(|| "The saved clip filename is not valid Unicode.".to_string())?
             .to_string();
-        let display_name = canonical
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("Replay")
-            .to_string();
+        let display_name = display_name_override.unwrap_or_else(|| {
+            canonical
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("Replay")
+                .to_string()
+        });
         let upsert = ClipUpsert {
             id: Uuid::new_v4().to_string(),
             file_path: canonical.to_string_lossy().into_owned(),
@@ -294,13 +314,18 @@ impl ClipLibraryManager {
         self.resolved_clip(clip_id).map(|(_, path)| path)
     }
 
-    fn resolved_clip(&self, clip_id: &str) -> Result<(ClipListItem, PathBuf), String> {
+    pub(crate) fn resolved_clip(&self, clip_id: &str) -> Result<(ClipListItem, PathBuf), String> {
         let database = self.database()?;
         let connection = database.open()?;
         let clip = get_clip(&connection, clip_id)?
             .ok_or_else(|| format!("No library clip exists with ID '{clip_id}'."))?;
         let path = validate_owned_clip(&self.clips_root, Path::new(&clip.file_path))?;
         Ok((clip, path))
+    }
+
+    pub(crate) fn clip_by_id(&self, clip_id: &str) -> Result<Option<ClipListItem>, String> {
+        let database = self.database()?;
+        get_clip(&database.open()?, clip_id)
     }
 
     fn cache_clip(&self, clip_id: &str) -> Result<(ClipListItem, CacheClip), String> {
@@ -877,6 +902,62 @@ mod tests {
         fs::write(root.join("Previews"), b"blocks cache directory").unwrap();
         assert!(manager.delete(&indexed.clip_id).success);
         assert!(!clip.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verified_export_indexes_with_friendly_name_and_flattened_metadata() {
+        let root = std::env::temp_dir().join(format!("stage17-export-index-{}", Uuid::new_v4()));
+        let clips = root.join("Clips");
+        fs::create_dir_all(&clips).unwrap();
+        let output = clips.join("physical-edited.mp4");
+        fs::write(&output, b"verified permanent export").unwrap();
+        let manager = ClipLibraryManager::initialize(root.join("clips.db"), clips);
+        let indexed = manager
+            .index_exported_clip(
+                SavedClipMetadata {
+                    file_path: output.clone(),
+                    created_at_ms: 1,
+                    duration_100ns: 123_456_780,
+                    requested_duration_seconds: 13,
+                    width: 2560,
+                    height: 1440,
+                    fps_numerator: 60,
+                    fps_denominator: 1,
+                    video_codec: "h264".into(),
+                    video_profile: Some("High".into()),
+                    video_bitrate_bps: Some(12_000_000),
+                    total_bitrate_bps: Some(12_192_000),
+                    capture_target_label: None,
+                    capture_target_type: None,
+                    audio_tracks: vec![ClipAudioTrack {
+                        stream_index: 1,
+                        role: "Combined".into(),
+                        title: Some("Combined".into()),
+                        handler_name: Some("Combined".into()),
+                        codec: "aac".into(),
+                        profile: Some("LC".into()),
+                        sample_rate: Some(48_000),
+                        channels: Some(2),
+                        bitrate_bps: Some(192_000),
+                        is_default: true,
+                    }],
+                },
+                "Source Raid - Edited".into(),
+            )
+            .unwrap();
+        let clip = manager.clip_by_id(&indexed.clip_id).unwrap().unwrap();
+        assert_eq!(clip.display_name, "Source Raid - Edited");
+        assert_eq!(
+            clip.file_size_bytes,
+            b"verified permanent export".len() as u64
+        );
+        assert_eq!(clip.duration_100ns, 123_456_780);
+        assert_eq!(clip.video_codec, "h264");
+        assert_eq!(clip.audio_tracks.len(), 1);
+        assert_eq!(clip.audio_tracks[0].role, "Combined");
+        assert!(clip.audio_tracks[0].is_default);
+        assert!(output.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

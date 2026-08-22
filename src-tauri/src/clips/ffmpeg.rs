@@ -40,6 +40,7 @@ pub struct MediaProbeStream {
     pub codec_type: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    pub pix_fmt: Option<String>,
     pub r_frame_rate: Option<String>,
     pub avg_frame_rate: Option<String>,
     pub sample_rate: Option<String>,
@@ -66,6 +67,7 @@ pub struct MediaProbeDisposition {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct MediaProbeFormat {
+    pub format_name: Option<String>,
     pub duration: Option<String>,
     pub bit_rate: Option<String>,
 }
@@ -189,6 +191,13 @@ impl FfmpegExecutable {
         })
     }
 
+    pub(crate) fn export_command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        hide_console_window(&mut command);
+        lower_cache_priority(&mut command);
+        command
+    }
+
     pub fn inspect_media(&self, output_path: &Path) -> Result<MediaProbeReport, String> {
         let ffprobe = self.resolve_ffprobe().ok_or_else(|| {
             "ffprobe is required to verify the Stage 11 video and audio streams.".to_string()
@@ -200,7 +209,7 @@ impl FfmpegExecutable {
             .arg("-show_streams")
             .arg("-show_format")
             .arg("-show_entries")
-            .arg("stream=index,codec_name,codec_type,profile,width,height,r_frame_rate,avg_frame_rate,sample_rate,channels,duration,bit_rate:stream_tags=title,handler_name:stream_disposition=default:format=duration,bit_rate")
+            .arg("stream=index,codec_name,codec_type,profile,width,height,pix_fmt,r_frame_rate,avg_frame_rate,sample_rate,channels,duration,bit_rate:stream_tags=title,handler_name:stream_disposition=default:format=format_name,duration,bit_rate")
             .arg("-of")
             .arg("json")
             .arg(output_path)

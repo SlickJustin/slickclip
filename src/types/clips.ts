@@ -128,6 +128,54 @@ export type PrepareClipMediaResponse = {
   errorMessage: string | null;
 };
 
+export type EditorExportPhase = "idle" | "preparing" | "rendering" | "verifying" | "finalizing" | "complete" | "failed" | "cancelled";
+
+export type EditorExportSegment = {
+  id: string;
+  sourceStartUs: number;
+  sourceEndUs: number;
+};
+
+export type EditorExportTrackMix = {
+  streamIndex: number;
+  gainPercent: number;
+  muted: boolean;
+  solo: boolean;
+};
+
+export type EditorExportRequest = {
+  clipId: string;
+  segments: EditorExportSegment[];
+  mixer: EditorExportTrackMix[];
+};
+
+export type EditorExportStatus = {
+  exportId: string | null;
+  sourceClipId: string | null;
+  phase: EditorExportPhase;
+  progressPercent: number;
+  encodedTimeUs: number;
+  totalTimeUs: number;
+  encoder: string | null;
+  encoderHardware: boolean | null;
+  encoderSettings: string | null;
+  attemptedEncoders: string[];
+  filterPlan: string | null;
+  plannedDurationUs: number | null;
+  verifiedDurationUs: number | null;
+  outputClip: ClipListItem | null;
+  outputDisplayName: string | null;
+  indexingWarning: string | null;
+  errorMessage: string | null;
+  diagnostics: string[];
+};
+
+export type EditorExportCommandResponse = {
+  success: boolean;
+  status: EditorExportStatus;
+  errorMessage: string | null;
+};
+
 export type ClipSortOrder = "newestFirst" | "oldestFirst" | "nameAscending";
 
 export function audioLabel(track: ClipAudioTrack) {

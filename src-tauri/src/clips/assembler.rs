@@ -692,6 +692,7 @@ mod tests {
             codec_type: Some(kind.into()),
             width: (kind == "video").then_some(2560),
             height: (kind == "video").then_some(1440),
+            pix_fmt: (kind == "video").then(|| "yuv420p".into()),
             r_frame_rate: (kind == "video").then(|| "60/1".into()),
             avg_frame_rate: (kind == "video").then(|| "60/1".into()),
             sample_rate: (kind == "audio").then(|| "48000".into()),
@@ -719,6 +720,7 @@ mod tests {
         MediaProbeReport {
             streams,
             format: Some(MediaProbeFormat {
+                format_name: Some("mov,mp4,m4a,3gp,3g2,mj2".into()),
                 duration: Some("30.000000".into()),
                 bit_rate: Some("14500000".into()),
             }),

@@ -95,6 +95,20 @@ test("authoritative media duration updates a pristine timeline without history",
   assert.equal(session.dirty, false);
 });
 
+test("authoritative duration reconciliation clamps dirty end-of-source segments", () => {
+  const edited = deleteSelectedSegment(selectEditorSegment(threeSegments(), "clip-one:segment:1"));
+  const reconciled = withEditorDuration(edited, 29.999783);
+  assert.deepEqual(reconciled.segments.map(({ sourceStartUs, sourceEndUs }) => [sourceStartUs, sourceEndUs]), [
+    [0, second(10)],
+    [second(20), 29_999_783],
+  ]);
+  assert.equal(reconciled.source.durationUs, 29_999_783);
+  assert.equal(totalEditedDurationUs(reconciled.segments), 19_999_783);
+  assert.equal(validateEditorSegments(reconciled.segments, reconciled.source.durationUs), true);
+  assert.equal(reconciled.dirty, true);
+  assert.ok(reconciled.undoStack.every((state) => state.segments.every((segment) => segment.sourceEndUs <= 29_999_783)));
+});
+
 test("trim start changes only the selected source start", () => {
   const session = createEditorSession(clip());
   const trimmed = trimEditorSegment(session, session.segments[0].id, "start", second(5.5));

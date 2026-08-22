@@ -15,7 +15,7 @@ import type {
 } from "../types/clips";
 import { audioLabel, errorMessage, formatBytes, formatDuration100ns, formatFps } from "../types/clips";
 
-export function ClipsPage({ onEditClip }: { onEditClip: (clip: ClipListItem) => void }) {
+export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed }: { onEditClip: (clip: ClipListItem) => void; playClip: ClipListItem | null; onPlayClipConsumed: () => void }) {
   const [search, setSearch] = useState("");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [sortOrder, setSortOrder] = useState<ClipSortOrder>("newestFirst");
@@ -28,6 +28,12 @@ export function ClipsPage({ onEditClip }: { onEditClip: (clip: ClipListItem) => 
   const [refreshResult, setRefreshResult] = useState<ReconciliationTelemetry | null>(null);
   const [playingClip, setPlayingClip] = useState<ClipListItem | null>(null);
   const reconciliationActive = refreshing || telemetry?.reconciliationRunning === true;
+
+  useEffect(() => {
+    if (!playClip) return;
+    setPlayingClip(playClip);
+    onPlayClipConsumed();
+  }, [onPlayClipConsumed, playClip]);
 
   const loadClips = useCallback(async () => {
     try {

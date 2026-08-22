@@ -37,6 +37,11 @@ pub fn run() {
             let clip_library =
                 library::ClipLibraryManager::initialize(library_database, clips_directory.clone());
             clip_library.start_initial_reconciliation(app.handle().clone());
+            app.manage(library::EditorExportManager::new(
+                clip_library.clone(),
+                clips_directory.clone(),
+                app.handle().clone(),
+            ));
             app.manage(clips::ClipSaveManager::new(
                 replay_manager.clone(),
                 clips_directory,
@@ -81,6 +86,9 @@ pub fn run() {
             library::prepare_clip_preview,
             library::prepare_clip_audio_preview,
             library::prepare_editor_audio_preview,
+            library::export::start_editor_export,
+            library::export::cancel_editor_export,
+            library::export::get_editor_export_status,
             hotkey::get_save_replay_hotkey,
             hotkey::set_save_replay_hotkey,
             hotkey::set_hotkey_recorder_active,
@@ -106,6 +114,9 @@ pub fn run() {
             app_handle
                 .state::<hotkey::SaveReplayHotkeyManager>()
                 .unregister(app_handle);
+            app_handle
+                .state::<library::EditorExportManager>()
+                .shutdown_and_wait();
             app_handle
                 .state::<clips::ClipSaveManager>()
                 .shutdown_and_wait();

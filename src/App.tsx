@@ -12,6 +12,7 @@ function App() {
   const [activePage, setActivePage] = useState<PageId>("replay");
   const [editorClip, setEditorClip] = useState<ClipListItem | null>(null);
   const [editorDirty, setEditorDirty] = useState(false);
+  const [exportPlaybackClip, setExportPlaybackClip] = useState<ClipListItem | null>(null);
   const [hotkeyFeedback, setHotkeyFeedback] = useState<{ success: boolean; message: string } | null>(null);
 
   useEffect(() => {
@@ -37,9 +38,7 @@ function App() {
 
   const navigate = useCallback((page: PageId) => {
     const leavingDirtyEditor = activePage === "editor" && page !== "editor" && editorDirty;
-    const discardMessage = page === "clips"
-      ? "Discard edits and return to Clips?"
-      : "Discard edits and leave the Editor?";
+    const discardMessage = "Leave Editor?\n\nYour editable session is not saved. Any exported clips will remain in your Library.";
     if (leavingDirtyEditor && !window.confirm(discardMessage)) return;
     if (page !== "editor" || activePage !== "editor") {
       setEditorClip(null);
@@ -56,10 +55,18 @@ function App() {
 
   const closeEditor = useCallback(() => navigate("clips"), [navigate]);
 
+  const playExport = useCallback((clip: ClipListItem) => {
+    if (editorDirty && !window.confirm("Leave Editor?\n\nYour editable session is not saved. The exported clip will remain in your Library.")) return;
+    setExportPlaybackClip(clip);
+    setEditorClip(null);
+    setEditorDirty(false);
+    setActivePage("clips");
+  }, [editorDirty]);
+
   const pages: Record<PageId, React.ReactNode> = {
     replay: <ReplayPage />,
-    clips: <ClipsPage onEditClip={openEditor} />,
-    editor: <EditorPage clip={editorClip} onBackToClips={closeEditor} onDirtyChange={setEditorDirty} />,
+    clips: <ClipsPage onEditClip={openEditor} playClip={exportPlaybackClip} onPlayClipConsumed={() => setExportPlaybackClip(null)} />,
+    editor: <EditorPage clip={editorClip} onBackToClips={closeEditor} onPlayExport={playExport} onDirtyChange={setEditorDirty} />,
     settings: <SettingsPage />,
   };
 

@@ -76,6 +76,34 @@ function initialSegments(clipId: string, durationUs: number): readonly EditorSeg
     : [];
 }
 
+function reconcileSegmentsToDuration(
+  segments: readonly EditorSegment[],
+  previousDurationUs: number,
+  durationUs: number,
+) {
+  const reconciled = segments.map((segment) => ({
+    ...segment,
+    sourceEndUs: segment.sourceEndUs === previousDurationUs || segment.sourceEndUs > durationUs
+      ? durationUs
+      : segment.sourceEndUs,
+  }));
+  return validateEditorSegments(reconciled, durationUs)
+    && reconciled.every((segment) => segmentDurationUs(segment) >= MIN_SEGMENT_DURATION_US)
+    ? reconciled
+    : null;
+}
+
+function reconcileHistoryToDuration(
+  history: readonly EditorHistoryState[],
+  previousDurationUs: number,
+  durationUs: number,
+) {
+  return history.flatMap((state) => {
+    const segments = reconcileSegmentsToDuration(state.segments, previousDurationUs, durationUs);
+    return segments ? [{ segments }] : [];
+  });
+}
+
 function historyState(segments: readonly EditorSegment[]): EditorHistoryState {
   return { segments: cloneSegments(segments) };
 }
@@ -301,15 +329,31 @@ export function resetEditorSession(clip: ClipListItem) {
 export function withEditorDuration(session: EditorSession, requestedDurationSeconds: number): EditorSession {
   const durationUs = secondsToMicroseconds(requestedDurationSeconds);
   if (durationUs <= 0 || durationUs === session.source.durationUs) return session;
-  if (session.dirty || session.undoStack.length > 0 || session.redoStack.length > 0) return session;
-  const segments = initialSegments(session.source.clipId, durationUs);
+  if (!session.dirty && session.undoStack.length === 0 && session.redoStack.length === 0) {
+    const segments = initialSegments(session.source.clipId, durationUs);
+    return {
+      ...session,
+      source: { ...session.source, durationUs },
+      segments,
+      selectedSegmentId: segments[0]?.id ?? null,
+      playheadUs: Math.min(session.playheadUs, durationUs),
+      dirty: false,
+    };
+  }
+
+  const segments = reconcileSegmentsToDuration(session.segments, session.source.durationUs, durationUs);
+  if (!segments) return session;
+  const playheadUs = remapPlayhead(session.segments, segments, session.playheadUs);
   return {
     ...session,
     source: { ...session.source, durationUs },
     segments,
-    selectedSegmentId: segments[0]?.id ?? null,
-    playheadUs: Math.min(session.playheadUs, durationUs),
-    dirty: false,
+    selectedSegmentId: selectedSegmentAfterRestore(segments, session.selectedSegmentId, playheadUs),
+    playheadUs,
+    playbackState: session.playbackState === "playing" ? "paused" : session.playbackState,
+    undoStack: reconcileHistoryToDuration(session.undoStack, session.source.durationUs, durationUs),
+    redoStack: reconcileHistoryToDuration(session.redoStack, session.source.durationUs, durationUs),
+    dirty: !isOriginalTimeline(segments, durationUs),
   };
 }
 
