@@ -1,5 +1,6 @@
 use std::ffi::c_void;
 use std::fmt::Display;
+#[cfg(debug_assertions)]
 use std::io::{self, Write};
 
 use windows::core::PWSTR;
@@ -13,7 +14,7 @@ use super::types::{AudioError, AudioErrorCode};
 pub fn audio_dev_log(message: impl Display) {
     #[cfg(debug_assertions)]
     {
-        eprintln!("[JustIn Replay audio] {message}");
+        eprintln!("[SlickClip audio] {message}");
         let _ = io::stderr().flush();
     }
     #[cfg(not(debug_assertions))]

@@ -62,7 +62,7 @@ pub fn resolve_encoder(choice: EncoderChoice) -> Result<ResolvedEncoder, String>
     let detection = detect_encoder_capabilities()?;
     let actual = match choice {
         EncoderChoice::Automatic => detection.preferred.ok_or_else(|| {
-            "No usable JustIn Replay video encoder passed runtime initialization. H.264, the compatibility fallback, is unavailable on this PC.".to_string()
+            "No usable SlickClip video encoder passed runtime initialization. H.264, the compatibility fallback, is unavailable on this PC.".to_string()
         })?,
         EncoderChoice::Av1 => ensure_available(&detection, EncoderCodec::Av1)?,
         EncoderChoice::Hevc => ensure_available(&detection, EncoderCodec::Hevc)?,
@@ -115,7 +115,7 @@ fn detect_encoder_capabilities() -> Result<EncoderDetection, String> {
 
     let mut av1 = unavailable_info(
         EncoderChoice::Av1,
-        "windows-capture 2.0.1 does not expose an AV1 video subtype, so JustIn Replay cannot initialize or use AV1 through the required capture library.",
+        "windows-capture 2.0.1 does not expose an AV1 video subtype, so SlickClip cannot initialize or use AV1 through the required capture library.",
     );
     let mut hevc = probe_encoder(EncoderChoice::Hevc, VideoSettingsSubType::HEVC);
     let mut h264 = probe_encoder(EncoderChoice::H264, VideoSettingsSubType::H264);

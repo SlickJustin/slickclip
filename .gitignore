@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Pinned FFmpeg sidecars are reproducibly staged by scripts/prepare-ffmpeg.ps1.
+src-tauri/binaries/*
+!src-tauri/binaries/README.md

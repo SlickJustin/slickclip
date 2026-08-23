@@ -201,10 +201,7 @@ mod tests {
 
     fn test_directory() -> std::path::PathBuf {
         let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "justin-replay-wav-test-{}-{id}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("slickclip-wav-test-{}-{id}", std::process::id()))
     }
 
     #[test]

@@ -313,7 +313,7 @@ fn capture_five_second_test(
     let width = even_dimension(width).map_err(CaptureFailure::before_permission)?;
     let height = even_dimension(height).map_err(CaptureFailure::before_permission)?;
 
-    let output_dir = videos_dir.join("JustIn Replay").join("DevTests");
+    let output_dir = videos_dir.join("SlickClip").join("DevTests");
     fs::create_dir_all(&output_dir).map_err(|error| {
         CaptureFailure::before_permission(format!(
             "Could not create the capture test output directory '{}': {error}",
@@ -442,7 +442,7 @@ fn request_borderless_access() -> Result<(), BorderlessFailure> {
     } else if access == AppCapabilityAccessStatus::NotDeclaredByApp {
         (
             "capability_not_declared",
-            "Windows reports that JustIn Replay has not declared the graphicsCaptureWithoutBorder package capability. Borderless capture cannot be claimed in this build; normal bordered capture may still work.",
+            "Windows reports that SlickClip has not declared the graphicsCaptureWithoutBorder package capability. Borderless capture cannot be claimed in this build; normal bordered capture may still work.",
         )
     } else if access == AppCapabilityAccessStatus::DeniedByUser {
         (

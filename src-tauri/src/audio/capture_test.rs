@@ -193,7 +193,7 @@ impl AudioCaptureTestManager {
         let output_directory = Arc::clone(&self.output_directory);
         let cancel_requested = Arc::clone(&self.cancel_requested);
         let thread = thread::Builder::new()
-            .name("justin-replay-audio-test".to_string())
+            .name("slickclip-audio-test".to_string())
             .spawn(move || {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_capture_test(
@@ -375,7 +375,7 @@ fn run_capture_test_inner(
     let queued_packets = Arc::new(AtomicUsize::new(0));
     let writer_queue = Arc::clone(&queued_packets);
     let writer_thread = thread::Builder::new()
-        .name("justin-replay-audio-wav".to_string())
+        .name("slickclip-audio-wav".to_string())
         .spawn(move || -> Result<u64, AudioError> {
             let mut writer = wav_writer;
             let mut written_frames = 0u64;

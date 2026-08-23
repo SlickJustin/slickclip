@@ -326,7 +326,7 @@ mod tests {
             let format = candidate.build();
             let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "justin-replay-process-format-{}-{id}.wav",
+                "slickclip-process-format-{}-{id}.wav",
                 std::process::id()
             ));
             let file = fs::File::create(&path).unwrap();

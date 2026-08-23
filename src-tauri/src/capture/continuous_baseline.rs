@@ -484,7 +484,7 @@ fn run_baseline(
         Err(error) => return ContinuousBaselineResult::failure(encoder_choice, frame_rate, error),
     };
 
-    let output_dir = videos_dir.join("JustIn Replay").join("DevTests");
+    let output_dir = videos_dir.join("SlickClip").join("DevTests");
     if let Err(error) = fs::create_dir_all(&output_dir) {
         return ContinuousBaselineResult::failure(
             encoder_choice,

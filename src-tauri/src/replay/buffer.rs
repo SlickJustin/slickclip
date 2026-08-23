@@ -1216,7 +1216,7 @@ impl ReplayBufferManager {
         let shared = Arc::clone(&self.shared);
         let root = Arc::clone(&self.root);
         let thread = match thread::Builder::new()
-            .name("justin-replay-buffer".to_string())
+            .name("slickclip-buffer".to_string())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_replay_session(Arc::clone(&shared), root.as_ref(), request)
@@ -1796,7 +1796,7 @@ impl FinalizerWorker {
         let (sender, receiver) = mpsc::channel::<FinalizeJob>();
         let worker_shared = Arc::clone(&shared);
         let thread = thread::Builder::new()
-            .name("justin-replay-finalizer".to_string())
+            .name("slickclip-finalizer".to_string())
             .spawn(move || finalize_segments(receiver, worker_shared))
             .map_err(|error| format!("Could not start the replay segment finalizer: {error}"))?;
 
@@ -1947,7 +1947,7 @@ impl EncoderPrewarmer {
         let (request_sender, request_receiver) = mpsc::channel::<u64>();
         let (result_sender, result_receiver) = mpsc::channel::<Result<ActiveSegment, String>>();
         let thread = thread::Builder::new()
-            .name("justin-replay-encoder-prewarm".to_string())
+            .name("slickclip-encoder-prewarm".to_string())
             .spawn(move || {
                 for sequence_number in request_receiver {
                     let result = ActiveSegment::create(&flags, sequence_number, session_started);
@@ -2669,7 +2669,7 @@ impl ReplayCaptureHandler {
         scheduler.video_timeline_start_qpc_100ns = video_start_qpc_100ns;
         let shared = Arc::clone(&self.flags.shared);
         let thread = thread::Builder::new()
-            .name("justin-replay-cfr-scheduler".to_string())
+            .name("slickclip-cfr-scheduler".to_string())
             .spawn(move || {
                 if let Err(error) = scheduler.run() {
                     shared.mark_error(format!("Realtime CFR scheduler failed: {error}"));
@@ -3204,7 +3204,7 @@ mod tests {
     #[test]
     fn pinned_evicted_segment_is_deleted_only_after_unpin() {
         let directory =
-            std::env::temp_dir().join(format!("justin-replay-pin-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("slickclip-pin-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
 

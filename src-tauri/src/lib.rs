@@ -5,6 +5,7 @@ mod desktop;
 mod game_detection;
 mod hotkey;
 mod library;
+mod migration;
 mod preferences;
 mod replay;
 
@@ -86,10 +87,24 @@ pub fn run() {
                 }
             }
             let app_data = app.path().app_local_data_dir()?;
+            let videos_directory = app.path().video_dir()?;
+            let legacy_app_data = app_data
+                .parent()
+                .map(|parent| parent.join("com.replayapp.desktop"))
+                .unwrap_or_else(|| app_data.with_file_name("com.replayapp.desktop"));
+            let legacy_video_root = videos_directory.join("JustIn Replay");
+            let slickclip_video_root = videos_directory.join("SlickClip");
+            migration::migrate_legacy_installation(
+                &legacy_app_data,
+                &app_data,
+                &legacy_video_root,
+                &slickclip_video_root,
+            )
+            .map_err(std::io::Error::other)?;
             let replay_root = app_data.join("ReplayBuffer");
             let replay_manager =
                 replay::ReplayBufferManager::new(replay_root).map_err(std::io::Error::other)?;
-            let clips_directory = app.path().video_dir()?.join("JustIn Replay").join("Clips");
+            let clips_directory = slickclip_video_root.join("Clips");
             let library_database = app_data.join("Library").join("clips.db");
             let clip_library =
                 library::ClipLibraryManager::initialize(library_database, clips_directory.clone());
@@ -107,12 +122,7 @@ pub fn run() {
             ));
             app.manage(clip_library);
             app.manage(replay_manager);
-            let audio_tests_directory = app
-                .path()
-                .video_dir()?
-                .join("JustIn Replay")
-                .join("DevTests")
-                .join("Audio");
+            let audio_tests_directory = slickclip_video_root.join("DevTests").join("Audio");
             app.manage(audio::AudioCaptureTestManager::new(audio_tests_directory));
             app.manage(preferences::UiPreferencesManager::initialize(
                 app_data.join("Preferences").join("ui-preferences.json"),

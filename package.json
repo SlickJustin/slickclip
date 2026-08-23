@@ -1,11 +1,13 @@
 {
-  "name": "replay-app",
+  "name": "slickclip",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "prepare:ffmpeg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-ffmpeg.ps1",
+    "bundle": "npm run prepare:ffmpeg && tauri build --bundles nsis",
     "test": "node --test tests/playerControls.test.ts tests/editorSession.test.ts tests/editorMixer.test.ts tests/editorExport.test.ts tests/watchProgress.test.ts tests/libraryPreferences.test.ts tests/replayRoulette.test.ts",
     "preview": "vite preview",
     "tauri": "tauri"

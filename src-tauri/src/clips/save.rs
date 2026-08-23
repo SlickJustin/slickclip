@@ -377,7 +377,7 @@ impl ClipSaveManager {
         let library = self.library.clone();
         let app_handle = self.app_handle.clone();
         let thread = match thread::Builder::new()
-            .name("justin-replay-save".to_string())
+            .name("slickclip-save".to_string())
             .spawn(move || {
                 run_save_job(
                     replay,

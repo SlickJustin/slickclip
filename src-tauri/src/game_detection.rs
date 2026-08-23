@@ -464,7 +464,9 @@ fn default_process_exclusions() -> BTreeSet<&'static str> {
         "msedge",
         "obs64",
         "powershell",
+        // Keep excluding the legacy executable name during upgrades.
         "replay-app",
+        "slickclip",
         "riotclientservices",
         "searchhost",
         "shellexperiencehost",

@@ -74,24 +74,30 @@ pub struct MediaProbeFormat {
 
 impl FfmpegExecutable {
     pub fn resolve() -> Result<Self, String> {
-        if let Some(configured) = std::env::var_os("JUSTIN_REPLAY_FFMPEG") {
+        if let Some(bundled) = sibling_executable("ffmpeg") {
+            probe(&bundled).map_err(|error| {
+                format!("The FFmpeg executable bundled with SlickClip could not be used: {error}")
+            })?;
+            return Ok(Self { program: bundled });
+        }
+
+        if let Some((variable, configured)) =
+            configured_tool(&["SLICKCLIP_FFMPEG", "JUSTIN_REPLAY_FFMPEG"])
+        {
             if configured.is_empty() {
-                return Err(
-                    "JUSTIN_REPLAY_FFMPEG is set but does not contain an executable path."
-                        .to_string(),
-                );
+                return Err(format!(
+                    "{variable} is set but does not contain an executable path."
+                ));
             }
             let path = PathBuf::from(&configured);
             if !path.is_file() {
                 return Err(format!(
-                    "JUSTIN_REPLAY_FFMPEG points to '{}', but that file does not exist.",
+                    "{variable} points to '{}', but that file does not exist.",
                     path.display()
                 ));
             }
             probe(&configured).map_err(|error| {
-                format!(
-                    "The FFmpeg executable configured by JUSTIN_REPLAY_FFMPEG could not be used: {error}"
-                )
+                format!("The FFmpeg executable configured by {variable} could not be used: {error}")
             })?;
             return Ok(Self {
                 program: configured,
@@ -111,7 +117,7 @@ impl FfmpegExecutable {
         }
 
         Err(format!(
-            "FFmpeg is unavailable for this development build. Set JUSTIN_REPLAY_FFMPEG to ffmpeg.exe or add FFmpeg to PATH. Attempts: {}",
+            "FFmpeg is unavailable. Reinstall SlickClip, set SLICKCLIP_FFMPEG for development, or add FFmpeg to PATH. Attempts: {}",
             errors.join("; ")
         ))
     }
@@ -276,7 +282,15 @@ impl FfmpegExecutable {
     }
 
     fn resolve_ffprobe(&self) -> Option<OsString> {
-        if let Some(configured) = std::env::var_os("JUSTIN_REPLAY_FFPROBE") {
+        if let Some(bundled) = sibling_executable("ffprobe") {
+            if probe_ffprobe(&bundled).is_ok() {
+                return Some(bundled);
+            }
+        }
+
+        if let Some((_, configured)) =
+            configured_tool(&["SLICKCLIP_FFPROBE", "JUSTIN_REPLAY_FFPROBE"])
+        {
             return probe_ffprobe(&configured).is_ok().then_some(configured);
         }
 
@@ -303,6 +317,22 @@ impl FfmpegExecutable {
         }
         None
     }
+}
+
+fn configured_tool(names: &[&'static str]) -> Option<(&'static str, OsString)> {
+    names
+        .iter()
+        .find_map(|name| std::env::var_os(name).map(|value| (*name, value)))
+}
+
+fn sibling_executable(name: &str) -> Option<OsString> {
+    let executable = std::env::current_exe().ok()?;
+    let candidate = executable.with_file_name(if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    });
+    candidate.is_file().then(|| candidate.into_os_string())
 }
 
 pub fn build_audio_mux_plan(

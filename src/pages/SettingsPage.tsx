@@ -376,7 +376,7 @@ export function SettingsPage() {
         <SettingsSection title="Storage">
           <div className="settings-row">
             <div><span>Save Location</span><small>Where completed clips will be stored</small></div>
-            <div className="path-value">Videos\JustIn Replay\Clips</div>
+            <div className="path-value">Videos\SlickClip\Clips</div>
           </div>
           <div className="settings-row storage-quota-row">
             <div><span>Library quota</span><small>Cleanup removes oldest unprotected clips first. Favorites are not protected automatically.</small></div>

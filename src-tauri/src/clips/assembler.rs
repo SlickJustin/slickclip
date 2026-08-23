@@ -12,6 +12,7 @@ use super::audio_render::{render_audio_tracks, AudioRenderDiagnostics, RenderedA
 use super::ffmpeg::{build_audio_mux_plan, FfmpegExecutable, MediaProbeReport, MediaProbeStream};
 
 static SAVE_WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
+#[cfg(debug_assertions)]
 const AUDIO_DURATION_TOLERANCE_SECONDS: f64 = 0.150;
 
 #[derive(Clone, Debug, Serialize)]
@@ -456,7 +457,7 @@ struct SaveWorkspace {
 }
 
 fn create_workspace(output_directory: &Path, timestamp: &str) -> Result<SaveWorkspace, String> {
-    let temp_root = output_directory.join(".justin-replay-temp");
+    let temp_root = output_directory.join(".slickclip-temp");
     fs::create_dir_all(&temp_root)
         .map_err(|error| format!("Could not create the Save temp root: {error}"))?;
     for _ in 0..1_000 {
@@ -501,9 +502,9 @@ fn cleanup_workspace(temp_root: &Path, workspace: &Path) -> Result<(), String> {
 fn choose_output_path(output_directory: &Path, timestamp: &str) -> Result<PathBuf, String> {
     for suffix in 0..1_000 {
         let stem = if suffix == 0 {
-            format!("JustInReplay-{timestamp}")
+            format!("SlickClip-{timestamp}")
         } else {
-            format!("JustInReplay-{timestamp}-{suffix:03}")
+            format!("SlickClip-{timestamp}-{suffix:03}")
         };
         let final_path = output_directory.join(format!("{stem}.mp4"));
         if !final_path.exists() {
@@ -673,10 +674,7 @@ mod tests {
     }
 
     fn test_directory(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "justin-replay-stage7-{name}-{}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("slickclip-stage7-{name}-{}", std::process::id()))
     }
 
     fn probe_stream(
@@ -782,16 +780,12 @@ mod tests {
         let directory = test_directory("collision");
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        fs::write(
-            directory.join("JustInReplay-20260815-234512.mp4"),
-            b"existing",
-        )
-        .unwrap();
+        fs::write(directory.join("SlickClip-20260815-234512.mp4"), b"existing").unwrap();
 
         let path = choose_output_path(&directory, "20260815-234512").unwrap();
         assert_eq!(
             path.file_name().unwrap(),
-            "JustInReplay-20260815-234512-001.mp4"
+            "SlickClip-20260815-234512-001.mp4"
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -812,7 +806,7 @@ mod tests {
     #[test]
     fn workspace_cleanup_refuses_paths_outside_owned_temp_root() {
         let directory = test_directory("cleanup-safety");
-        let temp_root = directory.join(".justin-replay-temp");
+        let temp_root = directory.join(".slickclip-temp");
         let outside = directory.join("save-outside");
         fs::create_dir_all(&outside).unwrap();
         assert!(cleanup_workspace(&temp_root, &outside).is_err());

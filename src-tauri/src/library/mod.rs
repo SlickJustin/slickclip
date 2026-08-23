@@ -111,7 +111,7 @@ impl ClipLibraryManager {
     pub fn start_initial_reconciliation(&self, app: AppHandle) {
         let manager = self.clone();
         let _ = thread::Builder::new()
-            .name("justin-replay-library-initial-reconcile".into())
+            .name("slickclip-library-initial-reconcile".into())
             .spawn(move || {
                 let result = manager.reconcile_now();
                 let _ = app.emit(

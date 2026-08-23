@@ -434,7 +434,7 @@ impl MediaCacheManager {
             });
             let manager = self.clone();
             thread::Builder::new()
-                .name("justin-replay-media-cache-worker".into())
+                .name("slickclip-media-cache-worker".into())
                 .spawn(move || loop {
                     let job = match interactive_receiver.try_recv() {
                         Ok(job) => job,
