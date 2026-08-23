@@ -35,6 +35,7 @@ Repository: `C:\Users\Jakea\source\replay-app`
 - Stage 23 Game Detection and Auto-Arm has provisional checkpoint `4c8e3ec`. Its automated checks pass, but manual representative-game/launcher/fullscreen/false-positive validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 24 Storage Safety has provisional checkpoint `bdfc167`. Its automated checks pass, but manual destructive-safety validation with disposable data remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 25 Final SlickClip Migration and Distribution has provisional checkpoint `cc79345`. Its automated checks and unsigned NSIS bundle pass, but disposable-data migration and clean-machine install/capture/save/playback/edit/export/uninstall validation remain pending and are tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
+- Stage 26 Updater and Release Candidate has provisional implementation checkpoint `3322c46`. Its updater/release code and unsigned packaging checks pass, but signing credentials, hosted release infrastructure, a signed candidate, clean-PC upgrade/failure tests, and the complete release gate remain pending. SlickClip v1.0.0 is not approved for release.
 - The waveform experiment was deliberately deferred and remains in Git stash as `Stage 19 waveform experiment - deferred`.
 - The four project-control documents were accidentally committed as empty files in commit `07b3216`; this document set restores their intended content.
 
@@ -221,6 +222,28 @@ Automated results reported for this Stage 25 diff:
 - No lint script exists.
 
 These results do not replace the clean-machine and disposable-data migration gate. The installer is unsigned, and code signing, updater/feed configuration, release legal review, and signed upgrade/rollback testing belong to Stage 26. Stage 25 remains provisionally complete rather than manually verified.
+
+## Stage 26 provisional implementation checkpoint
+
+Stage 26 adds the official Tauri signed-updater backend and a Settings experience for Check for Updates and Update & Restart. Release trust inputs are embedded only at compile time; ordinary local builds clearly disable update checks instead of accepting runtime-supplied keys. Checks are single-operation, HTTPS-only, use the updater's SemVer comparison, and re-check the expected version immediately before download. The complete installer is verified against the embedded updater public key before SlickClip shuts down replay, audio tests, hotkeys, exports, saves, and rolling capture through the normal exit cleanup routine and launches the passive installer.
+
+`npm run bundle:release` is a fail-closed release-machine workflow. It requires the endpoint, updater public/private key inputs, versioned artifact URL, and a real Tauri Windows sign command; creates a temporary configuration overlay; enables updater artifacts; builds; requires valid Authenticode on the app and NSIS installer; requires a nonempty updater signature; generates `latest.json`; prints SHA-256 hashes; and removes the temporary overlay. `docs/RELEASE_PROCESS.md` defines key custody, artifact-first/manifest-last publishing, failure behavior, and higher-SemVer recovery. It never publishes or invents credentials.
+
+Automated results reported for this Stage 26 diff:
+
+- `npm test`: 67 passed.
+- `npm run build`: passed.
+- `cargo check`: passed.
+- `cargo test -- --nocapture`: 166 passed, including HTTPS/trust-input, expected-version, and one-operation updater tests.
+- `cargo fmt -- --check`: passed with the known environment canonicalization warning.
+- `git diff --check`: passed; line-ending notices are advisory only.
+- Release-script validation with non-secret fixtures: passed.
+- Release-script validation without inputs: failed closed on missing `SLICKCLIP_UPDATER_ENDPOINT`, as intended.
+- Unsigned `npm run bundle`: passed without compiler warnings and proved the updater-enabled app still packages.
+- Local installer: 88,195,355 bytes; SHA-256 `8C556C4727E97AA4A9B2C1FB1227E476D86CD640432057152F6A341225522840`; Authenticode `NotSigned`; no updater `.sig` or `latest.json`, all expected for the non-release command.
+- No lint script exists.
+
+The remaining blocker is external and exact: provide the production updater key pair/public key custody decision, approved Windows code-signing identity and `signCommand` credentials, HTTPS feed/artifact URLs and publishing access. Then produce and manually validate signed sequential-version candidates on clean/disposable Windows machines. Until that occurs, Stage 26 is implementation-complete but not release-candidate-complete, and the release gate remains failed.
 
 ## Architecture invariants
 

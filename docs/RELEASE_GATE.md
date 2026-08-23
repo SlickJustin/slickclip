@@ -100,7 +100,7 @@ SlickClip is ready for v1.0.0 only when every applicable requirement below passe
 
 ## Stage 19 manual gate still outstanding
 
-Before continuing from the restored documentation checkpoint, manually validate the current uncommitted Stage 19 UI polish across Sidebar, Replay, Save Replay, Clips, ClipPlayer, Editor, Settings, responsive sizing, and reduced motion. Confirm capture/save/playback/edit/export behavior did not regress. Only then approve its stage checkpoint.
+Stage 19 now has a provisional automated checkpoint, but its manual UI gate remains outstanding. Validate Sidebar, Replay, Save Replay, Clips, ClipPlayer, Editor, Settings, responsive sizing, and reduced motion; confirm capture/save/playback/edit/export behavior did not regress. Provisional later-stage work does not clear this release gate.
 
 ## Explicitly deferred or post-v1 scope
 
@@ -109,5 +109,7 @@ Before continuing from the restored documentation checkpoint, manually validate 
 - Stage 27 v1 will use whole-window Discord reaction capture so participants can join or leave mid-recording; individual camera extraction is not required for that first Watch Party version.
 
 ## Release decision
+
+Current status: **not approved for release**. Stage 26 implementation checkpoint `3322c46` has no production updater/signing credentials or hosted feed, and no signed clean-PC install/upgrade candidate has been validated. Stages 19–26 also retain the exact human gates listed in `MANUAL_VALIDATION_PENDING.md`.
 
 Release only after all Stage 0–26 requirements, this checklist, clean-machine validation, and outstanding manual gates pass. Record known limitations explicitly; do not label an unvalidated build as SlickClip v1.0.0.

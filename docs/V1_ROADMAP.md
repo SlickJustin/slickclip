@@ -114,6 +114,8 @@ Required gate: migration tests plus clean-machine install, launch, capture, save
 
 ## Stage 26 — Updater and Release Candidate
 
+Status: provisional implementation checkpoint `3322c46`; signed updater plumbing and the fail-closed release workflow are implemented and automatically clean. A signed release candidate remains blocked on the user-controlled updater key, Windows code-signing identity/command, HTTPS artifact URL/feed, publishing access, and required clean-PC/manual validation. SlickClip v1.0.0 is not release-approved.
+
 Goals:
 
 - Signed updater and release feed.
