@@ -1,6 +1,7 @@
 mod audio;
 mod capture;
 mod clips;
+mod desktop;
 mod hotkey;
 mod library;
 mod preferences;
@@ -18,20 +19,26 @@ use tauri::Manager;
 #[derive(Clone, Default)]
 struct StartupCoordinator {
     revealed: Arc<AtomicBool>,
+    background_launch: bool,
 }
 
 impl StartupCoordinator {
+    fn new(background_launch: bool) -> Self {
+        Self {
+            revealed: Arc::new(AtomicBool::new(false)),
+            background_launch,
+        }
+    }
+
     fn reveal(&self, app: &tauri::AppHandle) -> Result<(), String> {
         if self.revealed.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
 
         let result = (|| {
-            let main = app
-                .get_webview_window("main")
-                .ok_or_else(|| "The SlickClip main window is unavailable.".to_string())?;
-            main.show().map_err(|error| error.to_string())?;
-            main.set_focus().map_err(|error| error.to_string())?;
+            if !self.background_launch {
+                desktop::show_main_window(app)?;
+            }
             if let Some(splash) = app.get_webview_window("splash") {
                 splash.close().map_err(|error| error.to_string())?;
             }
@@ -71,6 +78,12 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            let background_launch = std::env::args().any(|argument| argument == "--background");
+            if background_launch {
+                if let Some(splash) = app.get_webview_window("splash") {
+                    let _ = splash.hide();
+                }
+            }
             let app_data = app.path().app_local_data_dir()?;
             let replay_root = app_data.join("ReplayBuffer");
             let replay_manager =
@@ -106,7 +119,8 @@ pub fn run() {
             app.manage(hotkey::SaveReplayHotkeyManager::new());
             app.state::<hotkey::SaveReplayHotkeyManager>()
                 .register_initial(app.handle());
-            let startup = StartupCoordinator::default();
+            desktop::setup(app)?;
+            let startup = StartupCoordinator::new(background_launch);
             let fallback = startup.clone();
             let fallback_app = app.handle().clone();
             std::thread::Builder::new()
@@ -121,6 +135,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             complete_startup,
+            desktop::set_start_with_windows,
             capture::capture_test::run_capture_test,
             capture::continuous_baseline::run_continuous_baseline,
             capture::encoder::get_encoder_capabilities,
@@ -172,10 +187,42 @@ pub fn run() {
         .expect("error while building Tauri application");
 
     app.run(|app_handle, event| {
+        if let tauri::RunEvent::WindowEvent { label, event, .. } = &event {
+            if label == "main" {
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        if desktop::should_background(app_handle) {
+                            api.prevent_close();
+                            if let Some(window) = app_handle.get_webview_window("main") {
+                                let _ = window.hide();
+                            }
+                        } else {
+                            if let Some(integration) =
+                                app_handle.try_state::<desktop::DesktopIntegration>()
+                            {
+                                integration.begin_exit();
+                            }
+                            app_handle.exit(0);
+                        }
+                    }
+                    tauri::WindowEvent::Resized(_) if desktop::should_background(app_handle) => {
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            if window.is_minimized().unwrap_or(false) {
+                                let _ = window.hide();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         if matches!(
             event,
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
         ) {
+            if let Some(integration) = app_handle.try_state::<desktop::DesktopIntegration>() {
+                integration.begin_exit();
+            }
             app_handle
                 .state::<audio::AudioCaptureTestManager>()
                 .shutdown_and_wait();

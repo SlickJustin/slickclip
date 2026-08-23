@@ -224,6 +224,9 @@ export type UiPreferences = {
   clipsGridSize: ClipsGridSize;
   clipsSearchQuery: string;
   selectedCollectionId: string | null;
+  startWithWindows: boolean;
+  closeToTray: boolean;
+  saveOverlayEnabled: boolean;
 };
 
 export type UiPreferencesResponse = {
@@ -235,7 +238,7 @@ export type UiPreferencesResponse = {
 export type UiPreferencesPatch = Partial<Omit<UiPreferences, "schemaVersion">>;
 
 export const defaultUiPreferences: UiPreferences = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   playerVolume: 1,
   playerMuted: false,
   playerLastAudibleVolume: 1,
@@ -245,6 +248,9 @@ export const defaultUiPreferences: UiPreferences = {
   clipsGridSize: "comfortable",
   clipsSearchQuery: "",
   selectedCollectionId: null,
+  startWithWindows: false,
+  closeToTray: true,
+  saveOverlayEnabled: true,
 };
 
 export function audioLabel(track: ClipAudioTrack) {

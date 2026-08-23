@@ -13,7 +13,7 @@ use windows::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
-const UI_PREFERENCES_SCHEMA_VERSION: u32 = 1;
+const UI_PREFERENCES_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -28,6 +28,9 @@ pub struct UiPreferences {
     pub clips_grid_size: String,
     pub clips_search_query: String,
     pub selected_collection_id: Option<String>,
+    pub start_with_windows: bool,
+    pub close_to_tray: bool,
+    pub save_overlay_enabled: bool,
 }
 
 impl Default for UiPreferences {
@@ -43,6 +46,9 @@ impl Default for UiPreferences {
             clips_grid_size: "comfortable".into(),
             clips_search_query: String::new(),
             selected_collection_id: None,
+            start_with_windows: false,
+            close_to_tray: true,
+            save_overlay_enabled: true,
         }
     }
 }
@@ -113,6 +119,9 @@ pub struct UiPreferencesPatch {
     pub clips_search_query: Option<String>,
     #[serde(default, deserialize_with = "deserialize_nullable_field")]
     pub selected_collection_id: Option<Option<String>>,
+    pub start_with_windows: Option<bool>,
+    pub close_to_tray: Option<bool>,
+    pub save_overlay_enabled: Option<bool>,
 }
 
 fn deserialize_nullable_field<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
@@ -217,6 +226,15 @@ fn apply_patch(mut value: UiPreferences, patch: UiPreferencesPatch) -> UiPrefere
     if let Some(next) = patch.selected_collection_id {
         value.selected_collection_id = next;
     }
+    if let Some(next) = patch.start_with_windows {
+        value.start_with_windows = next;
+    }
+    if let Some(next) = patch.close_to_tray {
+        value.close_to_tray = next;
+    }
+    if let Some(next) = patch.save_overlay_enabled {
+        value.save_overlay_enabled = next;
+    }
     value
 }
 
@@ -278,8 +296,11 @@ pub fn get_ui_preferences(manager: State<'_, UiPreferencesManager>) -> UiPrefere
 #[tauri::command]
 pub fn update_ui_preferences(
     manager: State<'_, UiPreferencesManager>,
-    patch: UiPreferencesPatch,
+    mut patch: UiPreferencesPatch,
 ) -> UiPreferencesResponse {
+    // The registry entry and this preference are kept together by
+    // desktop::set_start_with_windows.
+    patch.start_with_windows = None;
     manager.update(patch)
 }
 
@@ -305,7 +326,12 @@ mod tests {
             br#"{"schemaVersion":1,"playerVolume":0.37,"futureField":true}"#,
         )
         .unwrap();
-        assert_eq!(load_preferences(&path).unwrap().player_volume, 0.37);
+        let upgraded = load_preferences(&path).unwrap();
+        assert_eq!(upgraded.schema_version, UI_PREFERENCES_SCHEMA_VERSION);
+        assert_eq!(upgraded.player_volume, 0.37);
+        assert!(!upgraded.start_with_windows);
+        assert!(upgraded.close_to_tray);
+        assert!(upgraded.save_overlay_enabled);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -324,6 +350,9 @@ mod tests {
             clips_grid_size: Some("compact".into()),
             clips_search_query: Some("雪 gta".into()),
             selected_collection_id: Some(Some("collection-1".into())),
+            start_with_windows: Some(true),
+            close_to_tray: Some(false),
+            save_overlay_enabled: Some(false),
         });
         assert!(response.success);
         assert_eq!(response.preferences.player_volume, 1.0);
@@ -335,6 +364,9 @@ mod tests {
         assert_eq!(loaded.clips_view, "favorites");
         assert_eq!(loaded.clips_grid_size, "compact");
         assert_eq!(loaded.clips_search_query, "雪 gta");
+        assert!(loaded.start_with_windows);
+        assert!(!loaded.close_to_tray);
+        assert!(!loaded.save_overlay_enabled);
         assert_eq!(
             loaded.selected_collection_id.as_deref(),
             Some("collection-1")

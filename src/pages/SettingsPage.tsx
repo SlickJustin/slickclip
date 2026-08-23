@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { AudioCaptureTest } from "../components/AudioCaptureTest";
 import { Toggle } from "../components/Toggle";
+import type { UiPreferences, UiPreferencesPatch, UiPreferencesResponse } from "../types/clips";
+import { defaultUiPreferences } from "../types/clips";
 
 type HotkeyState = {
   registered: boolean;
@@ -41,20 +43,48 @@ export function SettingsPage() {
   const [recordingHotkey, setRecordingHotkey] = useState(false);
   const [hotkeyPending, setHotkeyPending] = useState(false);
   const [hotkeyMessage, setHotkeyMessage] = useState<{ text: string; success: boolean } | null>(null);
-  const [toggles, setToggles] = useState({
-    windowsStartup: false,
-    bufferStartup: false,
-    desktopPrivacy: true,
-  });
+  const [preferences, setPreferences] = useState<UiPreferences>(defaultUiPreferences);
+  const [desktopSettingsPending, setDesktopSettingsPending] = useState(false);
+  const [desktopSettingsMessage, setDesktopSettingsMessage] = useState<{ text: string; success: boolean } | null>(null);
+  const [desktopPrivacy, setDesktopPrivacy] = useState(true);
 
-  function updateToggle(key: keyof typeof toggles, value: boolean) {
-    setToggles((current) => ({ ...current, [key]: value }));
+  async function updateDesktopPreference(patch: UiPreferencesPatch) {
+    setDesktopSettingsPending(true);
+    setDesktopSettingsMessage(null);
+    try {
+      const response = await invoke<UiPreferencesResponse>("update_ui_preferences", { patch });
+      setPreferences(response.preferences);
+      if (!response.success) throw new Error(response.errorMessage ?? "The desktop preference could not be saved.");
+    } catch (error) {
+      setDesktopSettingsMessage({ text: error instanceof Error ? error.message : String(error), success: false });
+    } finally {
+      setDesktopSettingsPending(false);
+    }
+  }
+
+  async function setStartWithWindows(enabled: boolean) {
+    setDesktopSettingsPending(true);
+    setDesktopSettingsMessage(null);
+    try {
+      const response = await invoke<UiPreferencesResponse>("set_start_with_windows", { enabled });
+      setPreferences(response.preferences);
+      if (!response.success) throw new Error(response.errorMessage ?? "Windows startup could not be updated.");
+      setDesktopSettingsMessage({ text: enabled ? "SlickClip will start in the background with Windows." : "Windows startup disabled.", success: true });
+    } catch (error) {
+      setDesktopSettingsMessage({ text: error instanceof Error ? error.message : String(error), success: false });
+    } finally {
+      setDesktopSettingsPending(false);
+    }
   }
 
   useEffect(() => {
-    void invoke<HotkeyState>("get_save_replay_hotkey")
-      .then(setHotkey)
-      .catch((error) => setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false }));
+    void Promise.all([
+      invoke<HotkeyState>("get_save_replay_hotkey"),
+      invoke<UiPreferencesResponse>("get_ui_preferences"),
+    ]).then(([hotkeyState, preferenceResponse]) => {
+      setHotkey(hotkeyState);
+      setPreferences(preferenceResponse.preferences);
+    }).catch((error) => setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false }));
   }, []);
 
   useEffect(() => {
@@ -228,16 +258,19 @@ export function SettingsPage() {
         </SettingsSection>
 
         <SettingsSection title="Startup">
-          <SettingsToggle label="Start SlickClip with Windows" checked={toggles.windowsStartup} onChange={(value) => updateToggle("windowsStartup", value)} />
-          <SettingsToggle label="Start Replay Buffer automatically" checked={toggles.bufferStartup} onChange={(value) => updateToggle("bufferStartup", value)} />
+          <SettingsToggle label="Start SlickClip with Windows" description="Launches quietly in the system tray after sign-in." checked={preferences.startWithWindows} disabled={desktopSettingsPending} onChange={(value) => void setStartWithWindows(value)} />
+          <SettingsToggle label="Close or minimize to tray" description="Keeps active replay capture running in the background." checked={preferences.closeToTray} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ closeToTray: value })} />
+          <SettingsToggle label="Show Replay Saved overlay" description="Shows a brief notification without taking focus." checked={preferences.saveOverlayEnabled} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ saveOverlayEnabled: value })} />
+          <SettingsToggle label="Start Replay Buffer automatically" description="Available after Stage 23 game auto-arm is configured." checked={false} disabled onChange={() => undefined} />
+          {desktopSettingsMessage && <span className={desktopSettingsMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{desktopSettingsMessage.text}</span>}
         </SettingsSection>
 
         <SettingsSection title="Privacy">
           <SettingsToggle
             label="Desktop Capture Privacy"
             description="Application exclusions and privacy rules will be added in a later stage."
-            checked={toggles.desktopPrivacy}
-            onChange={(value) => updateToggle("desktopPrivacy", value)}
+            checked={desktopPrivacy}
+            onChange={setDesktopPrivacy}
           />
         </SettingsSection>
       </div>
@@ -311,13 +344,14 @@ type SettingsToggleProps = {
   description?: string;
   checked: boolean;
   onChange: (checked: boolean) => void;
+  disabled?: boolean;
 };
 
-function SettingsToggle({ label, description, checked, onChange }: SettingsToggleProps) {
+function SettingsToggle({ label, description, checked, onChange, disabled = false }: SettingsToggleProps) {
   return (
     <div className="settings-row">
       <div><span>{label}</span>{description && <small>{description}</small>}</div>
-      <Toggle label={label} checked={checked} onChange={onChange} />
+      <Toggle label={label} checked={checked} onChange={onChange} disabled={disabled} />
     </div>
   );
 }

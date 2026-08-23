@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
@@ -26,5 +26,5 @@ serde_json = "1"
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 uuid = { version = "1.24.1", features = ["v4"] }
 windows-capture = { version = "=2.0.1", path = "../vendor/windows-capture" }
-windows = { version = "=0.62.2", features = ["Foundation", "Foundation_Metadata", "Graphics_Capture", "Media_Core", "Media_MediaProperties", "Media_Transcoding", "Security_Authorization_AppCapabilityAccess", "Security_Cryptography", "Storage_Streams", "Wdk_System_SystemServices", "Win32_Devices_FunctionDiscovery", "Win32_Foundation", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_MediaFoundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Performance", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Variant", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"] }
+windows = { version = "=0.62.2", features = ["Foundation", "Foundation_Metadata", "Graphics_Capture", "Media_Core", "Media_MediaProperties", "Media_Transcoding", "Security_Authorization_AppCapabilityAccess", "Security_Cryptography", "Storage_Streams", "Wdk_System_SystemServices", "Win32_Devices_FunctionDiscovery", "Win32_Foundation", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_MediaFoundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Performance", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Variant", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"] }
 windows-core = "=0.62.2"

@@ -464,7 +464,12 @@ fn run_save_job(
 
     let total_save_latency_ms = save_started.elapsed().as_secs_f64() * 1_000.0;
     match result {
-        Ok(Ok(result)) => shared.complete(result, total_save_latency_ms),
+        Ok(Ok(result)) => {
+            let duration_seconds = result.assembly.actual_duration_seconds;
+            shared.complete(result, total_save_latency_ms);
+            crate::desktop::show_save_overlay(&app_handle, duration_seconds);
+            crate::desktop::refresh_tray_status(&app_handle);
+        }
         Ok(Err(failure)) => shared.fail_with_audio_barriers(
             failure,
             replay.status().audio.save_barriers,

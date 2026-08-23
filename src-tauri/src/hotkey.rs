@@ -316,10 +316,13 @@ pub fn handle_global_shortcut(app: &AppHandle, shortcut: &Shortcut, state: Short
         }
         ShortcutAction::SaveReplay => {}
     }
+    request_save_with_feedback(app);
+}
+
+pub fn request_save_with_feedback(app: &AppHandle) {
     let Some(save_manager) = app.try_state::<ClipSaveManager>() else {
         return;
     };
-
     let result = save_manager.start();
     let message = if result.success {
         "Save Replay started.".to_string()
@@ -337,6 +340,7 @@ pub fn handle_global_shortcut(app: &AppHandle, shortcut: &Shortcut, state: Short
             save_state: result.status.state,
         },
     );
+    crate::desktop::refresh_tray_status(app);
 }
 
 #[tauri::command]

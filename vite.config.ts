@@ -11,6 +11,7 @@ export default defineConfig(async () => ({
     rollupOptions: {
       input: {
         main: "index.html",
+        overlay: "save-overlay.html",
         splash: "splash.html",
       },
     },

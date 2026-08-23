@@ -1,0 +1,51 @@
+:root {
+  color: #f5f1f7;
+  background: transparent;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
+
+.save-overlay-shell {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  width: 100%;
+  height: 100%;
+  padding: 14px 17px;
+  border: 1px solid rgba(151, 112, 230, 0.38);
+  border-radius: 11px;
+  background: linear-gradient(135deg, rgba(29, 25, 34, 0.98), rgba(15, 13, 18, 0.98));
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.42), inset 0 1px rgba(255, 255, 255, 0.035);
+}
+
+.save-overlay-mark {
+  display: grid;
+  flex: 0 0 40px;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(151, 112, 230, 0.46);
+  border-radius: 50%;
+  color: #c4a9fb;
+  background: rgba(108, 70, 190, 0.17);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.save-overlay-shell > div:last-child { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.save-overlay-shell strong { font-size: 14px; letter-spacing: 0.01em; }
+.save-overlay-shell span { overflow: hidden; color: #a69dac; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+
+.overlay-arriving .save-overlay-shell { animation: overlay-arrive 220ms ease-out; }
+
+@keyframes overlay-arrive {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overlay-arriving .save-overlay-shell { animation: none; }
+}
