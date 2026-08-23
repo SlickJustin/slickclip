@@ -6,7 +6,8 @@ Complete stages sequentially. Preserve completed behavior, finish each automated
 
 - Stages 0–18: complete and committed.
 - Stage 19: provisional checkpoint `c62c81f`; implementation and automated validation complete, with manual visual/regression validation still pending.
-- Stage 20: not started.
+- Stage 20: provisional checkpoint `6b40cc6`; implementation and automated validation complete, with manual UI validation still pending.
+- Stage 21: not started.
 - Waveform: explicitly deferred; not part of this roadmap.
 
 ## Stage 19 — Professional UI/UX Polish
@@ -27,6 +28,8 @@ Goals:
 Required gate: manual visual and regression validation across the full application, including reduced motion and responsive layouts. Do not commit the current working-tree implementation until that gate is approved.
 
 ## Stage 20 — Replay Roulette
+
+Status: provisional automated checkpoint `6b40cc6`; manual gate pending.
 
 Goals:
 
