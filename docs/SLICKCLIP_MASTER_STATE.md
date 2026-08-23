@@ -33,7 +33,8 @@ Repository: `C:\Users\Jakea\source\replay-app`
 - Stage 21 Animated Launch Experience has provisional checkpoint `f5c14f2`. Its automated checks pass, but manual native startup/focus/reduced-motion validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 22 Tray, Background, Startup, and Save Overlay has provisional checkpoint `db7328c`. Its automated checks pass, but manual native tray/startup/focus/background-capture validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 23 Game Detection and Auto-Arm has provisional checkpoint `4c8e3ec`. Its automated checks pass, but manual representative-game/launcher/fullscreen/false-positive validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
-- Stage 24 has not started.
+- Stage 24 Storage Safety has provisional checkpoint `bdfc167`. Its automated checks pass, but manual destructive-safety validation with disposable data remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
+- Stage 25 has not started.
 - The waveform experiment was deliberately deferred and remains in Git stash as `Stage 19 waveform experiment - deferred`.
 - The four project-control documents were accidentally committed as empty files in commit `07b3216`; this document set restores their intended content.
 
@@ -69,6 +70,7 @@ Never rely on this file for the current commit hash or stash index. Use Git to i
 - Recently Watched, Last Watched, Play Count, and storage summary.
 - Copy Clip through the native Windows file clipboard.
 - Open file/folder, rename, delete, and persisted UI preferences.
+- Configurable Library quota, independent Protected metadata, and explicit oldest-unprotected cleanup previews.
 
 ### Player
 
@@ -180,6 +182,22 @@ Automated results reported for this Stage 23 diff:
 - No lint script exists.
 
 These results do not replace the outstanding representative real-game/launcher/fullscreen/false-positive gate. Stage 23 remains provisionally complete rather than manually verified.
+
+## Stage 24 provisional checkpoint
+
+Stage 24 adds a persisted 1 GB–10 TB Library quota and a schema-v3 `pinned` flag exposed as Protected, deliberately separate from Favorite. Settings performs a backend-owned dry run that lists the exact oldest unprotected clips required by the quota, protected totals, projected reclaim, and whether protected capacity prevents reaching the quota. Execution accepts only an opaque one-use preview token, re-plans from current database metadata, rejects any changed scope, pre-validates every selected clip, and routes deletion through the existing trusted-ID, canonical owned-path, direct-child regular-MP4, database-row, and cache cleanup path. Quota enforcement is explicit rather than silently destructive in the background. Preference schema v4 persists the quota.
+
+Automated results reported for this Stage 24 diff:
+
+- `npm test`: 67 passed.
+- `npm run build`: passed.
+- `cargo check`: passed.
+- `cargo test -- --nocapture`: 160 passed, including cleanup order, protected preservation, stale-scope comparison, migration/persistence, owned-cache removal, and outside-path refusal coverage.
+- `cargo fmt -- --check`: passed with the known environment canonicalization warning.
+- `git diff --check`: passed.
+- No lint script exists.
+
+These results do not replace the outstanding destructive-safety test using disposable real clips. Stage 24 remains provisionally complete rather than manually verified.
 
 ## Architecture invariants
 

@@ -10,7 +10,7 @@ Complete stages sequentially. Preserve completed behavior, finish each automated
 - Stage 21: provisional checkpoint `f5c14f2`; implementation and automated validation complete, with manual startup/focus/reduced-motion validation still pending.
 - Stage 22: provisional checkpoint `db7328c`; implementation and automated validation complete, with manual Windows tray/startup/focus/background-capture validation still pending.
 - Stage 23: provisional checkpoint `4c8e3ec`; implementation and automated validation complete, with manual real-game/launcher/fullscreen/false-positive validation still pending.
-- Stage 24: not started.
+- Stage 24: provisional checkpoint `bdfc167`; implementation and automated validation complete, with manual destructive-safety validation still pending.
 - Waveform: explicitly deferred; not part of this roadmap.
 
 ## Stage 19 — Professional UI/UX Polish
@@ -85,6 +85,8 @@ Goals:
 Required gate: manual testing with representative real games, launchers, fullscreen modes, and false-positive scenarios.
 
 ## Stage 24 — Storage Safety
+
+Status: provisional automated checkpoint `bdfc167`; manual gate pending.
 
 Goals:
 
