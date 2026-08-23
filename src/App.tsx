@@ -7,6 +7,7 @@ import { EditorPage } from "./pages/EditorPage";
 import { ReplayPage } from "./pages/ReplayPage";
 import { ReplayRoulettePage } from "./pages/ReplayRoulettePage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { WatchPartyPage } from "./pages/WatchPartyPage";
 import type { ClipListItem } from "./types/clips";
 
 function App() {
@@ -78,6 +79,7 @@ function App() {
 
   const pages: Record<PageId, React.ReactNode> = {
     replay: <ReplayPage />,
+    watchParty: <WatchPartyPage />,
     clips: <ClipsPage onEditClip={openEditor} playClip={exportPlaybackClip} onPlayClipConsumed={() => setExportPlaybackClip(null)} onToast={showToast} />,
     roulette: <ReplayRoulettePage onToast={showToast} />,
     editor: <EditorPage clip={editorClip} onBackToClips={closeEditor} onPlayExport={playExport} onDirtyChange={setEditorDirty} onToast={showToast} />,

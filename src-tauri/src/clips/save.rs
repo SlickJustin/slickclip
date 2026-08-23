@@ -412,6 +412,49 @@ impl ClipSaveManager {
             }
         }
     }
+
+    pub(crate) fn finalize_external_recording(
+        &self,
+        snapshot: &ReplaySaveSnapshot,
+    ) -> Result<PathBuf, String> {
+        let mut worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if worker.as_ref().is_some_and(JoinHandle::is_finished) {
+            if let Some(finished) = worker.take() {
+                let _ = finished.join();
+            }
+        }
+        if duplicate_job_error(self.status().state, worker.is_some()).is_some() {
+            return Err("A Replay save is already in progress.".to_string());
+        }
+        drop(worker);
+
+        let timestamp = format!(
+            "WatchParty-{}",
+            utc_file_timestamp().map_err(|error| error.to_string())?
+        );
+        let assembly = FfmpegClipAssembler
+            .assemble(
+                snapshot,
+                self.output_directory.as_ref(),
+                &timestamp,
+                &|_| {},
+            )
+            .map_err(|failure| failure.message)?;
+        let metadata = saved_clip_metadata(snapshot, &assembly);
+        let indexed = self.library.index_saved_clip(metadata).map_err(|error| {
+            format!(
+                "Watch Party was saved to '{}', but Library indexing failed: {error}",
+                assembly.output_path.display()
+            )
+        })?;
+        let _ = self
+            .app_handle
+            .emit("clip-library-changed", indexed.clip_id.clone());
+        Ok(assembly.output_path)
+    }
 }
 
 fn run_save_job(

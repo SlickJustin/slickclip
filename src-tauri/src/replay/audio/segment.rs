@@ -2,13 +2,13 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::audio::AudioFormatMetadata;
 
 use super::AudioTrackRole;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletedAudioSegment {
     pub track_role: AudioTrackRole,

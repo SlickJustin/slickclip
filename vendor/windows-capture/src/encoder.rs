@@ -354,6 +354,33 @@ pub struct DetachedFrame {
     color_format: ColorFormat,
 }
 
+impl DetachedFrame {
+    /// Creates a blank application-owned GPU frame for callers that render a
+    /// composed image directly on the capture device before encoder submission.
+    pub fn new_render_target(
+        device: &ID3D11Device,
+        context: &windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+        width: u32,
+        height: u32,
+        color_format: ColorFormat,
+    ) -> Result<Self, VideoEncoderError> {
+        let surface = VideoEncoder::create_owned_surface(device, width, height, color_format)?;
+        Ok(Self {
+            device: SendDirectX::new(device.clone()),
+            context: SendDirectX::new(context.clone()),
+            surface,
+            width,
+            height,
+            color_format,
+        })
+    }
+
+    /// Gets the application-owned texture used as this frame's render target.
+    pub const fn as_raw_texture(&self) -> &ID3D11Texture2D {
+        &self.surface.texture.0
+    }
+}
+
 /// Builder for configuring video encoder settings.
 pub struct VideoSettingsBuilder {
     sub_type: VideoSettingsSubType,

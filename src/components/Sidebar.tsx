@@ -1,6 +1,6 @@
 import slickClipLogo from "../assets/branding/slickclip-logo.svg";
 
-export type PageId = "replay" | "clips" | "roulette" | "editor" | "settings";
+export type PageId = "replay" | "watchParty" | "clips" | "roulette" | "editor" | "settings";
 
 type SidebarProps = {
   activePage: PageId;
@@ -9,6 +9,7 @@ type SidebarProps = {
 
 const navigationItems: { id: PageId; label: string }[] = [
   { id: "replay", label: "Replay" },
+  { id: "watchParty", label: "Watch Party" },
   { id: "clips", label: "Clips" },
   { id: "roulette", label: "Replay Roulette" },
   { id: "editor", label: "Editor" },

@@ -130,7 +130,7 @@ After Stage 26 passes, SlickClip v1.0.0 may be released.
 
 ## Stage 27 — Watch Party / Reaction Capture
 
-Status: planned; do not implement until explicitly instructed. This is sequenced after the current v1.0 release boundary unless the user explicitly promotes it into v1.0 scope.
+Status: provisional implementation complete; automated validation passes, while the required real-Windows multi-hour, dynamic-participant, synchronization, source-loss, disk-pressure, recovery, playback, and Editor gate remains pending. The overnight instruction explicitly authorized this post-v1 roadmap work. Stage 27.1 has not been folded into the base implementation.
 
 Purpose: replace the user's OBS-based workflow for recording a long-form event/PPV together with Discord camera reactions.
 

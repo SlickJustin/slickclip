@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const PROCESS_LOOPBACK_MINIMUM_BUILD: u32 = 20_348;
 pub const AUDIO_TEST_DURATION_SECONDS: u64 = 10;
@@ -96,7 +96,7 @@ pub struct ProcessActivationProbeResult {
     pub error: Option<AudioError>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioFormatMetadata {
     pub sample_format: String,

@@ -9,9 +9,10 @@ use tauri::State;
 #[cfg(test)]
 pub use audio::CompletedAudioSegment;
 pub use audio::{
-    AudioReplayConfiguration, AudioSaveBarrierTelemetry, AudioSnapshotPlan, AudioSnapshotTrack,
-    AudioSourceKind, AudioTrackConfiguration, AudioTrackRole, AudioTrackState,
+    AudioReplayConfiguration, AudioSaveBarrierTelemetry, AudioSnapshotPinGuard, AudioSnapshotPlan,
+    AudioSnapshotTrack, AudioSourceKind, AudioTrackConfiguration, AudioTrackRole, AudioTrackState,
 };
+pub(crate) use audio::{AudioReplaySession, AudioReplayShared, ReplaySessionClock};
 pub use buffer::{ReplayBufferManager, ReplayBufferStartRequest, ReplaySaveSnapshot};
 pub use segment::CompletedSegment;
 pub use state::{ReplayBufferStatus, ReplayCommandResult, ReplayLifecycleState};
@@ -20,8 +21,15 @@ pub use timeline::SavedReplayTimeline;
 #[tauri::command]
 pub async fn start_replay_buffer(
     manager: State<'_, ReplayBufferManager>,
+    watch_party: State<'_, crate::watch_party::WatchPartyManager>,
     request: ReplayBufferStartRequest,
 ) -> Result<ReplayCommandResult, String> {
+    if watch_party.status().state.active() {
+        return Ok(ReplayCommandResult::failure(
+            manager.status(),
+            "Stop Watch Party before starting the separate Replay Buffer.",
+        ));
+    }
     Ok(manager.start(request))
 }
 

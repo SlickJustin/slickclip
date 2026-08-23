@@ -786,6 +786,14 @@ pub struct AudioSnapshotPinGuard {
     releases: Vec<(Arc<TrackShared>, Vec<u64>)>,
 }
 
+impl AudioSnapshotPinGuard {
+    pub(crate) fn empty() -> Self {
+        Self {
+            releases: Vec::new(),
+        }
+    }
+}
+
 impl Drop for AudioSnapshotPinGuard {
     fn drop(&mut self) {
         for (track, sequences) in &self.releases {

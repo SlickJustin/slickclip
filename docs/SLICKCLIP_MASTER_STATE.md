@@ -36,6 +36,7 @@ Repository: `C:\Users\Jakea\source\replay-app`
 - Stage 24 Storage Safety has provisional checkpoint `bdfc167`. Its automated checks pass, but manual destructive-safety validation with disposable data remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 25 Final SlickClip Migration and Distribution has provisional checkpoint `cc79345`. Its automated checks and unsigned NSIS bundle pass, but disposable-data migration and clean-machine install/capture/save/playback/edit/export/uninstall validation remain pending and are tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 26 Updater and Release Candidate has provisional implementation checkpoint `3322c46`. Its updater/release code and unsigned packaging checks pass, but signing credentials, hosted release infrastructure, a signed candidate, clean-PC upgrade/failure tests, and the complete release gate remain pending. SlickClip v1.0.0 is not approved for release.
+- Stage 27 Watch Party / Reaction Capture is provisionally implemented and automatically clean. Its real Windows multi-hour/dynamic-participant/synchronization/failure/recovery/playback/Editor validation is pending in `docs/MANUAL_VALIDATION_PENDING.md`.
 - The waveform experiment was deliberately deferred and remains in Git stash as `Stage 19 waveform experiment - deferred`.
 - The four project-control documents were accidentally committed as empty files in commit `07b3216`; this document set restores their intended content.
 
@@ -266,12 +267,30 @@ Stage 25 moved current product data to SlickClip-named roots. Intentional legacy
 
 The waveform feature was attempted and intentionally deferred. Its old work is preserved separately in Git stash. It is not part of the current v1.0 plan and must not be restored, applied, dropped, or recreated without explicit instruction.
 
-## Planned Watch Party direction
+## Stage 27 provisional Watch Party implementation
 
-Stage 27 adds a Watch Party / Reaction Capture mode intended to replace the user's tedious OBS setup for long-form event and reaction recording.
+Stage 27 adds a dedicated Watch Party / Reaction Capture mode intended to replace the user's tedious OBS setup for long-form event and reaction recording.
 
 The v1 design captures two live video sources: a Main Content window and the entire Discord call/popout window as one Reaction source. Discord remains responsible for arranging participant tiles. If someone joins or leaves after recording starts, Discord changes the same captured window and SlickClip records the updated layout automatically. Participants do not need to be present before recording begins.
 
-This requires simultaneous Windows Graphics Capture sources, GPU composition, independent content/voice/microphone audio handling, safe multi-hour segmented recording, finalization/recovery, and preset layouts. It is planned work only; no Stage 27 application code exists yet.
+The native implementation runs two simultaneous WGC sessions into bounded latest-frame slots and a dedicated D3D11 shader compositor. It produces a fixed 1920x1080 H.264 canvas at 30 FPS with Reactions Right, Reaction Strip, and Picture-in-Picture presets. Source aspect changes reflow inside the selected preset without participant detection or cropping. The reaction selector accepts only a whole Discord desktop window, and Discord/Voice Chat audio must resolve to a Discord desktop process from the active audio-session list (which may be a different Electron child PID from the visible window).
 
-A later Stage 27.1 may detect and crop individual Discord camera tiles, position them independently, and dynamically reflow 2/3/4-person layouts. Because Discord does not provide clean per-participant video streams to SlickClip, this participant-aware crop/reflow is explicitly an advanced option, not a v1 requirement for Watch Party.
+Main Content, Voice Chat, and Microphone use the existing native WASAPI/QPC audio pipeline. Stop finalizes the last 30-second-or-shorter video segment, establishes the audio coverage barrier, and reuses the verified FFmpeg assembly/mux and Library indexing path. Normal output contains Combined/default audio plus the three independent stems. Replay Buffer and Watch Party are mutually exclusive, and existing Library/Editor architecture remains unchanged.
+
+Every finalized video segment updates a flushed, atomic app-owned checkpoint. Recovery accepts only canonical finalized MP4 segments that are direct children of the selected Watch Party session, validates their CFR timeline, and creates a video-only Library clip from valid checkpointed material. After a verified Library output, temporary session media is removed only after direct-child, canonical-parent, name, and reparse-point checks; a cleanup failure retains it and surfaces a non-destructive warning. A source that closes retains its last frame and surfaces a clear Stop/finalize message; low disk space fails before opening the next segment. Application shutdown requests orderly Stop and joins the Watch Party worker.
+
+The Save Replay hotkey remains scoped to Replay Buffer. Watch Party is continuous rather than rolling, and enabling a moment-save without a separately designed retention/pinning policy would risk unbounded long-form work or contention with finalization; the roadmap makes this optional only where safely permitted.
+
+Automated results reported for this Stage 27 diff:
+
+- `npm test`: 67 passed.
+- `npm run build`: passed.
+- `cargo check`: passed.
+- `cargo test -- --nocapture`: 177 passed, including real D3D11 shader compilation/composition, layout/reflow, exact segment cadence, source-loss, required audio/process binding, atomic replacement, outside-path recovery refusal, and scoped temporary-session cleanup tests.
+- `cargo fmt -- --check`: passed with the known environment canonicalization warning.
+- `git diff --check`: passed; line-ending notices are advisory only.
+- No lint script exists.
+
+Manual validation is still mandatory. No real Discord participant, multi-hour soak, real audio synchronization, disk-pressure, crash recovery, playback, or Editor behavior is claimed as passed.
+
+A later Stage 27.1 may detect and crop individual Discord camera tiles, position them independently, and dynamically reflow 2/3/4-person layouts. Because Discord does not provide clean individual participant streams to SlickClip, this participant-aware crop/reflow remains an explicitly advanced, fragile option and was not introduced into Stage 27.

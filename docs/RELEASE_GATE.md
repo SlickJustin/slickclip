@@ -105,7 +105,7 @@ Stage 19 now has a provisional automated checkpoint, but its manual UI gate rema
 ## Explicitly deferred or post-v1 scope
 
 - The waveform experiment is deferred and is not a v1.0 release requirement.
-- Stage 27 Watch Party / Reaction Capture and Stage 27.1 participant-aware crop/reflow are recorded in `V1_ROADMAP.md` but are sequenced after the current v1.0 release boundary unless explicitly promoted.
+- Stage 27 Watch Party / Reaction Capture has a provisional post-v1 implementation checkpoint but remains manually unverified; Stage 27.1 participant-aware crop/reflow remains optional later work. Neither changes the still-failed Stage 0–26 v1.0 release decision.
 - Stage 27 v1 will use whole-window Discord reaction capture so participants can join or leave mid-recording; individual camera extraction is not required for that first Watch Party version.
 
 ## Release decision

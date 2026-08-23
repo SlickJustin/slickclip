@@ -75,6 +75,7 @@ pub struct ResolvedCaptureTarget {
     pub label: String,
     pub width: u32,
     pub height: u32,
+    pub process_id: Option<u32>,
 }
 
 #[tauri::command]
@@ -223,6 +224,7 @@ fn resolve_monitor(id: &str) -> Result<ResolvedCaptureTarget, String> {
             label: format!("Display {display_index} - {friendly_name}"),
             width,
             height,
+            process_id: None,
         });
     }
 
@@ -261,6 +263,7 @@ fn resolve_window(id: &str) -> Result<ResolvedCaptureTarget, String> {
                 .unwrap_or(title),
             width: positive_dimension(width, "width")?,
             height: positive_dimension(height, "height")?,
+            process_id: Some(process_id),
         });
     }
 
@@ -268,6 +271,28 @@ fn resolve_window(id: &str) -> Result<ResolvedCaptureTarget, String> {
         "The selected window is no longer available. Refresh the target list and try again."
             .to_string(),
     )
+}
+
+pub(crate) fn resolve_discord_window(id: &str) -> Result<ResolvedCaptureTarget, String> {
+    let metadata = enumerate_windows()?
+        .into_iter()
+        .find(|window| window.id == id)
+        .ok_or_else(|| {
+            "The selected Discord reaction window is no longer available. Refresh and try again."
+                .to_string()
+        })?;
+    let is_discord = metadata.process_name.as_deref().is_some_and(|name| {
+        let normalized = name.trim_end_matches(".exe");
+        normalized.eq_ignore_ascii_case("discord")
+            || normalized.to_ascii_lowercase().starts_with("discord")
+    });
+    if !is_discord {
+        return Err(
+            "Watch Party reactions must use one whole window owned by the Discord desktop app."
+                .to_string(),
+        );
+    }
+    resolve_window(id)
 }
 
 fn monitor_id(device_name: &str) -> String {

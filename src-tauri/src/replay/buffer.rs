@@ -254,8 +254,41 @@ pub struct ReplaySaveSnapshot {
     pub video_boundary_wait_ms: f64,
     pub audio_barrier_wait_ms: f64,
     pub snapshot_ready_latency_ms: f64,
-    _pins: SegmentPinGuard,
-    _audio_pins: AudioSnapshotPinGuard,
+    _pins: Option<SegmentPinGuard>,
+    _audio_pins: Option<AudioSnapshotPinGuard>,
+}
+
+impl ReplaySaveSnapshot {
+    pub(crate) fn from_completed_recording(
+        save_request_timestamp_ms: u64,
+        requested_duration_seconds: u32,
+        capture_target_label: String,
+        segments: Vec<CompletedSegment>,
+        video_timeline: SavedReplayTimeline,
+        audio_snapshot_plans: Vec<AudioSnapshotPlan>,
+        audio_snapshot_tracks: Vec<AudioSnapshotTrack>,
+        audio_save_barriers: Vec<AudioSaveBarrierTelemetry>,
+        audio_pins: AudioSnapshotPinGuard,
+        audio_barrier_wait_ms: f64,
+    ) -> Self {
+        Self {
+            save_request_timestamp_ms,
+            save_request_qpc_100ns: video_timeline.clip_capture_end_qpc_100ns,
+            requested_duration_seconds,
+            capture_target_label: Some(capture_target_label),
+            capture_target_type: Some("watchParty".to_string()),
+            segments,
+            video_timeline,
+            audio_snapshot_plans,
+            audio_snapshot_tracks,
+            audio_save_barriers,
+            video_boundary_wait_ms: 0.0,
+            audio_barrier_wait_ms,
+            snapshot_ready_latency_ms: audio_barrier_wait_ms,
+            _pins: None,
+            _audio_pins: Some(audio_pins),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1104,8 +1137,8 @@ impl SharedReplay {
             video_boundary_wait_ms,
             audio_barrier_wait_ms: audio.wait_duration.as_secs_f64() * 1_000.0,
             snapshot_ready_latency_ms: save_started.elapsed().as_secs_f64() * 1_000.0,
-            _pins: video_pins,
-            _audio_pins: audio.pins,
+            _pins: Some(video_pins),
+            _audio_pins: Some(audio.pins),
         })
     }
 
@@ -1360,6 +1393,7 @@ fn run_replay_session(
         label,
         width,
         height,
+        ..
     } = resolve_target(&request.target)?;
     let width = even_dimension(width)?;
     let height = even_dimension(height)?;

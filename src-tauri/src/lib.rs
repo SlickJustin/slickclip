@@ -9,6 +9,7 @@ mod migration;
 mod preferences;
 mod replay;
 mod updater;
+mod watch_party;
 
 use std::{
     sync::{
@@ -116,12 +117,20 @@ pub fn run() {
                 clips_directory.clone(),
                 app.handle().clone(),
             ));
-            app.manage(clips::ClipSaveManager::new(
+            let clip_save_manager = clips::ClipSaveManager::new(
                 replay_manager.clone(),
                 clips_directory,
                 clip_library.clone(),
                 app.handle().clone(),
-            ));
+            );
+            app.manage(
+                watch_party::WatchPartyManager::new(
+                    app_data.join("WatchParty"),
+                    clip_save_manager.clone(),
+                )
+                .map_err(std::io::Error::other)?,
+            );
+            app.manage(clip_save_manager);
             app.manage(clip_library);
             app.manage(replay_manager);
             let audio_tests_directory = slickclip_video_root.join("DevTests").join("Audio");
@@ -201,6 +210,10 @@ pub fn run() {
             updater::get_update_configuration,
             updater::check_for_slickclip_update,
             updater::install_slickclip_update,
+            watch_party::start_watch_party,
+            watch_party::stop_watch_party,
+            watch_party::get_watch_party_status,
+            watch_party::recover_watch_party,
             audio::list_audio_microphones,
             audio::list_application_audio_processes,
             audio::get_process_loopback_capability,
@@ -266,6 +279,9 @@ pub(crate) fn prepare_for_exit(app_handle: &tauri::AppHandle) {
         .unregister(app_handle);
     app_handle
         .state::<library::EditorExportManager>()
+        .shutdown_and_wait();
+    app_handle
+        .state::<watch_party::WatchPartyManager>()
         .shutdown_and_wait();
     app_handle
         .state::<clips::ClipSaveManager>()
