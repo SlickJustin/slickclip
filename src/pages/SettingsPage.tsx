@@ -40,6 +40,20 @@ type GameDetectionStatus = {
   errorMessage: string | null;
 };
 
+type UpdateConfiguration = {
+  configured: boolean;
+  currentVersion: string;
+  message: string;
+};
+
+type UpdateCheck = {
+  currentVersion: string;
+  updateAvailable: boolean;
+  version: string | null;
+  notes: string | null;
+  publishedAt: string | null;
+};
+
 const initialGameDetectionStatus: GameDetectionStatus = {
   success: true,
   enabled: false,
@@ -83,6 +97,10 @@ export function SettingsPage() {
   const [storagePreview, setStoragePreview] = useState<StorageCleanupPreviewResponse | null>(null);
   const [storagePending, setStoragePending] = useState(false);
   const [storageMessage, setStorageMessage] = useState<{ text: string; success: boolean } | null>(null);
+  const [updateConfiguration, setUpdateConfiguration] = useState<UpdateConfiguration | null>(null);
+  const [availableUpdate, setAvailableUpdate] = useState<UpdateCheck | null>(null);
+  const [updatePending, setUpdatePending] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState<{ text: string; success: boolean } | null>(null);
 
   async function updateDesktopPreference(patch: UiPreferencesPatch) {
     setDesktopSettingsPending(true);
@@ -123,6 +141,47 @@ export function SettingsPage() {
       setStorageQuotaInput(String(preferenceResponse.preferences.storageQuotaGib));
     }).catch((error) => setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false }));
   }, []);
+
+  useEffect(() => {
+    void invoke<UpdateConfiguration>("get_update_configuration")
+      .then(setUpdateConfiguration)
+      .catch((error) => setUpdateMessage({ text: error instanceof Error ? error.message : String(error), success: false }));
+  }, []);
+
+  async function checkForUpdates() {
+    if (updatePending || !updateConfiguration?.configured) return;
+    setUpdatePending(true);
+    setUpdateMessage(null);
+    setAvailableUpdate(null);
+    try {
+      const response = await invoke<UpdateCheck>("check_for_slickclip_update");
+      setAvailableUpdate(response);
+      setUpdateMessage({
+        text: response.updateAvailable && response.version
+          ? `SlickClip ${response.version} is available.`
+          : `SlickClip ${response.currentVersion} is up to date.`,
+        success: true,
+      });
+    } catch (error) {
+      setUpdateMessage({ text: error instanceof Error ? error.message : String(error), success: false });
+    } finally {
+      setUpdatePending(false);
+    }
+  }
+
+  async function installUpdate() {
+    if (updatePending || !availableUpdate?.updateAvailable || !availableUpdate.version) return;
+    const version = availableUpdate.version;
+    if (!window.confirm(`Download the signed SlickClip ${version} update, install it, and restart now?\n\nSave or finish any active work first.`)) return;
+    setUpdatePending(true);
+    setUpdateMessage({ text: `Downloading and verifying SlickClip ${version}. SlickClip will restart after installation.`, success: true });
+    try {
+      await invoke("install_slickclip_update", { expectedVersion: version });
+    } catch (error) {
+      setUpdateMessage({ text: error instanceof Error ? error.message : String(error), success: false });
+      setUpdatePending(false);
+    }
+  }
 
   async function saveStorageQuota() {
     const parsed = Number(storageQuotaInput);
@@ -409,6 +468,19 @@ export function SettingsPage() {
           <SettingsToggle label="Close or minimize to tray" description="Keeps active replay capture running in the background." checked={preferences.closeToTray} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ closeToTray: value })} />
           <SettingsToggle label="Show Replay Saved overlay" description="Shows a brief notification without taking focus." checked={preferences.saveOverlayEnabled} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ saveOverlayEnabled: value })} />
           {desktopSettingsMessage && <span className={desktopSettingsMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{desktopSettingsMessage.text}</span>}
+        </SettingsSection>
+
+        <SettingsSection title="Updates">
+          <div className="settings-row update-setting-row">
+            <div><span>SlickClip {updateConfiguration?.currentVersion ?? "…"}</span><small>{updateConfiguration?.message ?? "Reading signed update configuration…"}</small></div>
+            <button className="secondary-button" type="button" disabled={updatePending || !updateConfiguration?.configured} onClick={() => void checkForUpdates()}>{updatePending ? "Working…" : "Check for Updates"}</button>
+          </div>
+          {availableUpdate?.updateAvailable && availableUpdate.version && <div className="update-available-card" role="status">
+            <div><strong>SlickClip {availableUpdate.version}</strong>{availableUpdate.publishedAt && <small>Published {new Date(availableUpdate.publishedAt).toLocaleString()}</small>}</div>
+            {availableUpdate.notes && <p>{availableUpdate.notes}</p>}
+            <button className="primary-button" type="button" disabled={updatePending} onClick={() => void installUpdate()}>Update & Restart</button>
+          </div>}
+          {updateMessage && <span className={updateMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{updateMessage.text}</span>}
         </SettingsSection>
 
         <SettingsSection title="Game Detection">

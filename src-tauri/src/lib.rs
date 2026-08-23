@@ -8,6 +8,7 @@ mod library;
 mod migration;
 mod preferences;
 mod replay;
+mod updater;
 
 use std::{
     sync::{
@@ -72,6 +73,7 @@ fn complete_startup(
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -127,6 +129,7 @@ pub fn run() {
             app.manage(preferences::UiPreferencesManager::initialize(
                 app_data.join("Preferences").join("ui-preferences.json"),
             ));
+            app.manage(updater::UpdateManager::default());
             app.manage(hotkey::SaveReplayHotkeyManager::new());
             app.state::<hotkey::SaveReplayHotkeyManager>()
                 .register_initial(app.handle());
@@ -195,6 +198,9 @@ pub fn run() {
             hotkey::cancel_hotkey_test,
             preferences::get_ui_preferences,
             preferences::update_ui_preferences,
+            updater::get_update_configuration,
+            updater::check_for_slickclip_update,
+            updater::install_slickclip_update,
             audio::list_audio_microphones,
             audio::list_application_audio_processes,
             audio::get_process_loopback_capability,
@@ -240,27 +246,31 @@ pub fn run() {
             event,
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
         ) {
-            if let Some(integration) = app_handle.try_state::<desktop::DesktopIntegration>() {
-                integration.begin_exit();
-            }
-            app_handle
-                .state::<game_detection::GameDetectionManager>()
-                .shutdown_and_wait();
-            app_handle
-                .state::<audio::AudioCaptureTestManager>()
-                .shutdown_and_wait();
-            app_handle
-                .state::<hotkey::SaveReplayHotkeyManager>()
-                .unregister(app_handle);
-            app_handle
-                .state::<library::EditorExportManager>()
-                .shutdown_and_wait();
-            app_handle
-                .state::<clips::ClipSaveManager>()
-                .shutdown_and_wait();
-            app_handle
-                .state::<replay::ReplayBufferManager>()
-                .shutdown_and_cleanup();
+            prepare_for_exit(app_handle);
         }
     });
+}
+
+pub(crate) fn prepare_for_exit(app_handle: &tauri::AppHandle) {
+    if let Some(integration) = app_handle.try_state::<desktop::DesktopIntegration>() {
+        integration.begin_exit();
+    }
+    app_handle
+        .state::<game_detection::GameDetectionManager>()
+        .shutdown_and_wait();
+    app_handle
+        .state::<audio::AudioCaptureTestManager>()
+        .shutdown_and_wait();
+    app_handle
+        .state::<hotkey::SaveReplayHotkeyManager>()
+        .unregister(app_handle);
+    app_handle
+        .state::<library::EditorExportManager>()
+        .shutdown_and_wait();
+    app_handle
+        .state::<clips::ClipSaveManager>()
+        .shutdown_and_wait();
+    app_handle
+        .state::<replay::ReplayBufferManager>()
+        .shutdown_and_cleanup();
 }

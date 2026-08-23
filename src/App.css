@@ -3910,6 +3910,42 @@ summary:active {
 
 .sidebar-version { font-size: var(--font-eyebrow); }
 
+.update-setting-row {
+  align-items: center;
+}
+
+.update-setting-row button {
+  flex: 0 0 auto;
+}
+
+.update-available-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(124, 92, 232, 0.45);
+  border-radius: 10px;
+  background: rgba(92, 61, 177, 0.1);
+}
+
+.update-available-card > div {
+  display: grid;
+  gap: 3px;
+}
+
+.update-available-card small,
+.update-available-card p {
+  color: var(--muted-text);
+}
+
+.update-available-card p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.update-available-card button {
+  justify-self: start;
+}
+
 select,
 .clips-toolbar input {
   height: 38px;
