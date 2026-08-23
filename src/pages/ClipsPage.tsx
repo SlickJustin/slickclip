@@ -359,13 +359,32 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
       {refreshResult && <div className="clips-refresh-result" role="status">Scanned {refreshResult.scannedFiles} • unchanged {refreshResult.unchanged} • added {refreshResult.added} • updated {refreshResult.updated} • removed {refreshResult.removed} • failed {refreshResult.failed} • {refreshResult.durationMs.toFixed(1)} ms</div>}
       {loading ? <LibraryState title="Loading clips..." detail="Reading the local Clips database." /> : clips.length === 0 && !error ? <LibraryState title="No matching clips" detail="Try another view, collection, or search." /> : <div className={`clips-library-grid grid-${preferences.clipsGridSize}`}>
         {clips.map((clip) => <article className="clip-card" key={clip.id}><ClipThumbnail clip={clip} onPlay={() => setPlayingClip(clip)} /><div className="clip-card-body">
-          <div className="clip-card-heading"><div><button className="clip-title-button" type="button" onClick={() => setPlayingClip(clip)}>{clip.displayName}</button><small>{new Date(clip.createdAtMs).toLocaleString()}</small>{clip.lastWatchedAtMs && <small title={new Date(clip.lastWatchedAtMs).toLocaleString()}>{formatLastWatched(clip.lastWatchedAtMs)}</small>}</div><button className={`favorite-button${clip.favorite ? " active" : ""}`} type="button" aria-label={clip.favorite ? "Remove favorite" : "Add favorite"} title={clip.favorite ? "Remove favorite" : "Add favorite"} onClick={() => void setFavorite(clip)}>{clip.favorite ? "★" : "☆"}</button></div>
-          <div className="clip-card-facts"><span>{formatDuration100ns(clip.duration100ns)}</span><span>{formatBytes(clip.fileSizeBytes)}</span><span>{formatFps(clip.fpsNumerator, clip.fpsDenominator)} FPS</span>{clip.pinned && <span className="clip-protected-badge" title="Excluded from storage cleanup">Protected</span>}{clip.playCount > 0 && <span>▶ {clip.playCount} {clip.playCount === 1 ? "play" : "plays"}</span>}{clip.captureTargetLabel && <span>{clip.captureTargetLabel}</span>}</div>
+          <div className="clip-card-heading">
+            <div>
+              <button className="clip-title-button" type="button" onClick={() => setPlayingClip(clip)}>{clip.displayName}</button>
+              <small className="clip-card-date">
+                {new Date(clip.createdAtMs).toLocaleString()}
+                {clip.lastWatchedAtMs && <span title={new Date(clip.lastWatchedAtMs).toLocaleString()}> • {formatLastWatched(clip.lastWatchedAtMs)}</span>}
+              </small>
+            </div>
+            <button className={`favorite-button${clip.favorite ? " active" : ""}`} type="button" aria-label={clip.favorite ? "Remove favorite" : "Add favorite"} title={clip.favorite ? "Remove favorite" : "Add favorite"} onClick={() => void setFavorite(clip)}>{clip.favorite ? "★" : "☆"}</button>
+          </div>
+          <div className="clip-card-facts">
+            <span>{formatDuration100ns(clip.duration100ns)}</span>
+            <i aria-hidden="true">•</i>
+            <span>{clip.width}×{clip.height} / {formatFps(clip.fpsNumerator, clip.fpsDenominator)} FPS</span>
+            <i aria-hidden="true">•</i>
+            <span>{formatBytes(clip.fileSizeBytes)}</span>
+          </div>
+          {(clip.pinned || clip.playCount > 0 || clip.captureTargetLabel) && <div className="clip-card-context">
+            {clip.pinned && <span className="clip-protected-badge" title="Excluded from storage cleanup">Protected</span>}
+            {clip.playCount > 0 && <span>{clip.playCount} {clip.playCount === 1 ? "play" : "plays"}</span>}
+            {clip.captureTargetLabel && <span title={clip.captureTargetLabel}>{clip.captureTargetLabel}</span>}
+          </div>}
           {clip.audioTracks.length > 0 && <div className="clip-audio-badges">{clip.audioTracks.map((track) => <span key={track.streamIndex}>{audioLabel(track)}</span>)}</div>}
           <div className="clip-card-actions">
             <button className="clip-play-button" type="button" onClick={() => setPlayingClip(clip)}>▶ Play</button>
             <button className="clip-edit-button" type="button" onClick={() => onEditClip(clip)}>Edit</button>
-            <button type="button" onClick={() => void copyClip(clip)}>Copy Clip</button>
             <button
               className="clip-more-button"
               type="button"
@@ -387,6 +406,9 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
         style={{ top: moreMenu.top, left: moreMenu.left }}
         onKeyDown={navigateMoreMenu}
       >
+        <div className="clip-more-menu-section clip-more-menu-primary" role="group" aria-label="Clip actions">
+          <button type="button" role="menuitem" onClick={() => { closeMoreMenu(); void copyClip(moreMenuClip); }}>Copy Clip</button>
+        </div>
         <div className="clip-more-menu-section" role="group" aria-label="Collections">
           <span className="clip-more-menu-heading">Collections</span>
           {collections.length === 0

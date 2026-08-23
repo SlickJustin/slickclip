@@ -862,92 +862,16 @@ export function ReplayPage() {
           <h1>Replay</h1>
           <p>Capture the moments you actually want to keep.</p>
         </div>
-        <span className="demo-badge">VIDEO BUFFER</span>
+        <span className="demo-badge">Replay Buffer</span>
       </header>
 
-      <section className="native-capture-test" aria-labelledby="native-capture-test-heading">
-        <div className="native-capture-test-header">
-          <div className="native-capture-test-copy">
-            <span className="eyebrow">DEVELOPMENT PROOF</span>
-            <h2 id="native-capture-test-heading">NATIVE CAPTURE TEST</h2>
-            <p>Select a display or application window, then record five seconds of video only.</p>
-          </div>
-          <button
-            className="secondary-button capture-target-refresh"
-            type="button"
-            disabled={targetsLoading || captureTestActive || replayActive}
-            onClick={refreshVisibleTargets}
-          >
-            {targetsLoading ? "Refreshing..." : "Refresh"}
-          </button>
-        </div>
-
-        <div className="capture-target-tabs" aria-label="Capture target type">
-          <button
-            className={targetTab === "monitor" ? "capture-target-tab-active" : ""}
-            type="button"
-            aria-pressed={targetTab === "monitor"}
-            disabled={replayActive}
-            onClick={() => changeTargetTab("monitor")}
-          >
-            Displays <span>{monitors.length}</span>
-          </button>
-          <button
-            className={targetTab === "window" ? "capture-target-tab-active" : ""}
-            type="button"
-            aria-pressed={targetTab === "window"}
-            disabled={replayActive}
-            onClick={() => changeTargetTab("window")}
-          >
-            Windows <span>{windows.length}</span>
-          </button>
-        </div>
-
-        <div className={`capture-target-list capture-target-list-${targetTab}`}>
-          {targetsLoading ? (
-            <div className="capture-target-empty">Detecting available {targetTab === "monitor" ? "displays" : "windows"}...</div>
-          ) : targetsError ? (
-            <div className="capture-target-empty capture-target-load-error">{targetsError}</div>
-          ) : targetTab === "monitor" ? (
-            monitors.length > 0 ? monitors.map((monitor) => (
-              <button
-                className={`capture-target-card${selectedTarget?.id === monitor.id ? " capture-target-selected" : ""}`}
-                type="button"
-                aria-pressed={selectedTarget?.id === monitor.id}
-                disabled={replayActive}
-                key={monitor.id}
-                onClick={() => setSelectedTarget({ targetType: "monitor", id: monitor.id })}
-              >
-                <span className="capture-target-card-title">
-                  Display {monitor.displayIndex}
-                  {monitor.primary && <span className="capture-target-primary">Primary</span>}
-                </span>
-                <span className="capture-target-friendly-name">{monitor.friendlyName}</span>
-                <span className="capture-target-details">
-                  {monitor.width} × {monitor.height}
-                  {monitor.refreshRate && <span>{monitor.refreshRate} Hz</span>}
-                </span>
-              </button>
-            )) : (
-              <div className="capture-target-empty">No capturable displays were detected.</div>
-            )
-          ) : windows.length > 0 ? windows.map((window) => (
-            <button
-              className={`capture-window-row${selectedTarget?.id === window.id ? " capture-target-selected" : ""}`}
-              type="button"
-              aria-pressed={selectedTarget?.id === window.id}
-              disabled={replayActive}
-              key={window.id}
-              onClick={() => setSelectedTarget({ targetType: "window", id: window.id })}
-            >
-              <span className="capture-window-app">{window.processName ?? `Process ${window.processId}`}</span>
-              <span className="capture-window-title">{window.title}</span>
-              <span className="capture-window-size">{window.width} × {window.height}</span>
-            </button>
-          )) : (
-            <div className="capture-target-empty">No capturable application windows were detected.</div>
-          )}
-        </div>
+      <details className="panel replay-diagnostics replay-capture-test-diagnostics" aria-labelledby="native-capture-test-heading">
+        <summary>
+          <span><span className="eyebrow">Advanced tools</span><strong id="native-capture-test-heading">Native capture test</strong></span>
+          <small>Five-second video proof and encoder capability details</small>
+        </summary>
+        <div className="replay-diagnostics-content replay-capture-test-content">
+          <p className="replay-capture-test-intro">Records five seconds of video from the selected source without starting the Replay Buffer.</p>
 
         <div className="capture-encoder-section">
           <div className="capture-encoder-heading">
@@ -1036,15 +960,16 @@ export function ReplayPage() {
             {captureTestStatus === "recording" ? "Recording test..." : captureTestActive ? "Preparing capture..." : "Record 5 Second Test"}
           </button>
         </div>
-      </section>
+        </div>
+      </details>
 
       <section className="status-card" aria-labelledby="buffer-heading">
         <div className="status-card-copy">
-          <span className="eyebrow">CAPTURE STATUS</span>
+          <span className="status-label">Capture status</span>
           <h2 id="buffer-heading">Replay Buffer</h2>
           <div className={`replay-state replay-state-${replayStatus.state}`}>
             <span className="status-dot" aria-hidden="true" />
-            Status: {formatReplayState(replayStatus.state)}
+            {formatReplayState(replayStatus.state)}
           </div>
           <div className="replay-status-summary">
             <span>Target <strong>{replayStatus.targetLabel ?? selectedTargetLabel ?? "Not selected"}</strong></span>
@@ -1087,15 +1012,48 @@ export function ReplayPage() {
           <section className="panel" aria-labelledby="capture-heading">
           <div className="section-heading">
             <div>
-              <span className="eyebrow">CONFIGURATION</span>
-              <h2 id="capture-heading">Capture</h2>
+              <h2 id="capture-heading">Capture source</h2>
+              <p className="section-description">Choose the display or application SlickClip should retain.</p>
             </div>
-            <span className="section-note">Session only</span>
+            <button className="secondary-button capture-target-refresh" type="button" disabled={targetsLoading || replayActive} onClick={refreshVisibleTargets}>
+              {targetsLoading ? "Refreshing..." : "Refresh Sources"}
+            </button>
           </div>
 
-          <div className="setting-row">
-            <span className="setting-label">Capture Target</span>
-            <span className="replay-setting-value">{selectedTargetLabel ?? "Select a target above"}</span>
+          <div className="capture-target-tabs" aria-label="Capture target type">
+            <button className={targetTab === "monitor" ? "capture-target-tab-active" : ""} type="button" aria-pressed={targetTab === "monitor"} disabled={replayActive} onClick={() => changeTargetTab("monitor")}>
+              Displays <span>{monitors.length}</span>
+            </button>
+            <button className={targetTab === "window" ? "capture-target-tab-active" : ""} type="button" aria-pressed={targetTab === "window"} disabled={replayActive} onClick={() => changeTargetTab("window")}>
+              Windows <span>{windows.length}</span>
+            </button>
+          </div>
+
+          <div className={`capture-target-list capture-target-list-${targetTab}`}>
+            {targetsLoading ? (
+              <div className="capture-target-empty">Detecting available {targetTab === "monitor" ? "displays" : "windows"}...</div>
+            ) : targetsError ? (
+              <div className="capture-target-empty capture-target-load-error">{targetsError}</div>
+            ) : targetTab === "monitor" ? (
+              monitors.length > 0 ? monitors.map((monitor) => (
+                <button className={`capture-target-card${selectedTarget?.id === monitor.id ? " capture-target-selected" : ""}`} type="button" aria-pressed={selectedTarget?.id === monitor.id} disabled={replayActive} key={monitor.id} onClick={() => setSelectedTarget({ targetType: "monitor", id: monitor.id })}>
+                  <span className="capture-target-card-title">Display {monitor.displayIndex}{monitor.primary && <span className="capture-target-primary">Primary</span>}</span>
+                  <span className="capture-target-friendly-name">{monitor.friendlyName}</span>
+                  <span className="capture-target-details">{monitor.width} × {monitor.height}{monitor.refreshRate && <span>{monitor.refreshRate} Hz</span>}</span>
+                </button>
+              )) : <div className="capture-target-empty">No capturable displays were detected.</div>
+            ) : windows.length > 0 ? windows.map((window) => (
+              <button className={`capture-window-row${selectedTarget?.id === window.id ? " capture-target-selected" : ""}`} type="button" aria-pressed={selectedTarget?.id === window.id} disabled={replayActive} key={window.id} onClick={() => setSelectedTarget({ targetType: "window", id: window.id })}>
+                <span className="capture-window-app">{window.processName ?? `Process ${window.processId}`}</span>
+                <span className="capture-window-title">{window.title}</span>
+                <span className="capture-window-size">{window.width} × {window.height}</span>
+              </button>
+            )) : <div className="capture-target-empty">No capturable application windows were detected.</div>}
+          </div>
+
+          <div className="capture-selection-summary">
+            <span>Selected source</span>
+            <strong>{selectedTargetLabel ?? "Choose a source to continue"}</strong>
           </div>
           <label className="setting-row">
             <span className="setting-label">Replay Duration</span>
@@ -1139,7 +1097,7 @@ export function ReplayPage() {
 
           <section className="panel replay-audio-panel" aria-labelledby="replay-audio-heading">
           <div className="section-heading">
-            <div><span className="eyebrow">INDEPENDENT TRACKS</span><h2 id="replay-audio-heading">Audio</h2></div>
+            <div><h2 id="replay-audio-heading">Audio sources</h2><p className="section-description">Keep game, voice chat, and microphone audio independently adjustable.</p></div>
             <button className="secondary-button" type="button" disabled={replayActive || audioSourcesLoading} onClick={() => void refreshAudioSources()}>
               {audioSourcesLoading ? "Refreshing..." : "Refresh Sources"}
             </button>
@@ -1171,7 +1129,7 @@ export function ReplayPage() {
         <div className="replay-side-stack">
           <details className="panel replay-diagnostics" aria-labelledby="diagnostics-heading">
             <summary>
-              <span><span className="eyebrow">ADVANCED DIAGNOSTICS</span><strong id="diagnostics-heading">Capture telemetry</strong></span>
+              <span><strong id="diagnostics-heading">Capture diagnostics</strong></span>
               <small>Development and support details</small>
             </summary>
             <div className="replay-diagnostics-content">
@@ -1315,8 +1273,8 @@ export function ReplayPage() {
           <section className="panel save-panel" aria-labelledby="save-heading">
             <div className="section-heading">
               <div>
-                <span className="eyebrow">MANUAL CAPTURE</span>
                 <h2 id="save-heading">Save Replay</h2>
+                <p className="section-description">Create a permanent clip from the latest retained window.</p>
               </div>
             </div>
             <div

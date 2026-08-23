@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import "./App.css";
 import { Sidebar, type PageId } from "./components/Sidebar";
+import { TitleBar } from "./components/TitleBar";
 import { ClipsPage } from "./pages/ClipsPage";
 import { EditorPage } from "./pages/EditorPage";
 import { ReplayPage } from "./pages/ReplayPage";
@@ -88,8 +89,11 @@ function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar activePage={activePage} onNavigate={navigate} />
-      <main className="app-content">{pages[activePage]}</main>
+      <TitleBar />
+      <div className="app-body">
+        <Sidebar activePage={activePage} onNavigate={navigate} />
+        <main className="app-content">{pages[activePage]}</main>
+      </div>
       {toast && (
         <div className={`hotkey-feedback ${toast.success ? "hotkey-feedback-success" : "hotkey-feedback-error"}`} role="status" aria-live="polite">
           <strong>{toast.title}</strong><span>{toast.message}</span>

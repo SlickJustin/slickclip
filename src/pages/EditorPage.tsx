@@ -1140,15 +1140,20 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
         </section>
 
         <aside className="editor-source-panel" aria-labelledby="editor-source-heading">
-          <div className="section-heading"><div><span className="eyebrow">SOURCE</span><h2 id="editor-source-heading">Clip details</h2></div></div>
+          <div className="editor-inspector-heading">
+            <div><h2 id="editor-source-heading">Source inspector</h2><span>Clip details</span></div>
+            <span className="editor-inspector-state">Protected</span>
+          </div>
           <dl className="editor-source-details">
             <div><dt>Name</dt><dd>{session.source.displayName}</dd></div>
+            <div><dt>Resolution</dt><dd>{session.source.width}×{session.source.height}</dd></div>
+            <div><dt>Codec</dt><dd>{session.source.videoCodec.toUpperCase()}</dd></div>
+            <div><dt>Duration</dt><dd>{formatEditorTimeUs(session.source.durationUs)}</dd></div>
+            <div><dt>Edited</dt><dd>{formatEditorTimeUs(authoritativeEditedDurationUs)}</dd></div>
             <div><dt>File</dt><dd title={session.source.filePath}>{session.source.filename}</dd></div>
-            <div><dt>Media</dt><dd>{session.source.width}×{session.source.height} • {session.source.videoCodec.toUpperCase()} • {formatEditorTimeUs(session.source.durationUs)}</dd></div>
-            <div><dt>Timeline</dt><dd>{formatEditorTimeUs(authoritativeEditedDurationUs)} edited</dd></div>
           </dl>
-          <div className="editor-source-audio"><span>Saved audio tracks</span><div>{audioTracks.length > 0 ? audioTracks.map((track) => <span key={track.streamIndex}>{audioLabel(track)}</span>) : <small>No audio tracks</small>}</div></div>
-          <div className="editor-safety-note"><strong>Shared non-destructive cuts</strong><span>The source MP4 stays unchanged. This timeline will govern video and every saved audio track.</span></div>
+          <div className="editor-source-audio"><span>Saved audio • {audioTracks.length} track{audioTracks.length === 1 ? "" : "s"}</span><div>{audioTracks.length > 0 ? audioTracks.map((track) => <span key={track.streamIndex}>{audioLabel(track)}</span>) : <small>No audio tracks</small>}</div></div>
+          <div className="editor-safety-note"><strong>Non-destructive editing</strong><span>The source MP4 remains unchanged. Timeline cuts apply to video and every saved audio track.</span></div>
         </aside>
 
         <section className="editor-mixer-panel" aria-labelledby="editor-mixer-heading">

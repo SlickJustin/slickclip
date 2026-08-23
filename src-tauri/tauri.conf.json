@@ -19,6 +19,7 @@
         "height": 760,
         "minWidth": 950,
         "minHeight": 650,
+        "decorations": false,
         "visible": false
       },
       {
@@ -94,6 +95,12 @@
       "nsis": {
         "installMode": "currentUser"
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": []
     }
   }
 }
