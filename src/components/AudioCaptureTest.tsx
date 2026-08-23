@@ -408,23 +408,26 @@ function CaptureResult({ status }: { status: AudioCaptureStatus }) {
       </div>
       {status.error && <p className="audio-test-error">{status.error.message}</p>}
       {status.outputPath && <code className="audio-output-path">{status.outputPath}</code>}
-      {status.kind === "processLoopback" && status.formatDiagnostics && (
-        <div className="audio-telemetry-grid process-format-diagnostics">
-          <Metric label="GetMixFormat" value={status.formatDiagnostics.getMixFormatStatus} />
-          <Metric label="Format role" value={status.formatDiagnostics.formatRole} />
-        </div>
-      )}
-      {status.format && (
-        <div className="audio-telemetry-grid">
-          <Metric label={status.kind === "processLoopback" ? "Client capture format" : "Endpoint mix format"} value={status.format.sampleFormat} />
-          <Metric label="Sample rate" value={`${status.format.sampleRate.toLocaleString()} Hz`} />
-          <Metric label="Channels" value={String(status.format.channelCount)} />
-          <Metric label="Bits / valid bits" value={`${status.format.bitsPerSample} / ${status.format.validBitsPerSample ?? "n/a"}`} />
-          <Metric label="Block align" value={`${status.format.blockAlign} bytes`} />
-          <Metric label="Format tag" value={`0x${status.format.formatTag.toString(16).padStart(4, "0")}`} />
-        </div>
-      )}
-      {status.timing && <TimingMetrics timing={status.timing} />}
+      {(status.formatDiagnostics || status.format || status.timing) && <details className="audio-test-diagnostics">
+        <summary>Advanced diagnostics</summary>
+        {status.kind === "processLoopback" && status.formatDiagnostics && (
+          <div className="audio-telemetry-grid process-format-diagnostics">
+            <Metric label="GetMixFormat" value={status.formatDiagnostics.getMixFormatStatus} />
+            <Metric label="Format role" value={status.formatDiagnostics.formatRole} />
+          </div>
+        )}
+        {status.format && (
+          <div className="audio-telemetry-grid">
+            <Metric label={status.kind === "processLoopback" ? "Client capture format" : "Endpoint mix format"} value={status.format.sampleFormat} />
+            <Metric label="Sample rate" value={`${status.format.sampleRate.toLocaleString()} Hz`} />
+            <Metric label="Channels" value={String(status.format.channelCount)} />
+            <Metric label="Bits / valid bits" value={`${status.format.bitsPerSample} / ${status.format.validBitsPerSample ?? "n/a"}`} />
+            <Metric label="Block align" value={`${status.format.blockAlign} bytes`} />
+            <Metric label="Format tag" value={`0x${status.format.formatTag.toString(16).padStart(4, "0")}`} />
+          </div>
+        )}
+        {status.timing && <TimingMetrics timing={status.timing} />}
+      </details>}
     </div>
   );
 }

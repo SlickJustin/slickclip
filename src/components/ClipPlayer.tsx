@@ -318,7 +318,7 @@ export function ClipPlayer({ clip, preferences, onPreferencesChange, onClipUpdat
       <div className="clip-player-modal" ref={modalRef} role="dialog" aria-modal="true" aria-label={`Playing ${clip.displayName}`}>
         <header className="clip-player-header">
           <div><span>SlickClip / Clip Player</span><h2>{clip.displayName}</h2></div>
-          <button type="button" onClick={onClose} aria-label="Close player">×</button>
+          <button type="button" onClick={onClose} aria-label="Close player" title="Close player">×</button>
         </header>
 
         <div className="clip-player-stage" onMouseMove={showControls} onMouseEnter={showControls} onClick={(event) => { if (event.target === event.currentTarget || event.target === videoRef.current) togglePlayback(); }}>
@@ -356,14 +356,14 @@ export function ClipPlayer({ clip, preferences, onPreferencesChange, onClipUpdat
               <input className="player-range player-seek-range" type="range" min="0" max={duration || 0} step="0.01" value={Math.min(currentTime, duration || 0)} style={seekStyle} aria-label="Seek through clip" aria-valuetext={`${formatTime(currentTime)} of ${formatTime(duration)}`} onChange={(event) => seekTo(Number(event.target.value))} />
             </label>
             <div className="player-control-row">
-              <button className="player-icon-button player-play-button" type="button" onClick={togglePlayback} aria-label={playerState === "playing" ? "Pause" : "Play"}><PlayerIcon name={playerState === "playing" ? "pause" : "play"} /></button>
+              <button className="player-icon-button player-play-button" type="button" onClick={togglePlayback} aria-label={playerState === "playing" ? "Pause" : "Play"} title={playerState === "playing" ? "Pause" : "Play"}><PlayerIcon name={playerState === "playing" ? "pause" : "play"} /></button>
               <div className="player-time"><span>{formatTime(currentTime)}</span><span>/</span><span>{formatTime(duration)}</span></div>
               <div className="player-volume-control">
-                <button className="player-icon-button" type="button" onClick={toggleMute} aria-label={muted ? "Unmute" : "Mute"} aria-pressed={muted}><PlayerIcon name={muted || volume === 0 ? "muted" : "volume"} /></button>
+                <button className="player-icon-button" type="button" onClick={toggleMute} aria-label={muted ? "Unmute" : "Mute"} aria-pressed={muted} title={muted ? "Unmute" : "Mute"}><PlayerIcon name={muted || volume === 0 ? "muted" : "volume"} /></button>
                 <input className="player-range player-volume-range" type="range" min="0" max="1" step="0.01" value={volume} style={volumeStyle} aria-label="Volume" onChange={(event) => setPlayerVolume(Number(event.target.value))} />
               </div>
               <span className="player-control-spacer" />
-              <button className="player-icon-button" type="button" onClick={toggleFullscreen} aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}><PlayerIcon name={isFullscreen ? "exitFullscreen" : "fullscreen"} /></button>
+              <button className="player-icon-button" type="button" onClick={toggleFullscreen} aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"} title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}><PlayerIcon name={isFullscreen ? "exitFullscreen" : "fullscreen"} /></button>
             </div>
           </div>}
         </div>

@@ -1169,13 +1169,12 @@ export function ReplayPage() {
         </div>
 
         <div className="replay-side-stack">
-          <section className="panel replay-diagnostics" aria-labelledby="diagnostics-heading">
-            <div className="section-heading">
-              <div>
-                <span className="eyebrow">DEVELOPER TELEMETRY</span>
-                <h2 id="diagnostics-heading">Segment Diagnostics</h2>
-              </div>
-            </div>
+          <details className="panel replay-diagnostics" aria-labelledby="diagnostics-heading">
+            <summary>
+              <span><span className="eyebrow">ADVANCED DIAGNOSTICS</span><strong id="diagnostics-heading">Capture telemetry</strong></span>
+              <small>Development and support details</small>
+            </summary>
+            <div className="replay-diagnostics-content">
             <dl className="diagnostic-grid">
               <Diagnostic label="Expected segment" value={`${replayStatus.expectedSegmentDurationSeconds.toFixed(2)} s`} />
               <Diagnostic label="Last segment" value={formatOptionalMetric(replayStatus.lastSegmentDurationSeconds, "s")} />
@@ -1310,7 +1309,8 @@ export function ReplayPage() {
                 <code>{replayStatus.audio.clock.timingDomain}</code>
               </div>
             )}
-          </section>
+            </div>
+          </details>
 
           <section className="panel save-panel" aria-labelledby="save-heading">
             <div className="section-heading">
@@ -1354,6 +1354,21 @@ export function ReplayPage() {
                   )}
                 </div>
               )}
+              {saveReplayStatus.temporaryArtifactsRetained && (
+                <div className="audio-snapshot-plan warning">
+                  <strong>Development artifacts retained after Save failure</strong>
+                  {saveReplayStatus.temporaryVideoPath && <code>Video-only artifact: {saveReplayStatus.temporaryVideoPath}</code>}
+                  {saveReplayStatus.temporaryWorkspacePath && <code>Workspace: {saveReplayStatus.temporaryWorkspacePath}</code>}
+                </div>
+              )}
+              {(saveReplayStatus.finalMux ||
+                saveReplayStatus.audioRenderDiagnostics.length > 0 ||
+                saveReplayStatus.audioSnapshotPlans.length > 0 ||
+                saveReplayStatus.audioSaveBarriers.length > 0 ||
+                saveReplayStatus.videoBoundaryWaitMs !== null ||
+                saveReplayStatus.totalSaveLatencyMs !== null ||
+                saveReplayStatus.videoTimeline) && <details className="save-replay-diagnostics">
+                <summary>Advanced save diagnostics</summary>
               {saveReplayStatus.finalMux && (
                 <div className="audio-snapshot-plans">
                   <small>Verified final MP4 streams</small>
@@ -1385,13 +1400,6 @@ export function ReplayPage() {
                       {render.warnings.map((warning) => <span className="save-replay-error" key={warning}>{warning}</span>)}
                     </div>
                   ))}
-                </div>
-              )}
-              {saveReplayStatus.temporaryArtifactsRetained && (
-                <div className="audio-snapshot-plan warning">
-                  <strong>Development artifacts retained after Save failure</strong>
-                  {saveReplayStatus.temporaryVideoPath && <code>Video-only artifact: {saveReplayStatus.temporaryVideoPath}</code>}
-                  {saveReplayStatus.temporaryWorkspacePath && <code>Workspace: {saveReplayStatus.temporaryWorkspacePath}</code>}
                 </div>
               )}
               {saveReplayStatus.audioSnapshotPlans.length > 0 && (
@@ -1443,6 +1451,7 @@ export function ReplayPage() {
                   <small>{saveReplayStatus.videoTimeline.timestampStrategy}</small>
                 </div>
               )}
+              </details>}
               {saveReplayStatus.state === "completed" &&
                 saveReplayStatus.actualSavedDurationSeconds !== null &&
                 saveReplayStatus.actualSavedDurationSeconds + 0.05 < saveReplayStatus.requestedDurationSeconds && (

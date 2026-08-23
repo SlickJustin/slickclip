@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ClipPlayer } from "../components/ClipPlayer";
@@ -22,6 +23,14 @@ type Props = {
   onPlayClipConsumed: () => void;
   onToast: Toast;
 };
+type ClipMoreMenuState = {
+  clipId: string;
+  anchorTop: number;
+  anchorBottom: number;
+  anchorRight: number;
+  top: number;
+  left: number;
+};
 
 export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }: Props) {
   const [preferences, setPreferences] = useState<UiPreferences>(defaultUiPreferences);
@@ -37,8 +46,67 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
   const [error, setError] = useState<string | null>(null);
   const [refreshResult, setRefreshResult] = useState<ReconciliationTelemetry | null>(null);
   const [playingClip, setPlayingClip] = useState<ClipListItem | null>(null);
+  const [moreMenu, setMoreMenu] = useState<ClipMoreMenuState | null>(null);
   const listRequestToken = useRef(0);
+  const moreMenuRef = useRef<HTMLDivElement>(null);
+  const moreButtonRef = useRef<HTMLButtonElement>(null);
   const reconciliationActive = refreshing || telemetry?.reconciliationRunning === true;
+  const moreMenuClip = moreMenu ? clips.find((clip) => clip.id === moreMenu.clipId) ?? null : null;
+
+  const closeMoreMenu = useCallback((restoreFocus = false) => {
+    setMoreMenu(null);
+    if (restoreFocus) window.requestAnimationFrame(() => moreButtonRef.current?.focus());
+  }, []);
+
+  useLayoutEffect(() => {
+    const menu = moreMenuRef.current;
+    if (!moreMenu || !menu) return;
+    const margin = 12;
+    const gap = 8;
+    const rect = menu.getBoundingClientRect();
+    const availableBelow = window.innerHeight - moreMenu.anchorBottom - margin;
+    const availableAbove = moreMenu.anchorTop - margin;
+    const top = availableBelow >= rect.height || availableBelow >= availableAbove
+      ? Math.min(moreMenu.anchorBottom + gap, window.innerHeight - rect.height - margin)
+      : Math.max(margin, moreMenu.anchorTop - rect.height - gap);
+    const left = Math.max(margin, Math.min(moreMenu.anchorRight - rect.width, window.innerWidth - rect.width - margin));
+    if (Math.abs(top - moreMenu.top) > 0.5 || Math.abs(left - moreMenu.left) > 0.5) {
+      setMoreMenu((current) => current ? { ...current, top, left } : current);
+    }
+  }, [moreMenu]);
+
+  useEffect(() => {
+    if (!moreMenu) return;
+    const focusFrame = window.requestAnimationFrame(() => {
+      moreMenuRef.current?.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled)')?.focus();
+    });
+    function onPointerDown(event: PointerEvent) {
+      const target = event.target as Node | null;
+      if (target && (moreMenuRef.current?.contains(target) || moreButtonRef.current?.contains(target))) return;
+      closeMoreMenu();
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeMoreMenu(true);
+    }
+    function onViewportChange(event: Event) {
+      const target = event.target;
+      if (target instanceof Node && moreMenuRef.current?.contains(target)) return;
+      closeMoreMenu();
+    }
+    document.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", onViewportChange);
+    window.addEventListener("scroll", onViewportChange, true);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", onViewportChange);
+      window.removeEventListener("scroll", onViewportChange, true);
+    };
+  }, [closeMoreMenu, moreMenu]);
 
   const persistPreferences = useCallback(async (patch: UiPreferencesPatch) => {
     setPreferences((current) => ({ ...current, ...patch }));
@@ -239,6 +307,36 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
     void persistPreferences(patch);
   }
 
+  function toggleMoreMenu(clip: ClipListItem, button: HTMLButtonElement) {
+    if (moreMenu?.clipId === clip.id) return closeMoreMenu();
+    const rect = button.getBoundingClientRect();
+    moreButtonRef.current = button;
+    setMoreMenu({
+      clipId: clip.id,
+      anchorTop: rect.top,
+      anchorBottom: rect.bottom,
+      anchorRight: rect.right,
+      top: rect.bottom + 8,
+      left: Math.max(12, rect.right - 272),
+    });
+  }
+
+  function navigateMoreMenu(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)'));
+    if (items.length === 0) return;
+    event.preventDefault();
+    const currentIndex = items.indexOf(document.activeElement as HTMLElement);
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? items.length - 1
+        : event.key === "ArrowDown"
+          ? (currentIndex + 1 + items.length) % items.length
+          : (currentIndex - 1 + items.length) % items.length;
+    items[nextIndex].focus();
+  }
+
   return <div className="page">
     <header className="page-header clips-page-header"><div><h1>Clips</h1><p>Your persistent local replay library.</p></div><button className="secondary-button" type="button" disabled={reconciliationActive} onClick={refreshLibrary}>{reconciliationActive ? "Refreshing..." : "Refresh Clips"}</button></header>
     <section className="clips-panel" aria-label="Clips library">
@@ -254,16 +352,59 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
       {refreshResult && <div className="clips-refresh-result" role="status">Scanned {refreshResult.scannedFiles} • unchanged {refreshResult.unchanged} • added {refreshResult.added} • updated {refreshResult.updated} • removed {refreshResult.removed} • failed {refreshResult.failed} • {refreshResult.durationMs.toFixed(1)} ms</div>}
       {loading ? <LibraryState title="Loading clips..." detail="Reading the local Clips database." /> : clips.length === 0 && !error ? <LibraryState title="No matching clips" detail="Try another view, collection, or search." /> : <div className={`clips-library-grid grid-${preferences.clipsGridSize}`}>
         {clips.map((clip) => <article className="clip-card" key={clip.id}><ClipThumbnail clip={clip} onPlay={() => setPlayingClip(clip)} /><div className="clip-card-body">
-          <div className="clip-card-heading"><div><button className="clip-title-button" type="button" onClick={() => setPlayingClip(clip)}>{clip.displayName}</button><small>{new Date(clip.createdAtMs).toLocaleString()}</small>{clip.lastWatchedAtMs && <small title={new Date(clip.lastWatchedAtMs).toLocaleString()}>{formatLastWatched(clip.lastWatchedAtMs)}</small>}</div><button className={`favorite-button${clip.favorite ? " active" : ""}`} type="button" aria-label={clip.favorite ? "Remove favorite" : "Add favorite"} onClick={() => void setFavorite(clip)}>{clip.favorite ? "★" : "☆"}</button></div>
+          <div className="clip-card-heading"><div><button className="clip-title-button" type="button" onClick={() => setPlayingClip(clip)}>{clip.displayName}</button><small>{new Date(clip.createdAtMs).toLocaleString()}</small>{clip.lastWatchedAtMs && <small title={new Date(clip.lastWatchedAtMs).toLocaleString()}>{formatLastWatched(clip.lastWatchedAtMs)}</small>}</div><button className={`favorite-button${clip.favorite ? " active" : ""}`} type="button" aria-label={clip.favorite ? "Remove favorite" : "Add favorite"} title={clip.favorite ? "Remove favorite" : "Add favorite"} onClick={() => void setFavorite(clip)}>{clip.favorite ? "★" : "☆"}</button></div>
           <div className="clip-card-facts"><span>{formatDuration100ns(clip.duration100ns)}</span><span>{formatBytes(clip.fileSizeBytes)}</span><span>{formatFps(clip.fpsNumerator, clip.fpsDenominator)} FPS</span>{clip.playCount > 0 && <span>▶ {clip.playCount} {clip.playCount === 1 ? "play" : "plays"}</span>}{clip.captureTargetLabel && <span>{clip.captureTargetLabel}</span>}</div>
           {clip.audioTracks.length > 0 && <div className="clip-audio-badges">{clip.audioTracks.map((track) => <span key={track.streamIndex}>{audioLabel(track)}</span>)}</div>}
-          <div className="clip-card-actions"><button className="clip-play-button" type="button" onClick={() => setPlayingClip(clip)}>▶ Play</button><button className="clip-edit-button" type="button" onClick={() => onEditClip(clip)}>Edit</button><button type="button" onClick={() => void copyClip(clip)}>Copy Clip</button>
-            <details className="clip-collections-menu"><summary>Collections</summary><div>{collections.length === 0 ? <span>No collections yet.</span> : collections.map((collection) => <label key={collection.id}><input type="checkbox" checked={clip.collectionIds.includes(collection.id)} onChange={(event) => void setCollectionMembership(clip, collection, event.target.checked)} />{collection.name}</label>)}<button type="button" onClick={() => void createCollection()}>+ New Collection</button></div></details>
-            <button type="button" onClick={() => void clipAction("open_clip_file", clip)}>Open Externally</button><button type="button" onClick={() => void clipAction("open_clip_folder", clip)}>Folder</button><button type="button" onClick={() => void renameClip(clip)}>Rename</button><button className="danger" type="button" onClick={() => void deleteClip(clip)}>Delete</button></div>
+          <div className="clip-card-actions">
+            <button className="clip-play-button" type="button" onClick={() => setPlayingClip(clip)}>▶ Play</button>
+            <button className="clip-edit-button" type="button" onClick={() => onEditClip(clip)}>Edit</button>
+            <button type="button" onClick={() => void copyClip(clip)}>Copy Clip</button>
+            <button
+              className="clip-more-button"
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded={moreMenu?.clipId === clip.id}
+              onClick={(event) => toggleMoreMenu(clip, event.currentTarget)}
+            ><span aria-hidden="true">•••</span> More</button>
+          </div>
         </div></article>)}
       </div>}
       <footer className="clips-library-footer"><span>{totalCount} matching clip{totalCount === 1 ? "" : "s"}</span>{telemetry && <details><summary>Library diagnostics</summary><code>Schema v{telemetry.schemaVersion} • query {telemetry.lastListQueryDurationMs?.toFixed(2) ?? "n/a"} ms</code><code>{telemetry.databasePath}</code><code>Newest Save indexed {telemetry.newestSavedClipIndexed === null ? "n/a" : telemetry.newestSavedClipIndexed ? "yes" : "no"} • {telemetry.newestSavedClipInsertionMs?.toFixed(2) ?? "n/a"} ms</code></details>}</footer>
     </section>
+    {moreMenu && moreMenuClip && createPortal(
+      <div
+        className="clip-more-menu"
+        ref={moreMenuRef}
+        role="menu"
+        aria-label={`More actions for ${moreMenuClip.displayName}`}
+        style={{ top: moreMenu.top, left: moreMenu.left }}
+        onKeyDown={navigateMoreMenu}
+      >
+        <div className="clip-more-menu-section" role="group" aria-label="Collections">
+          <span className="clip-more-menu-heading">Collections</span>
+          {collections.length === 0
+            ? <span className="clip-more-menu-empty">No collections yet.</span>
+            : collections.map((collection) => <label key={collection.id}>
+              <input
+                type="checkbox"
+                role="menuitemcheckbox"
+                aria-checked={moreMenuClip.collectionIds.includes(collection.id)}
+                checked={moreMenuClip.collectionIds.includes(collection.id)}
+                onChange={(event) => void setCollectionMembership(moreMenuClip, collection, event.target.checked)}
+              />
+              <span>{collection.name}</span>
+            </label>)}
+          <button type="button" role="menuitem" onClick={() => void createCollection()}>+ New Collection</button>
+        </div>
+        <div className="clip-more-menu-section clip-more-menu-actions" role="group" aria-label="File actions">
+          <button type="button" role="menuitem" onClick={() => { closeMoreMenu(); void clipAction("open_clip_file", moreMenuClip); }}>Open Externally</button>
+          <button type="button" role="menuitem" onClick={() => { closeMoreMenu(); void clipAction("open_clip_folder", moreMenuClip); }}>Open Folder</button>
+          <button type="button" role="menuitem" onClick={() => { closeMoreMenu(); void renameClip(moreMenuClip); }}>Rename</button>
+          <button className="danger" type="button" role="menuitem" onClick={() => { closeMoreMenu(); void deleteClip(moreMenuClip); }}>Delete Clip</button>
+        </div>
+      </div>,
+      document.body,
+    )}
     {playingClip && preferencesLoaded && <ClipPlayer clip={playingClip} preferences={preferences} onPreferencesChange={persistPreferences} onClipUpdated={replaceClip} onCopy={() => void copyClip(playingClip)} onClose={() => setPlayingClip(null)} />}
   </div>;
 }

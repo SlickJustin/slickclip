@@ -108,6 +108,14 @@ type TrimDrag = {
   sourceTimeUs: number;
   previewSegments: readonly EditorSegment[];
 };
+type EditorTransportIconName = "play" | "pause" | "fullscreen" | "exitFullscreen";
+
+function EditorTransportIcon({ name }: { name: EditorTransportIconName }) {
+  if (name === "play") return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z" /></svg>;
+  if (name === "pause") return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zm6 0h4v14h-4z" /></svg>;
+  if (name === "exitFullscreen") return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4v2h7V4zm6 0h-2v7h7V9h-5zm-4 9H4v2h5v5h2zm9 0h-7v7h2v-5h5z" /></svg>;
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v2H6v5H4zm9 0h7v7h-2V6h-5zM4 13h2v5h5v2H4zm14 0h2v7h-7v-2h5z" /></svg>;
+}
 
 export function EditorPage({ clip, onBackToClips, onPlayExport, onDirtyChange, onToast }: Props) {
   if (!clip) {
@@ -143,8 +151,10 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
   const [audioTelemetry, setAudioTelemetry] = useState<AudioSyncTelemetry>({ maxDriftMs: 0, resyncCount: 0 });
   const [exportUi, setExportUi] = useState(createEditorExportUiState);
   const [exportCommandError, setExportCommandError] = useState<string | null>(null);
+  const [isPreviewFullscreen, setIsPreviewFullscreen] = useState(false);
   const exportActive = areEditorControlsLocked(exportUi);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const previewPanelRef = useRef<HTMLElement>(null);
   const timelineLaneRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
   const operationTokenRef = useRef(0);
@@ -186,6 +196,14 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
   const editorDirty = isEditorDirty(session.dirty, mixer);
   useEffect(() => { onDirtyChange(editorDirty); }, [editorDirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
+
+  useEffect(() => {
+    function onFullscreenChange() {
+      setIsPreviewFullscreen(document.fullscreenElement === previewPanelRef.current);
+    }
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+  }, []);
 
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
@@ -797,6 +815,11 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
     seekVideoToEditedTime(current, targetUs, true);
   }
 
+  function togglePreviewFullscreen() {
+    if (document.fullscreenElement === previewPanelRef.current) void document.exitFullscreen();
+    else void previewPanelRef.current?.requestFullscreen();
+  }
+
   function applyEdit(next: EditorSession) {
     if (exportActive) return;
     const current = sessionRef.current;
@@ -946,6 +969,7 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
   const authoritativeEditedDurationUs = totalEditedDurationUs(session.segments);
   const timelinePercent = mediaTimeToPercent(session.playheadUs, authoritativeEditedDurationUs);
   const timelineStyle = { "--editor-playhead": `${timelinePercent}%` } as CSSProperties;
+  const previewSeekStyle = { "--editor-preview-played": `${timelinePercent}%` } as CSSProperties;
   const audioTracks = playbackInfo?.audioTracks ?? session.source.audioTracks;
   const splitEnabled = canSplitAtPlayhead(session);
   const deleteEnabled = canDeleteSelectedSegment(session);
@@ -1029,14 +1053,13 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
       </section>}
 
       <div className="editor-workspace">
-        <section className="editor-preview-panel" aria-label="Editor video preview">
+        <section className="editor-preview-panel" ref={previewPanelRef} aria-label="Editor video preview">
           <div className="editor-preview-heading"><span>Preview</span><small>{source?.kind ?? "Resolving source"}</small></div>
-          <div className="editor-preview-stage">
+          <div className="editor-preview-stage" onClick={(event) => { if (event.target === event.currentTarget || event.target === videoRef.current) togglePlayback(); }}>
             {source && <video
               key={`${source.kind}:${source.path}:${source.revision}`}
               ref={videoRef}
               src={source.url}
-              controls={!exportActive}
               muted
               playsInline
               preload="metadata"
@@ -1082,9 +1105,37 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
             </div>}
           </div>
           <div className="editor-transport">
-            <button type="button" onClick={togglePlayback} disabled={exportActive || !source || mediaStatus !== "ready"}>{session.playbackState === "playing" ? "Pause" : "Play"}</button>
-            <code>{formatEditorTimeUs(session.playheadUs)} / {formatEditorTimeUs(authoritativeEditedDurationUs)}</code>
-            <span>{session.playbackState}</span>
+            <button
+              className="editor-transport-icon editor-transport-play"
+              type="button"
+              onClick={togglePlayback}
+              disabled={exportActive || !source || mediaStatus !== "ready"}
+              aria-label={session.playbackState === "playing" ? "Pause Editor preview" : "Play Editor preview"}
+              title={session.playbackState === "playing" ? "Pause" : "Play"}
+            ><EditorTransportIcon name={session.playbackState === "playing" ? "pause" : "play"} /></button>
+            <code className="editor-transport-time"><span>{formatEditorTimeUs(session.playheadUs)}</span><span>/</span><span>{formatEditorTimeUs(authoritativeEditedDurationUs)}</span></code>
+            <label className="editor-preview-seek">
+              <span className="visually-hidden">Seek edited preview</span>
+              <input
+                type="range"
+                min="0"
+                max={Math.max(authoritativeEditedDurationUs, 1)}
+                step="1000"
+                value={Math.min(session.playheadUs, authoritativeEditedDurationUs)}
+                style={previewSeekStyle}
+                disabled={exportActive || !source || authoritativeEditedDurationUs <= 0 || mediaStatus !== "ready" || Boolean(trimDrag)}
+                aria-label="Editor preview position"
+                aria-valuetext={`${formatEditorTimeUs(session.playheadUs)} of ${formatEditorTimeUs(authoritativeEditedDurationUs)}`}
+                onChange={(event) => seekEditedTimeline(Number(event.currentTarget.value))}
+              />
+            </label>
+            <button
+              className="editor-transport-icon"
+              type="button"
+              onClick={togglePreviewFullscreen}
+              aria-label={isPreviewFullscreen ? "Exit Editor preview fullscreen" : "Enter Editor preview fullscreen"}
+              title={isPreviewFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+            ><EditorTransportIcon name={isPreviewFullscreen ? "exitFullscreen" : "fullscreen"} /></button>
           </div>
         </section>
 
@@ -1093,10 +1144,8 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
           <dl className="editor-source-details">
             <div><dt>Name</dt><dd>{session.source.displayName}</dd></div>
             <div><dt>File</dt><dd title={session.source.filePath}>{session.source.filename}</dd></div>
-            <div><dt>Resolution</dt><dd>{session.source.width}×{session.source.height}</dd></div>
-            <div><dt>Video</dt><dd>{session.source.videoCodec.toUpperCase()}</dd></div>
-            <div><dt>Original</dt><dd>{formatEditorTimeUs(session.source.durationUs)}</dd></div>
-            <div><dt>Edited</dt><dd>{formatEditorTimeUs(authoritativeEditedDurationUs)}</dd></div>
+            <div><dt>Media</dt><dd>{session.source.width}×{session.source.height} • {session.source.videoCodec.toUpperCase()} • {formatEditorTimeUs(session.source.durationUs)}</dd></div>
+            <div><dt>Timeline</dt><dd>{formatEditorTimeUs(authoritativeEditedDurationUs)} edited</dd></div>
           </dl>
           <div className="editor-source-audio"><span>Saved audio tracks</span><div>{audioTracks.length > 0 ? audioTracks.map((track) => <span key={track.streamIndex}>{audioLabel(track)}</span>) : <small>No audio tracks</small>}</div></div>
           <div className="editor-safety-note"><strong>Shared non-destructive cuts</strong><span>The source MP4 stays unchanged. This timeline will govern video and every saved audio track.</span></div>
@@ -1171,12 +1220,15 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
           {allAudioTracksFailed && <p className="editor-mixer-error" role="alert">No Editor audio track could be prepared. Video remains muted so SlickClip does not pretend the stem mix is active or silently substitute Combined audio.</p>}
           {!allAudioTracksFailed && failedAudioTrackCount > 0 && <p className="editor-mixer-warning">{failedAudioTrackCount} track{failedAudioTrackCount === 1 ? " is" : "s are"} unavailable. Ready tracks can still be previewed.</p>}
           {audioRuntimeMessage && <p className="editor-mixer-warning" role="status">{audioRuntimeMessage}</p>}
-          <div className="editor-audio-diagnostics" aria-label="Editor audio synchronization diagnostics">
-            <span>Video clock authoritative</span>
-            <span>Correction threshold {AUDIO_DRIFT_THRESHOLD_MS} ms</span>
-            <span>Max drift {audioTelemetry.maxDriftMs.toFixed(1)} ms</span>
-            <span>Resyncs {audioTelemetry.resyncCount}</span>
-          </div>
+          <details className="editor-audio-diagnostics">
+            <summary>Advanced diagnostics</summary>
+            <div aria-label="Editor audio synchronization diagnostics">
+              <span>Video clock authoritative</span>
+              <span>Correction threshold {AUDIO_DRIFT_THRESHOLD_MS} ms</span>
+              <span>Max drift {audioTelemetry.maxDriftMs.toFixed(1)} ms</span>
+              <span>Resyncs {audioTelemetry.resyncCount}</span>
+            </div>
+          </details>
         </section>
 
         <section className="editor-timeline-panel" aria-labelledby="editor-timeline-heading">
@@ -1284,7 +1336,7 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
           </div>
           <div className="editor-timeline-footer">
             <span>{session.segments.length} segment{session.segments.length === 1 ? "" : "s"}{selectedSegment ? ` · Selected source ${formatEditorTimeUs(selectedSegment.sourceStartUs)}–${formatEditorTimeUs(selectedSegment.sourceEndUs)}` : ""}</span>
-            <span>Select a segment to trim. Use the lower rail to seek.</span>
+            <span>{selectedSegment ? "Drag the edge handles to trim the selected segment." : "Select a segment to edit it."}</span>
           </div>
         </section>
       </div>
