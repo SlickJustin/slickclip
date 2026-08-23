@@ -28,7 +28,7 @@ Repository: `C:\Users\Jakea\source\replay-app`
 ## Verified delivery state
 
 - Stages 0–18 are committed on `master`.
-- Stage 19 Professional UI/UX Polish is implemented in the working tree and passed its automated checks, but remains uncommitted pending manual visual/regression validation.
+- Stage 19 Professional UI/UX Polish has provisional checkpoint `c62c81f`. Its automated checks pass, but manual visual/regression validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 20 has not started.
 - The waveform experiment was deliberately deferred and remains in Git stash as `Stage 19 waveform experiment - deferred`.
 - The four project-control documents were accidentally committed as empty files in commit `07b3216`; this document set restores their intended content.
@@ -88,9 +88,9 @@ Never rely on this file for the current commit hash or stash index. Use Git to i
 - Flattened H.264/AAC export from EDL plus mixer decisions.
 - Progress, cancellation, hardware/software encoder fallback, and Library indexing.
 
-## Current Stage 19 working tree
+## Stage 19 provisional checkpoint
 
-The intentionally uncommitted UI-polish files are:
+The Stage 19 UI-polish checkpoint modified:
 
 - `src/App.css`
 - `src/components/AudioCaptureTest.tsx`
@@ -111,7 +111,7 @@ Automated results reported for this Stage 19 diff:
 - `git diff --check`: passed.
 - No lint script exists.
 
-These results do not replace the outstanding manual visual/regression gate. Re-run checks if the diff changes.
+These results do not replace the outstanding manual visual/regression gate. Stage 19 remains provisionally complete rather than manually verified.
 
 ## Architecture invariants
 

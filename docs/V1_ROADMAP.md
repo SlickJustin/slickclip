@@ -5,13 +5,13 @@ Complete stages sequentially. Preserve completed behavior, finish each automated
 ## Current checkpoint
 
 - Stages 0–18: complete and committed.
-- Stage 19: implementation and automated validation complete in the working tree; manual visual/regression validation and approval remain.
+- Stage 19: provisional checkpoint `c62c81f`; implementation and automated validation complete, with manual visual/regression validation still pending.
 - Stage 20: not started.
 - Waveform: explicitly deferred; not part of this roadmap.
 
 ## Stage 19 — Professional UI/UX Polish
 
-Status: manual gate pending.
+Status: provisional automated checkpoint `c62c81f`; manual gate pending.
 
 Goals:
 
