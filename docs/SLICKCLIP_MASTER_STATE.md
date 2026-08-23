@@ -30,7 +30,8 @@ Repository: `C:\Users\Jakea\source\replay-app`
 - Stages 0–18 are committed on `master`.
 - Stage 19 Professional UI/UX Polish has provisional checkpoint `c62c81f`. Its automated checks pass, but manual visual/regression validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 20 Replay Roulette has provisional checkpoint `6b40cc6`. Its automated checks pass, but manual UI validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
-- Stage 21 has not started.
+- Stage 21 Animated Launch Experience has provisional checkpoint `f5c14f2`. Its automated checks pass, but manual native startup/focus/reduced-motion validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
+- Stage 22 has not started.
 - The waveform experiment was deliberately deferred and remains in Git stash as `Stage 19 waveform experiment - deferred`.
 - The four project-control documents were accidentally committed as empty files in commit `07b3216`; this document set restores their intended content.
 
@@ -129,6 +130,22 @@ Automated results reported for this Stage 20 diff:
 - No lint script exists.
 
 These results do not replace the outstanding manual UI gate. Stage 20 remains provisionally complete rather than manually verified.
+
+## Stage 21 provisional checkpoint
+
+Stage 21 adds a dedicated Vite splash entry point and Tauri splash window while preserving the existing single backend initialization path. The main window starts hidden; after setup is complete, the splash invokes an idempotent native coordinator that reveals/focuses the main window and closes the splash. A bounded native fallback prevents a failed splash asset or script from leaving SlickClip permanently hidden. CSS supplies restrained purple hex/progress motion and a static reduced-motion state.
+
+Automated results reported for this Stage 21 diff:
+
+- `npm test`: 67 passed.
+- `npm run build`: passed and emitted both main and splash entry points.
+- `cargo check`: passed, including Tauri configuration validation.
+- `cargo test -- --nocapture`: 150 passed.
+- `cargo fmt -- --check`: passed with the known environment canonicalization warning.
+- `git diff --check`: passed.
+- No lint script exists.
+
+These results do not replace the outstanding native startup/focus/appearance gate. Stage 21 remains provisionally complete rather than manually verified.
 
 ## Architecture invariants
 

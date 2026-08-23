@@ -7,7 +7,8 @@ Complete stages sequentially. Preserve completed behavior, finish each automated
 - Stages 0–18: complete and committed.
 - Stage 19: provisional checkpoint `c62c81f`; implementation and automated validation complete, with manual visual/regression validation still pending.
 - Stage 20: provisional checkpoint `6b40cc6`; implementation and automated validation complete, with manual UI validation still pending.
-- Stage 21: not started.
+- Stage 21: provisional checkpoint `f5c14f2`; implementation and automated validation complete, with manual startup/focus/reduced-motion validation still pending.
+- Stage 22: not started.
 - Waveform: explicitly deferred; not part of this roadmap.
 
 ## Stage 19 — Professional UI/UX Polish
@@ -42,6 +43,8 @@ Goals:
 Required gate: automated coverage for selection logic and manual UI validation.
 
 ## Stage 21 — Animated Launch Experience
+
+Status: provisional automated checkpoint `f5c14f2`; manual gate pending.
 
 Goals:
 
