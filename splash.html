@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#050507" />
+    <title>SlickClip</title>
+  </head>
+  <body>
+    <main class="splash-shell" aria-label="SlickClip is starting">
+      <div class="splash-hex" aria-hidden="true">
+        <svg viewBox="0 0 120 120">
+          <path class="splash-hex-outer" d="M60 5 107.6 32.5v55L60 115 12.4 87.5v-55Z" />
+          <path class="splash-hex-inner" d="m60 25 30.3 17.5v35L60 95 29.7 77.5v-35Z" />
+          <path class="splash-hex-cut" d="m48 43 29 17-29 17Z" />
+        </svg>
+      </div>
+      <img class="splash-logo" src="/src/assets/branding/slickclip-logo.svg" alt="SlickClip" />
+      <div class="splash-progress" aria-hidden="true"><span /></div>
+      <p id="startup-status" role="status" aria-live="polite">Preparing your replay workspace…</p>
+    </main>
+    <script type="module" src="/src/splash.ts"></script>
+  </body>
+</html>

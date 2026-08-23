@@ -1,0 +1,109 @@
+:root {
+  color: #f7f4fa;
+  background: #050507;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 46%, rgba(100, 59, 181, 0.14), transparent 36%),
+    #050507;
+}
+
+.splash-shell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 34px 54px 28px;
+  border: 1px solid #241e2d;
+  user-select: none;
+}
+
+.splash-hex {
+  position: relative;
+  width: 112px;
+  height: 112px;
+  margin-bottom: 14px;
+  filter: drop-shadow(0 0 22px rgba(126, 78, 220, 0.28));
+  animation: splash-float 2.2s ease-in-out infinite;
+}
+
+.splash-hex::after {
+  position: absolute;
+  inset: 18px;
+  border-radius: 50%;
+  background: rgba(126, 78, 220, 0.09);
+  content: "";
+  filter: blur(13px);
+  animation: splash-glow 1.7s ease-in-out infinite alternate;
+}
+
+.splash-hex svg { position: relative; z-index: 1; width: 100%; height: 100%; }
+.splash-hex-outer { fill: none; stroke: #7044c8; stroke-width: 2; stroke-dasharray: 13 6; animation: splash-dash 4s linear infinite; }
+.splash-hex-inner { fill: rgba(102, 59, 183, 0.08); stroke: #a077ef; stroke-width: 1.2; }
+.splash-hex-cut { fill: #8a59e4; }
+
+.splash-logo { width: 252px; height: auto; }
+
+.splash-progress {
+  width: 168px;
+  height: 2px;
+  margin-top: 22px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: #211d27;
+}
+
+.splash-progress span {
+  display: block;
+  width: 42%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, #8d5bea, #b391f7, transparent);
+  animation: splash-progress 1.15s ease-in-out infinite;
+}
+
+.splash-shell p {
+  margin: 10px 0 0;
+  color: #82798b;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.055em;
+}
+
+@keyframes splash-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+@keyframes splash-glow {
+  from { opacity: 0.45; transform: scale(0.88); }
+  to { opacity: 1; transform: scale(1.08); }
+}
+
+@keyframes splash-dash { to { stroke-dashoffset: -38; } }
+
+@keyframes splash-progress {
+  from { transform: translateX(-115%); }
+  to { transform: translateX(345%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .splash-hex,
+  .splash-hex::after,
+  .splash-hex-outer,
+  .splash-progress span { animation: none; }
+
+  .splash-progress span { width: 100%; background: #7750c6; }
+}

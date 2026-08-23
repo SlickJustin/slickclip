@@ -6,12 +6,57 @@ mod library;
 mod preferences;
 mod replay;
 
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tauri::Manager;
+
+#[derive(Clone, Default)]
+struct StartupCoordinator {
+    revealed: Arc<AtomicBool>,
+}
+
+impl StartupCoordinator {
+    fn reveal(&self, app: &tauri::AppHandle) -> Result<(), String> {
+        if self.revealed.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        let result = (|| {
+            let main = app
+                .get_webview_window("main")
+                .ok_or_else(|| "The SlickClip main window is unavailable.".to_string())?;
+            main.show().map_err(|error| error.to_string())?;
+            main.set_focus().map_err(|error| error.to_string())?;
+            if let Some(splash) = app.get_webview_window("splash") {
+                splash.close().map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })();
+
+        if result.is_err() {
+            self.revealed.store(false, Ordering::SeqCst);
+        }
+        result
+    }
+}
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+#[tauri::command]
+fn complete_startup(
+    app: tauri::AppHandle,
+    startup: tauri::State<'_, StartupCoordinator>,
+) -> Result<(), String> {
+    startup.reveal(&app)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -61,10 +106,21 @@ pub fn run() {
             app.manage(hotkey::SaveReplayHotkeyManager::new());
             app.state::<hotkey::SaveReplayHotkeyManager>()
                 .register_initial(app.handle());
+            let startup = StartupCoordinator::default();
+            let fallback = startup.clone();
+            let fallback_app = app.handle().clone();
+            std::thread::Builder::new()
+                .name("slickclip-startup-fallback".to_string())
+                .spawn(move || {
+                    std::thread::sleep(Duration::from_secs(8));
+                    let _ = fallback.reveal(&fallback_app);
+                })?;
+            app.manage(startup);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            complete_startup,
             capture::capture_test::run_capture_test,
             capture::continuous_baseline::run_continuous_baseline,
             capture::encoder::get_encoder_capabilities,
