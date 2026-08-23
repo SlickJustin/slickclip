@@ -176,7 +176,7 @@ Required gate:
 
 ## Stage 27.1 — Advanced Participant-Aware Reaction Layouts
 
-Status: provisional optional implementation complete; automated detector/tracker/reflow and fallback tests pass, while real Discord UI variants and participant behavior remain manually unverified. The feature is explicitly opt-in and cannot weaken Stage 27's default whole-window path.
+Status: provisional optional implementation checkpoint `f38be14`; automated detector/tracker/reflow and fallback tests pass, while real Discord UI variants and participant behavior remain manually unverified. The feature is explicitly opt-in and cannot weaken Stage 27's default whole-window path.
 
 Potential scope:
 
