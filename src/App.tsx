@@ -5,6 +5,7 @@ import { Sidebar, type PageId } from "./components/Sidebar";
 import { ClipsPage } from "./pages/ClipsPage";
 import { EditorPage } from "./pages/EditorPage";
 import { ReplayPage } from "./pages/ReplayPage";
+import { ReplayRoulettePage } from "./pages/ReplayRoulettePage";
 import { SettingsPage } from "./pages/SettingsPage";
 import type { ClipListItem } from "./types/clips";
 
@@ -70,6 +71,7 @@ function App() {
   const pages: Record<PageId, React.ReactNode> = {
     replay: <ReplayPage />,
     clips: <ClipsPage onEditClip={openEditor} playClip={exportPlaybackClip} onPlayClipConsumed={() => setExportPlaybackClip(null)} onToast={showToast} />,
+    roulette: <ReplayRoulettePage onToast={showToast} />,
     editor: <EditorPage clip={editorClip} onBackToClips={closeEditor} onPlayExport={playExport} onDirtyChange={setEditorDirty} onToast={showToast} />,
     settings: <SettingsPage />,
   };
