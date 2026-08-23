@@ -13,7 +13,7 @@ use windows::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
-const UI_PREFERENCES_SCHEMA_VERSION: u32 = 2;
+const UI_PREFERENCES_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -31,6 +31,10 @@ pub struct UiPreferences {
     pub start_with_windows: bool,
     pub close_to_tray: bool,
     pub save_overlay_enabled: bool,
+    pub game_detection_enabled: bool,
+    pub game_auto_arm: bool,
+    pub game_detection_approved_processes: Vec<String>,
+    pub game_detection_excluded_processes: Vec<String>,
 }
 
 impl Default for UiPreferences {
@@ -49,6 +53,10 @@ impl Default for UiPreferences {
             start_with_windows: false,
             close_to_tray: true,
             save_overlay_enabled: true,
+            game_detection_enabled: false,
+            game_auto_arm: false,
+            game_detection_approved_processes: Vec::new(),
+            game_detection_excluded_processes: Vec::new(),
         }
     }
 }
@@ -94,8 +102,40 @@ impl UiPreferences {
             .take()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+        self.game_detection_approved_processes =
+            normalize_process_list(self.game_detection_approved_processes);
+        self.game_detection_excluded_processes =
+            normalize_process_list(self.game_detection_excluded_processes);
+        let exclusions = self
+            .game_detection_excluded_processes
+            .iter()
+            .map(|value| value.to_lowercase())
+            .collect::<std::collections::BTreeSet<_>>();
+        self.game_detection_approved_processes
+            .retain(|value| !exclusions.contains(&value.to_lowercase()));
+        if !self.game_detection_enabled {
+            self.game_auto_arm = false;
+        }
         self
     }
+}
+
+fn normalize_process_list(values: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    values
+        .into_iter()
+        .map(|value| {
+            let trimmed = value.trim();
+            if trimmed.to_lowercase().ends_with(".exe") {
+                trimmed[..trimmed.len() - 4].trim().to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .filter(|value| !value.is_empty() && value.len() <= 120)
+        .filter(|value| seen.insert(value.to_lowercase()))
+        .take(100)
+        .collect()
 }
 
 fn clamp_volume(value: f64, fallback: f64) -> f64 {
@@ -122,6 +162,10 @@ pub struct UiPreferencesPatch {
     pub start_with_windows: Option<bool>,
     pub close_to_tray: Option<bool>,
     pub save_overlay_enabled: Option<bool>,
+    pub game_detection_enabled: Option<bool>,
+    pub game_auto_arm: Option<bool>,
+    pub game_detection_approved_processes: Option<Vec<String>>,
+    pub game_detection_excluded_processes: Option<Vec<String>>,
 }
 
 fn deserialize_nullable_field<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
@@ -235,6 +279,18 @@ fn apply_patch(mut value: UiPreferences, patch: UiPreferencesPatch) -> UiPrefere
     if let Some(next) = patch.save_overlay_enabled {
         value.save_overlay_enabled = next;
     }
+    if let Some(next) = patch.game_detection_enabled {
+        value.game_detection_enabled = next;
+    }
+    if let Some(next) = patch.game_auto_arm {
+        value.game_auto_arm = next;
+    }
+    if let Some(next) = patch.game_detection_approved_processes {
+        value.game_detection_approved_processes = next;
+    }
+    if let Some(next) = patch.game_detection_excluded_processes {
+        value.game_detection_excluded_processes = next;
+    }
     value
 }
 
@@ -332,6 +388,10 @@ mod tests {
         assert!(!upgraded.start_with_windows);
         assert!(upgraded.close_to_tray);
         assert!(upgraded.save_overlay_enabled);
+        assert!(!upgraded.game_detection_enabled);
+        assert!(!upgraded.game_auto_arm);
+        assert!(upgraded.game_detection_approved_processes.is_empty());
+        assert!(upgraded.game_detection_excluded_processes.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -353,6 +413,14 @@ mod tests {
             start_with_windows: Some(true),
             close_to_tray: Some(false),
             save_overlay_enabled: Some(false),
+            game_detection_enabled: Some(true),
+            game_auto_arm: Some(true),
+            game_detection_approved_processes: Some(vec![
+                " Game.exe ".into(),
+                "game".into(),
+                "Other".into(),
+            ]),
+            game_detection_excluded_processes: Some(vec!["other.exe".into()]),
         });
         assert!(response.success);
         assert_eq!(response.preferences.player_volume, 1.0);
@@ -367,6 +435,10 @@ mod tests {
         assert!(loaded.start_with_windows);
         assert!(!loaded.close_to_tray);
         assert!(!loaded.save_overlay_enabled);
+        assert!(loaded.game_detection_enabled);
+        assert!(loaded.game_auto_arm);
+        assert_eq!(loaded.game_detection_approved_processes, vec!["Game"]);
+        assert_eq!(loaded.game_detection_excluded_processes, vec!["other"]);
         assert_eq!(
             loaded.selected_collection_id.as_deref(),
             Some("collection-1")

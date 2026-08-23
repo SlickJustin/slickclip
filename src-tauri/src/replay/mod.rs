@@ -9,8 +9,8 @@ use tauri::State;
 #[cfg(test)]
 pub use audio::CompletedAudioSegment;
 pub use audio::{
-    AudioSaveBarrierTelemetry, AudioSnapshotPlan, AudioSnapshotTrack, AudioTrackRole,
-    AudioTrackState,
+    AudioReplayConfiguration, AudioSaveBarrierTelemetry, AudioSnapshotPlan, AudioSnapshotTrack,
+    AudioSourceKind, AudioTrackConfiguration, AudioTrackRole, AudioTrackState,
 };
 pub use buffer::{ReplayBufferManager, ReplayBufferStartRequest, ReplaySaveSnapshot};
 pub use segment::CompletedSegment;

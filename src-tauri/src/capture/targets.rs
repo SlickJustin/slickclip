@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use windows_capture::monitor::Monitor;
 use windows_capture::window::Window;
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MonitorTarget {
     id: String,
@@ -17,12 +17,12 @@ pub struct MonitorTarget {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowTarget {
-    id: String,
-    title: String,
-    process_name: Option<String>,
-    process_id: u32,
-    width: u32,
-    height: u32,
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) process_name: Option<String>,
+    pub(crate) process_id: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 #[derive(Serialize)]
@@ -157,7 +157,7 @@ fn monitor_metadata(
     })
 }
 
-fn enumerate_windows() -> Result<Vec<WindowTarget>, String> {
+pub(crate) fn enumerate_windows() -> Result<Vec<WindowTarget>, String> {
     let windows = Window::enumerate()
         .map_err(|error| format!("Could not enumerate capturable windows: {error}"))?;
     let mut targets = Vec::new();

@@ -227,6 +227,10 @@ export type UiPreferences = {
   startWithWindows: boolean;
   closeToTray: boolean;
   saveOverlayEnabled: boolean;
+  gameDetectionEnabled: boolean;
+  gameAutoArm: boolean;
+  gameDetectionApprovedProcesses: string[];
+  gameDetectionExcludedProcesses: string[];
 };
 
 export type UiPreferencesResponse = {
@@ -238,7 +242,7 @@ export type UiPreferencesResponse = {
 export type UiPreferencesPatch = Partial<Omit<UiPreferences, "schemaVersion">>;
 
 export const defaultUiPreferences: UiPreferences = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   playerVolume: 1,
   playerMuted: false,
   playerLastAudibleVolume: 1,
@@ -251,6 +255,10 @@ export const defaultUiPreferences: UiPreferences = {
   startWithWindows: false,
   closeToTray: true,
   saveOverlayEnabled: true,
+  gameDetectionEnabled: false,
+  gameAutoArm: false,
+  gameDetectionApprovedProcesses: [],
+  gameDetectionExcludedProcesses: [],
 };
 
 export function audioLabel(track: ClipAudioTrack) {

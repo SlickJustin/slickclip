@@ -2,6 +2,7 @@ mod audio;
 mod capture;
 mod clips;
 mod desktop;
+mod game_detection;
 mod hotkey;
 mod library;
 mod preferences;
@@ -120,6 +121,11 @@ pub fn run() {
             app.state::<hotkey::SaveReplayHotkeyManager>()
                 .register_initial(app.handle());
             desktop::setup(app)?;
+            let game_detection = game_detection::GameDetectionManager::new();
+            game_detection
+                .start(app.handle().clone())
+                .map_err(std::io::Error::other)?;
+            app.manage(game_detection);
             let startup = StartupCoordinator::new(background_launch);
             let fallback = startup.clone();
             let fallback_app = app.handle().clone();
@@ -136,6 +142,7 @@ pub fn run() {
             greet,
             complete_startup,
             desktop::set_start_with_windows,
+            game_detection::get_game_detection_status,
             capture::capture_test::run_capture_test,
             capture::continuous_baseline::run_continuous_baseline,
             capture::encoder::get_encoder_capabilities,
@@ -223,6 +230,9 @@ pub fn run() {
             if let Some(integration) = app_handle.try_state::<desktop::DesktopIntegration>() {
                 integration.begin_exit();
             }
+            app_handle
+                .state::<game_detection::GameDetectionManager>()
+                .shutdown_and_wait();
             app_handle
                 .state::<audio::AudioCaptureTestManager>()
                 .shutdown_and_wait();

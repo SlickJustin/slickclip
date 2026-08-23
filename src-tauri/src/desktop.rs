@@ -232,6 +232,14 @@ pub fn show_save_overlay(app: &AppHandle, duration_seconds: f64) {
     if !enabled {
         return;
     }
+    show_notification_overlay(
+        app,
+        "Replay Saved",
+        &format!("{duration_seconds:.1}s clip added to your Library"),
+    );
+}
+
+pub fn show_notification_overlay(app: &AppHandle, title: &str, detail: &str) {
     let (Some(desktop), Some(overlay)) = (
         app.try_state::<DesktopIntegration>(),
         app.get_webview_window("save-overlay"),
@@ -261,8 +269,8 @@ pub fn show_save_overlay(app: &AppHandle, duration_seconds: f64) {
         }
     }
     let payload = SaveOverlayPayload {
-        title: "Replay Saved".to_string(),
-        detail: format!("{duration_seconds:.1}s clip added to your Library"),
+        title: title.to_string(),
+        detail: detail.to_string(),
     };
     let _ = overlay.emit("replay-saved-overlay", payload);
     let _ = overlay.set_focusable(false);

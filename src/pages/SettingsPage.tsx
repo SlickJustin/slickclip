@@ -19,6 +19,37 @@ type HotkeyCommandResult = {
   errorMessage: string | null;
 };
 
+type GameCandidate = {
+  targetId: string;
+  title: string;
+  processName: string;
+  processId: number;
+  width: number;
+  height: number;
+  approved: boolean;
+  reason: string;
+};
+
+type GameDetectionStatus = {
+  success: boolean;
+  enabled: boolean;
+  autoArmEnabled: boolean;
+  candidates: GameCandidate[];
+  autoArmedTargetId: string | null;
+  lastScanAtMs: number | null;
+  errorMessage: string | null;
+};
+
+const initialGameDetectionStatus: GameDetectionStatus = {
+  success: true,
+  enabled: false,
+  autoArmEnabled: false,
+  candidates: [],
+  autoArmedTargetId: null,
+  lastScanAtMs: null,
+  errorMessage: null,
+};
+
 const initialHotkeyState: HotkeyState = {
   registered: false,
   currentCombination: "Ctrl + Shift + F10",
@@ -47,6 +78,7 @@ export function SettingsPage() {
   const [desktopSettingsPending, setDesktopSettingsPending] = useState(false);
   const [desktopSettingsMessage, setDesktopSettingsMessage] = useState<{ text: string; success: boolean } | null>(null);
   const [desktopPrivacy, setDesktopPrivacy] = useState(true);
+  const [gameDetection, setGameDetection] = useState<GameDetectionStatus>(initialGameDetectionStatus);
 
   async function updateDesktopPreference(patch: UiPreferencesPatch) {
     setDesktopSettingsPending(true);
@@ -86,6 +118,52 @@ export function SettingsPage() {
       setPreferences(preferenceResponse.preferences);
     }).catch((error) => setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false }));
   }, []);
+
+  useEffect(() => {
+    if (!preferences.gameDetectionEnabled) {
+      setGameDetection(initialGameDetectionStatus);
+      return;
+    }
+    let disposed = false;
+    async function refresh() {
+      try {
+        const status = await invoke<GameDetectionStatus>("get_game_detection_status");
+        if (!disposed) setGameDetection(status);
+      } catch (error) {
+        if (!disposed) setGameDetection((current) => ({ ...current, success: false, errorMessage: error instanceof Error ? error.message : String(error) }));
+      }
+    }
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 2_000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [preferences.gameDetectionEnabled]);
+
+  function processMatches(left: string, right: string) {
+    return left.trim().replace(/\.exe$/i, "").toLocaleLowerCase() === right.trim().replace(/\.exe$/i, "").toLocaleLowerCase();
+  }
+
+  function approveProcess(processName: string) {
+    const approved = [...preferences.gameDetectionApprovedProcesses.filter((item) => !processMatches(item, processName)), processName];
+    const excluded = preferences.gameDetectionExcludedProcesses.filter((item) => !processMatches(item, processName));
+    void updateDesktopPreference({ gameDetectionEnabled: true, gameDetectionApprovedProcesses: approved, gameDetectionExcludedProcesses: excluded });
+  }
+
+  function excludeProcess(processName: string) {
+    const approved = preferences.gameDetectionApprovedProcesses.filter((item) => !processMatches(item, processName));
+    const excluded = [...preferences.gameDetectionExcludedProcesses.filter((item) => !processMatches(item, processName)), processName];
+    void updateDesktopPreference({ gameDetectionApprovedProcesses: approved, gameDetectionExcludedProcesses: excluded });
+  }
+
+  function removeProcessRule(processName: string, kind: "approved" | "excluded") {
+    void updateDesktopPreference(kind === "approved"
+      ? { gameDetectionApprovedProcesses: preferences.gameDetectionApprovedProcesses.filter((item) => !processMatches(item, processName)) }
+      : { gameDetectionExcludedProcesses: preferences.gameDetectionExcludedProcesses.filter((item) => !processMatches(item, processName)) });
+  }
+
+  function addApprovedProcess() {
+    const processName = window.prompt("Process executable to approve for game auto-arm (for example, GameName.exe):");
+    if (processName?.trim()) approveProcess(processName.trim());
+  }
 
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
@@ -261,8 +339,26 @@ export function SettingsPage() {
           <SettingsToggle label="Start SlickClip with Windows" description="Launches quietly in the system tray after sign-in." checked={preferences.startWithWindows} disabled={desktopSettingsPending} onChange={(value) => void setStartWithWindows(value)} />
           <SettingsToggle label="Close or minimize to tray" description="Keeps active replay capture running in the background." checked={preferences.closeToTray} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ closeToTray: value })} />
           <SettingsToggle label="Show Replay Saved overlay" description="Shows a brief notification without taking focus." checked={preferences.saveOverlayEnabled} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ saveOverlayEnabled: value })} />
-          <SettingsToggle label="Start Replay Buffer automatically" description="Available after Stage 23 game auto-arm is configured." checked={false} disabled onChange={() => undefined} />
           {desktopSettingsMessage && <span className={desktopSettingsMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{desktopSettingsMessage.text}</span>}
+        </SettingsSection>
+
+        <SettingsSection title="Game Detection">
+          <SettingsToggle label="Detect likely games" description="Surfaces large dedicated windows as suggestions. Detection alone never starts capture." checked={preferences.gameDetectionEnabled} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ gameDetectionEnabled: value, gameAutoArm: value ? preferences.gameAutoArm : false })} />
+          <SettingsToggle label="Auto-arm approved games" description="Starts only when exactly one explicitly approved game window is live; suggestions are never auto-armed." checked={preferences.gameAutoArm} disabled={desktopSettingsPending || !preferences.gameDetectionEnabled} onChange={(value) => void updateDesktopPreference({ gameAutoArm: value })} />
+          <div className="game-detection-rules">
+            <div className="game-detection-heading"><div><span>Process rules</span><small>Exclusions override approvals. Executable names are matched without case or .exe.</small></div><button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={addApprovedProcess}>+ Approve Process</button></div>
+            <ProcessRuleList label="Approved for auto-arm" values={preferences.gameDetectionApprovedProcesses} onRemove={(value) => removeProcessRule(value, "approved")} />
+            <ProcessRuleList label="Excluded" values={preferences.gameDetectionExcludedProcesses} onRemove={(value) => removeProcessRule(value, "excluded")} />
+          </div>
+          <div className="game-detection-live">
+            <div className="game-detection-heading"><div><span>Live candidates</span><small>{preferences.gameDetectionEnabled ? "Review every process before allowing auto-arm." : "Enable detection to scan capturable windows."}</small></div>{gameDetection.autoArmedTargetId && <span className="game-auto-armed-status"><span className="status-dot status-dot-active" />Auto-armed</span>}</div>
+            {gameDetection.errorMessage && <span className="hotkey-message-error" role="alert">{gameDetection.errorMessage}</span>}
+            {preferences.gameDetectionEnabled && !gameDetection.errorMessage && gameDetection.candidates.length === 0 && <p className="game-detection-empty">No likely game windows are visible.</p>}
+            {gameDetection.candidates.map((candidate) => <article className="game-candidate" key={candidate.targetId}>
+              <div><strong>{candidate.processName}</strong><span>{candidate.title}</span><small>{candidate.width}×{candidate.height} · PID {candidate.processId} · {candidate.reason}</small></div>
+              <div>{candidate.approved ? <span className="game-approved-badge">Approved</span> : <button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={() => approveProcess(candidate.processName)}>Approve</button>}<button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={() => excludeProcess(candidate.processName)}>Exclude</button></div>
+            </article>)}
+          </div>
         </SettingsSection>
 
         <SettingsSection title="Privacy">
@@ -354,4 +450,8 @@ function SettingsToggle({ label, description, checked, onChange, disabled = fals
       <Toggle label={label} checked={checked} onChange={onChange} disabled={disabled} />
     </div>
   );
+}
+
+function ProcessRuleList({ label, values, onRemove }: { label: string; values: string[]; onRemove: (value: string) => void }) {
+  return <div className="process-rule-list"><small>{label}</small><div>{values.length === 0 ? <span>None</span> : values.map((value) => <button type="button" key={value} title={`Remove ${value}`} onClick={() => onRemove(value)}>{value}<span aria-hidden="true">×</span></button>)}</div></div>;
 }

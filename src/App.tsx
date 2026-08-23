@@ -22,6 +22,7 @@ function App() {
 
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
+    let unlistenAutoArm: UnlistenFn | undefined;
     let disposed = false;
     void listen<{ success: boolean; message: string }>("save-replay-hotkey-feedback", (event) => {
       setToast({ title: event.payload.success ? "Replay save" : "Could not save replay", message: event.payload.message, success: event.payload.success });
@@ -29,9 +30,16 @@ function App() {
       if (disposed) cleanup();
       else unlisten = cleanup;
     });
+    void listen<{ success: boolean; message: string }>("game-auto-arm-feedback", (event) => {
+      setToast({ title: event.payload.success ? "Replay Buffer ready" : "Auto-arm needs attention", message: event.payload.message, success: event.payload.success });
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlistenAutoArm = cleanup;
+    });
     return () => {
       disposed = true;
       unlisten?.();
+      unlistenAutoArm?.();
     };
   }, []);
 
