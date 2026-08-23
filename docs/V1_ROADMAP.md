@@ -100,6 +100,8 @@ Required gate: automated cleanup-order/path-safety coverage and manual destructi
 
 ## Stage 25 — Final SlickClip Migration and Distribution
 
+Status: provisional implementation checkpoint `cc79345`; automated validation and an unsigned NSIS 1.0.0 bundle pass, while clean-machine migration/install/regression/uninstall validation remains pending in `docs/MANUAL_VALIDATION_PENDING.md`.
+
 Goals:
 
 - Carefully migrate remaining visible/product `JustIn Replay` naming.

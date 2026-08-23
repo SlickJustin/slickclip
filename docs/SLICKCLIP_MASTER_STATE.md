@@ -34,7 +34,7 @@ Repository: `C:\Users\Jakea\source\replay-app`
 - Stage 22 Tray, Background, Startup, and Save Overlay has provisional checkpoint `db7328c`. Its automated checks pass, but manual native tray/startup/focus/background-capture validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 23 Game Detection and Auto-Arm has provisional checkpoint `4c8e3ec`. Its automated checks pass, but manual representative-game/launcher/fullscreen/false-positive validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 24 Storage Safety has provisional checkpoint `bdfc167`. Its automated checks pass, but manual destructive-safety validation with disposable data remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
-- Stage 25 has not started.
+- Stage 25 Final SlickClip Migration and Distribution has provisional checkpoint `cc79345`. Its automated checks and unsigned NSIS bundle pass, but disposable-data migration and clean-machine install/capture/save/playback/edit/export/uninstall validation remain pending and are tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - The waveform experiment was deliberately deferred and remains in Git stash as `Stage 19 waveform experiment - deferred`.
 - The four project-control documents were accidentally committed as empty files in commit `07b3216`; this document set restores their intended content.
 
@@ -199,6 +199,29 @@ Automated results reported for this Stage 24 diff:
 
 These results do not replace the outstanding destructive-safety test using disposable real clips. Stage 24 remains provisionally complete rather than manually verified.
 
+## Stage 25 provisional checkpoint
+
+Stage 25 completes the product-facing SlickClip 1.0.0 migration and creates a standalone current-user NSIS installer. Startup first performs a no-overwrite migration from the legacy application-data and Videos roots, rejects Windows reparse points throughout the source tree, transactionally rewrites only direct-child legacy MP4 Library paths, atomically rewrites cached JSON path metadata, and remains safe to retry. Automated coverage verifies clip bytes, favorites, protection, play count, collections, preferences, cache paths, idempotence, collision refusal, and the current-install/no-legacy no-op. The existing internal crate name, legacy environment-variable fallback, legacy process exclusion, and migration-source names remain intentionally compatible.
+
+The bundle is branded SlickClip throughout, uses `com.slickclip.desktop`, emits `SlickClip.exe` and a per-user NSIS installer, and packages pinned checksum-verified static GPL FFmpeg/ffprobe sidecars plus the corresponding license and source notice. A source preparation script owns the target-suffixed Tauri sidecar names; generated dependency binaries stay ignored. New clips use the `SlickClip-<timestamp>` prefix and live under `Videos\SlickClip\Clips`.
+
+Automated results reported for this Stage 25 diff:
+
+- `npm test`: 67 passed.
+- `npm run build`: passed.
+- `npm run prepare:ffmpeg`: passed and re-verified the pinned files.
+- `cargo check`: passed.
+- `cargo test -- --nocapture`: 163 passed, including three migration tests.
+- `cargo fmt -- --check`: passed with the known environment canonicalization warning.
+- `git diff --check`: passed; line-ending notices are advisory only.
+- `npm run bundle`: passed without Rust warnings and emitted the unsigned NSIS bundle.
+- Final `SlickClip.exe`: 15,172,608 bytes; SHA-256 `508C48716B5FAC46F840910E69F8A677D602853AB3ED935F678C342DA3B53AF1`; PE product/file version SlickClip 1.0.0.
+- Final `SlickClip_1.0.0_x64-setup.exe`: 87,131,060 bytes; SHA-256 `B49C34D313E240DE305D44D978C5846480BDAE2A7E67043B8AC8584AC0755622`; PE product/file version SlickClip 1.0.0.
+- Generated NSIS source inspection confirms current-user install mode, `com.slickclip.desktop`, both media sidecars, the FFmpeg license/source notice, and no uninstall rule targeting the Videos clip root.
+- No lint script exists.
+
+These results do not replace the clean-machine and disposable-data migration gate. The installer is unsigned, and code signing, updater/feed configuration, release legal review, and signed upgrade/rollback testing belong to Stage 26. Stage 25 remains provisionally complete rather than manually verified.
+
 ## Architecture invariants
 
 - Realtime capture must not be blocked by Library, Editor, cache, clipboard, preference, or FFmpeg export work.
@@ -214,7 +237,7 @@ Product name: SlickClip.
 
 Accepted visual direction: graphite/near-black, royal purple, restrained and professional, with a subtle sci-fi/military-tech influence. The current SlickClip icon and sidebar logo are accepted unless the user explicitly reopens branding.
 
-Some migration-sensitive identifiers and paths still contain `JustIn Replay`, including the current Videos subdirectories and possibly application-data identifiers. Do not rename them piecemeal. Stage 25 owns the migration and must preserve existing clips, databases, preferences, previews, and caches.
+Stage 25 moved current product data to SlickClip-named roots. Intentional legacy names remain only where required to locate and migrate historical data, honor development environment-variable overrides, exclude the former executable during game detection, or preserve internal/vendor compatibility. Do not remove those compatibility paths without a separately tested migration decision.
 
 ## Deferred waveform decision
 
