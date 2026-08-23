@@ -8,7 +8,8 @@ Complete stages sequentially. Preserve completed behavior, finish each automated
 - Stage 19: provisional checkpoint `c62c81f`; implementation and automated validation complete, with manual visual/regression validation still pending.
 - Stage 20: provisional checkpoint `6b40cc6`; implementation and automated validation complete, with manual UI validation still pending.
 - Stage 21: provisional checkpoint `f5c14f2`; implementation and automated validation complete, with manual startup/focus/reduced-motion validation still pending.
-- Stage 22: not started.
+- Stage 22: provisional checkpoint `db7328c`; implementation and automated validation complete, with manual Windows tray/startup/focus/background-capture validation still pending.
+- Stage 23: not started.
 - Waveform: explicitly deferred; not part of this roadmap.
 
 ## Stage 19 — Professional UI/UX Polish
@@ -56,6 +57,8 @@ Goals:
 Required gate: manual visual, focus, startup, and reduced-motion validation.
 
 ## Stage 22 — Tray, Background, Startup, and Save Overlay
+
+Status: provisional automated checkpoint `db7328c`; manual gate pending.
 
 Goals:
 

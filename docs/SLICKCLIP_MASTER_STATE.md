@@ -31,7 +31,8 @@ Repository: `C:\Users\Jakea\source\replay-app`
 - Stage 19 Professional UI/UX Polish has provisional checkpoint `c62c81f`. Its automated checks pass, but manual visual/regression validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 20 Replay Roulette has provisional checkpoint `6b40cc6`. Its automated checks pass, but manual UI validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 21 Animated Launch Experience has provisional checkpoint `f5c14f2`. Its automated checks pass, but manual native startup/focus/reduced-motion validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
-- Stage 22 has not started.
+- Stage 22 Tray, Background, Startup, and Save Overlay has provisional checkpoint `db7328c`. Its automated checks pass, but manual native tray/startup/focus/background-capture validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
+- Stage 23 has not started.
 - The waveform experiment was deliberately deferred and remains in Git stash as `Stage 19 waveform experiment - deferred`.
 - The four project-control documents were accidentally committed as empty files in commit `07b3216`; this document set restores their intended content.
 
@@ -146,6 +147,22 @@ Automated results reported for this Stage 21 diff:
 - No lint script exists.
 
 These results do not replace the outstanding native startup/focus/appearance gate. Stage 21 remains provisionally complete rather than manually verified.
+
+## Stage 22 provisional checkpoint
+
+Stage 22 adds one Tauri desktop-integration layer over the existing replay, save, preference, and window managers. It provides a live tray status item plus Open/Save Replay/Quit actions, persisted close-or-minimize-to-tray behavior, background launch through a quoted per-user Windows Run entry, and a hidden non-focusable save-overlay WebView shown only after the existing save worker successfully completes. The tray polls existing manager status; it does not create another capture or save path. Preference schema v2 adds only `startWithWindows`, `closeToTray`, and `saveOverlayEnabled`. Automatic Replay Buffer startup remains intentionally disabled until Stage 23 can select and verify an intended target.
+
+Automated results reported for this Stage 22 diff:
+
+- `npm test`: 67 passed.
+- `npm run build`: passed and emitted main, splash, and save-overlay entry points.
+- `cargo check`: passed with Tauri tray and Windows Registry features enabled.
+- `cargo test -- --nocapture`: 152 passed, including startup-command and overlay-position coverage.
+- `cargo fmt -- --check`: passed with the known environment canonicalization warning.
+- `git diff --check`: passed.
+- No lint script exists.
+
+These results do not replace the outstanding Windows tray/startup/focus/background-capture gate. Stage 22 remains provisionally complete rather than manually verified.
 
 ## Architecture invariants
 
