@@ -36,7 +36,7 @@ Repository: `C:\Users\Jakea\source\replay-app`
 - Stage 24 Storage Safety has provisional checkpoint `bdfc167`. Its automated checks pass, but manual destructive-safety validation with disposable data remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 25 Final SlickClip Migration and Distribution has provisional checkpoint `cc79345`. Its automated checks and unsigned NSIS bundle pass, but disposable-data migration and clean-machine install/capture/save/playback/edit/export/uninstall validation remain pending and are tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 26 Updater and Release Candidate has provisional implementation checkpoint `3322c46`. Its updater/release code and unsigned packaging checks pass, but signing credentials, hosted release infrastructure, a signed candidate, clean-PC upgrade/failure tests, and the complete release gate remain pending. SlickClip v1.0.0 is not approved for release.
-- Stage 27 Watch Party / Reaction Capture is provisionally implemented and automatically clean. Its real Windows multi-hour/dynamic-participant/synchronization/failure/recovery/playback/Editor validation is pending in `docs/MANUAL_VALIDATION_PENDING.md`.
+- Stage 27 Watch Party / Reaction Capture has provisional checkpoint `cf82ba8` and is automatically clean. Its real Windows multi-hour/dynamic-participant/synchronization/failure/recovery/playback/Editor validation is pending in `docs/MANUAL_VALIDATION_PENDING.md`.
 - The waveform experiment was deliberately deferred and remains in Git stash as `Stage 19 waveform experiment - deferred`.
 - The four project-control documents were accidentally committed as empty files in commit `07b3216`; this document set restores their intended content.
 
