@@ -15,13 +15,18 @@ use windows::Win32::Storage::FileSystem::{
     MoveFileExW, FILE_ATTRIBUTE_REPARSE_POINT, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
+// Only these direct children contain durable data whose lifecycle SlickClip owns. Tauri/WebView
+// runtime state and the disposable ReplayBuffer share the application-data root but are not
+// migration inputs.
+const PERSISTENT_APP_DATA_DIRECTORIES: [&str; 3] = ["Library", "Preferences", "WatchParty"];
+
 pub fn migrate_legacy_installation(
     legacy_app_data: &Path,
     slickclip_app_data: &Path,
     legacy_video_root: &Path,
     slickclip_video_root: &Path,
 ) -> Result<(), String> {
-    migrate_tree_without_overwrite(legacy_app_data, slickclip_app_data)?;
+    migrate_owned_app_data(legacy_app_data, slickclip_app_data)?;
     migrate_tree_without_overwrite(legacy_video_root, slickclip_video_root)?;
 
     let legacy_clips = legacy_video_root.join("Clips");
@@ -36,7 +41,46 @@ pub fn migrate_legacy_installation(
     Ok(())
 }
 
+fn migrate_owned_app_data(source_root: &Path, destination_root: &Path) -> Result<(), String> {
+    validate_migration_root(source_root)?;
+    validate_migration_root(destination_root)?;
+
+    for directory in PERSISTENT_APP_DATA_DIRECTORIES {
+        preflight_tree_without_overwrite(
+            &source_root.join(directory),
+            &destination_root.join(directory),
+        )?;
+    }
+    for directory in PERSISTENT_APP_DATA_DIRECTORIES {
+        migrate_tree_after_preflight(
+            &source_root.join(directory),
+            &destination_root.join(directory),
+        )?;
+    }
+
+    remove_directory_if_empty(source_root)
+}
+
+fn validate_migration_root(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    reject_reparse_point(path)?;
+    if !path.is_dir() {
+        return Err(format!(
+            "SlickClip migration expected '{}' to be a directory.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn migrate_tree_without_overwrite(source: &Path, destination: &Path) -> Result<(), String> {
+    preflight_tree_without_overwrite(source, destination)?;
+    migrate_tree_after_preflight(source, destination)
+}
+
+fn preflight_tree_without_overwrite(source: &Path, destination: &Path) -> Result<(), String> {
     if !source.exists() {
         return Ok(());
     }
@@ -56,6 +100,15 @@ fn migrate_tree_without_overwrite(source: &Path, destination: &Path) -> Result<(
             ));
         }
         preflight_merge(source, destination)?;
+    }
+    Ok(())
+}
+
+fn migrate_tree_after_preflight(source: &Path, destination: &Path) -> Result<(), String> {
+    if !source.exists() {
+        return Ok(());
+    }
+    if destination.exists() {
         merge_tree(source, destination)?;
     } else {
         let parent = destination.parent().ok_or_else(|| {
@@ -66,6 +119,21 @@ fn migrate_tree_without_overwrite(source: &Path, destination: &Path) -> Result<(
         })?;
         fs::create_dir_all(parent).map_err(migration_io_error)?;
         fs::rename(source, destination).map_err(migration_io_error)?;
+    }
+    Ok(())
+}
+
+fn remove_directory_if_empty(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    reject_reparse_point(path)?;
+    if fs::read_dir(path)
+        .map_err(migration_io_error)?
+        .next()
+        .is_none()
+    {
+        fs::remove_dir(path).map_err(migration_io_error)?;
     }
     Ok(())
 }
@@ -458,23 +526,93 @@ mod tests {
     }
 
     #[test]
-    fn merge_refuses_collisions_without_overwriting_either_file() {
+    fn meaningful_app_data_on_both_sides_refuses_the_migration() {
         let base = root("collision");
-        let legacy = base.join("legacy");
-        let current = base.join("current");
-        fs::create_dir_all(legacy.join("Library")).unwrap();
-        fs::create_dir_all(current.join("Library")).unwrap();
-        fs::write(legacy.join("Library").join("clips.db"), b"legacy").unwrap();
-        fs::write(current.join("Library").join("clips.db"), b"current").unwrap();
-        assert!(migrate_tree_without_overwrite(&legacy, &current).is_err());
+        let legacy_app = base.join("com.replayapp.desktop");
+        let current_app = base.join("com.slickclip.desktop");
+        let legacy_video = base.join("Videos").join("JustIn Replay");
+        let current_video = base.join("Videos").join("SlickClip");
+        fs::create_dir_all(legacy_app.join("Library")).unwrap();
+        fs::create_dir_all(current_app.join("Library")).unwrap();
+        fs::write(legacy_app.join("Library").join("clips.db"), b"legacy").unwrap();
+        fs::write(current_app.join("Library").join("clips.db"), b"current").unwrap();
+
+        let error =
+            migrate_legacy_installation(&legacy_app, &current_app, &legacy_video, &current_video)
+                .unwrap_err();
+
+        assert!(error.contains("both legacy and current data"));
         assert_eq!(
-            fs::read(legacy.join("Library").join("clips.db")).unwrap(),
+            fs::read(legacy_app.join("Library").join("clips.db")).unwrap(),
             b"legacy"
         );
         assert_eq!(
-            fs::read(current.join("Library").join("clips.db")).unwrap(),
+            fs::read(current_app.join("Library").join("clips.db")).unwrap(),
             b"current"
         );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn runtime_overlap_does_not_block_legacy_owned_data() {
+        let base = root("runtime-overlap");
+        let legacy_app = base.join("com.replayapp.desktop");
+        let current_app = base.join("com.slickclip.desktop");
+        let legacy_video = base.join("Videos").join("JustIn Replay");
+        let current_video = base.join("Videos").join("SlickClip");
+        let legacy_runtime = legacy_app
+            .join("EBWebView")
+            .join("Crashpad")
+            .join("metadata");
+        let current_runtime = current_app
+            .join("EBWebView")
+            .join("Crashpad")
+            .join("metadata");
+        let legacy_preferences = legacy_app.join("Preferences").join("ui-preferences.json");
+        fs::create_dir_all(legacy_runtime.parent().unwrap()).unwrap();
+        fs::create_dir_all(current_runtime.parent().unwrap()).unwrap();
+        fs::create_dir_all(legacy_preferences.parent().unwrap()).unwrap();
+        fs::write(&legacy_runtime, b"legacy runtime").unwrap();
+        fs::write(&current_runtime, b"current runtime").unwrap();
+        fs::write(&legacy_preferences, br#"{"playerVolume":0.5}"#).unwrap();
+
+        migrate_legacy_installation(&legacy_app, &current_app, &legacy_video, &current_video)
+            .unwrap();
+
+        assert_eq!(fs::read(&legacy_runtime).unwrap(), b"legacy runtime");
+        assert_eq!(fs::read(&current_runtime).unwrap(), b"current runtime");
+        assert_eq!(
+            fs::read(current_app.join("Preferences").join("ui-preferences.json")).unwrap(),
+            br#"{"playerVolume":0.5}"#
+        );
+        assert!(!legacy_preferences.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn runtime_only_roots_have_no_user_data_collision() {
+        let base = root("runtime-only");
+        let legacy_app = base.join("com.replayapp.desktop");
+        let current_app = base.join("com.slickclip.desktop");
+        let legacy_video = base.join("Videos").join("JustIn Replay");
+        let current_video = base.join("Videos").join("SlickClip");
+        let legacy_runtime = legacy_app.join("EBWebView").join("GPUCache").join("data_0");
+        let current_runtime = current_app
+            .join("EBWebView")
+            .join("GPUCache")
+            .join("data_0");
+        fs::create_dir_all(legacy_runtime.parent().unwrap()).unwrap();
+        fs::create_dir_all(current_runtime.parent().unwrap()).unwrap();
+        fs::write(&legacy_runtime, b"legacy runtime").unwrap();
+        fs::write(&current_runtime, b"current runtime").unwrap();
+
+        migrate_legacy_installation(&legacy_app, &current_app, &legacy_video, &current_video)
+            .unwrap();
+
+        assert_eq!(fs::read(&legacy_runtime).unwrap(), b"legacy runtime");
+        assert_eq!(fs::read(&current_runtime).unwrap(), b"current runtime");
+        assert!(!current_app.join("Library").exists());
+        assert!(!current_app.join("Preferences").exists());
         fs::remove_dir_all(base).unwrap();
     }
 }
