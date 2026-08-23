@@ -33,6 +33,7 @@ export type ClipListItem = {
   captureTargetLabel: string | null;
   captureTargetType: string | null;
   favorite: boolean;
+  pinned: boolean;
   importedExistingFile: boolean;
   audioStreamCount: number;
   defaultAudioStreamTitle: string | null;
@@ -79,7 +80,39 @@ export type LibrarySummary = {
   clipCount: number;
   totalSizeBytes: number;
   favoritesCount: number;
+  protectedCount: number;
+  protectedSizeBytes: number;
   collectionsCount: number;
+};
+
+export type StorageCleanupCandidate = {
+  clipId: string;
+  displayName: string;
+  createdAtMs: number;
+  fileSizeBytes: number;
+};
+
+export type StorageCleanupPreviewResponse = {
+  success: boolean;
+  planId: string | null;
+  quotaBytes: number;
+  totalSizeBytes: number;
+  bytesOverQuota: number;
+  plannedReclaimBytes: number;
+  remainingSizeBytes: number;
+  protectedCount: number;
+  protectedSizeBytes: number;
+  canMeetQuota: boolean;
+  candidates: StorageCleanupCandidate[];
+  errorMessage: string | null;
+};
+
+export type StorageCleanupExecutionResponse = {
+  success: boolean;
+  deletedCount: number;
+  deletedBytes: number;
+  remainingSizeBytes: number;
+  errorMessage: string | null;
 };
 
 export type CollectionSummary = {
@@ -227,6 +260,7 @@ export type UiPreferences = {
   startWithWindows: boolean;
   closeToTray: boolean;
   saveOverlayEnabled: boolean;
+  storageQuotaGib: number;
   gameDetectionEnabled: boolean;
   gameAutoArm: boolean;
   gameDetectionApprovedProcesses: string[];
@@ -242,7 +276,7 @@ export type UiPreferencesResponse = {
 export type UiPreferencesPatch = Partial<Omit<UiPreferences, "schemaVersion">>;
 
 export const defaultUiPreferences: UiPreferences = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   playerVolume: 1,
   playerMuted: false,
   playerLastAudibleVolume: 1,
@@ -255,6 +289,7 @@ export const defaultUiPreferences: UiPreferences = {
   startWithWindows: false,
   closeToTray: true,
   saveOverlayEnabled: true,
+  storageQuotaGib: 50,
   gameDetectionEnabled: false,
   gameAutoArm: false,
   gameDetectionApprovedProcesses: [],

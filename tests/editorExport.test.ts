@@ -59,6 +59,7 @@ function clip(): ClipListItem {
     captureTargetLabel: null,
     captureTargetType: null,
     favorite: false,
+    pinned: false,
     importedExistingFile: false,
     audioStreamCount: 1,
     defaultAudioStreamTitle: "Game",

@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { AudioCaptureTest } from "../components/AudioCaptureTest";
 import { Toggle } from "../components/Toggle";
-import type { UiPreferences, UiPreferencesPatch, UiPreferencesResponse } from "../types/clips";
-import { defaultUiPreferences } from "../types/clips";
+import type { StorageCleanupExecutionResponse, StorageCleanupPreviewResponse, UiPreferences, UiPreferencesPatch, UiPreferencesResponse } from "../types/clips";
+import { defaultUiPreferences, formatBytes } from "../types/clips";
 
 type HotkeyState = {
   registered: boolean;
@@ -79,6 +79,10 @@ export function SettingsPage() {
   const [desktopSettingsMessage, setDesktopSettingsMessage] = useState<{ text: string; success: boolean } | null>(null);
   const [desktopPrivacy, setDesktopPrivacy] = useState(true);
   const [gameDetection, setGameDetection] = useState<GameDetectionStatus>(initialGameDetectionStatus);
+  const [storageQuotaInput, setStorageQuotaInput] = useState(String(defaultUiPreferences.storageQuotaGib));
+  const [storagePreview, setStoragePreview] = useState<StorageCleanupPreviewResponse | null>(null);
+  const [storagePending, setStoragePending] = useState(false);
+  const [storageMessage, setStorageMessage] = useState<{ text: string; success: boolean } | null>(null);
 
   async function updateDesktopPreference(patch: UiPreferencesPatch) {
     setDesktopSettingsPending(true);
@@ -116,8 +120,56 @@ export function SettingsPage() {
     ]).then(([hotkeyState, preferenceResponse]) => {
       setHotkey(hotkeyState);
       setPreferences(preferenceResponse.preferences);
+      setStorageQuotaInput(String(preferenceResponse.preferences.storageQuotaGib));
     }).catch((error) => setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false }));
   }, []);
+
+  async function saveStorageQuota() {
+    const parsed = Number(storageQuotaInput);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10_240) {
+      throw new Error("Storage quota must be a whole number from 1 to 10,240 GB.");
+    }
+    const response = await invoke<UiPreferencesResponse>("update_ui_preferences", { patch: { storageQuotaGib: parsed } });
+    setPreferences(response.preferences);
+    setStorageQuotaInput(String(response.preferences.storageQuotaGib));
+    if (!response.success) throw new Error(response.errorMessage ?? "The storage quota could not be saved.");
+    return response.preferences.storageQuotaGib;
+  }
+
+  async function previewStorageCleanup() {
+    if (storagePending) return;
+    setStoragePending(true);
+    setStorageMessage(null);
+    setStoragePreview(null);
+    try {
+      const quotaGib = await saveStorageQuota();
+      const response = await invoke<StorageCleanupPreviewResponse>("preview_storage_cleanup", { request: { quotaBytes: quotaGib * 1_073_741_824 } });
+      if (!response.success) throw new Error(response.errorMessage ?? "Storage cleanup could not be previewed.");
+      setStoragePreview(response);
+    } catch (error) {
+      setStorageMessage({ text: error instanceof Error ? error.message : String(error), success: false });
+    } finally {
+      setStoragePending(false);
+    }
+  }
+
+  async function executeStorageCleanup() {
+    if (storagePending || !storagePreview?.planId || storagePreview.candidates.length === 0) return;
+    const confirmed = window.confirm(`Permanently delete ${storagePreview.candidates.length} unprotected clip${storagePreview.candidates.length === 1 ? "" : "s"} and reclaim about ${formatBytes(storagePreview.plannedReclaimBytes)}?\n\nOnly the clips listed in the preview will be deleted. This cannot be undone.`);
+    if (!confirmed) return;
+    setStoragePending(true);
+    setStorageMessage(null);
+    try {
+      const response = await invoke<StorageCleanupExecutionResponse>("execute_storage_cleanup", { request: { planId: storagePreview.planId } });
+      setStoragePreview(null);
+      if (!response.success) throw new Error(response.errorMessage ?? "Storage cleanup did not complete.");
+      setStorageMessage({ text: `Deleted ${response.deletedCount} clip${response.deletedCount === 1 ? "" : "s"}, reclaimed ${formatBytes(response.deletedBytes)}, and left ${formatBytes(response.remainingSizeBytes)} in the Library.`, success: true });
+    } catch (error) {
+      setStorageMessage({ text: error instanceof Error ? error.message : String(error), success: false });
+    } finally {
+      setStoragePending(false);
+    }
+  }
 
   useEffect(() => {
     if (!preferences.gameDetectionEnabled) {
@@ -326,6 +378,23 @@ export function SettingsPage() {
             <div><span>Save Location</span><small>Where completed clips will be stored</small></div>
             <div className="path-value">Videos\JustIn Replay\Clips</div>
           </div>
+          <div className="settings-row storage-quota-row">
+            <div><span>Library quota</span><small>Cleanup removes oldest unprotected clips first. Favorites are not protected automatically.</small></div>
+            <label className="storage-quota-input"><span className="visually-hidden">Library quota in gigabytes</span><input type="number" min="1" max="10240" step="1" value={storageQuotaInput} onChange={(event) => { setStorageQuotaInput(event.target.value); setStoragePreview(null); }} /><span>GB</span></label>
+          </div>
+          <div className="storage-cleanup-actions">
+            <button className="secondary-button" type="button" disabled={storagePending} onClick={() => void previewStorageCleanup()}>{storagePending ? "Checking…" : "Save Quota & Preview"}</button>
+            <small>No files are deleted until you review a preview and confirm.</small>
+          </div>
+          {storagePreview && <div className="storage-cleanup-preview" role="status">
+            <div className="storage-cleanup-summary"><strong>{storagePreview.bytesOverQuota === 0 ? "Library is within quota" : `${formatBytes(storagePreview.bytesOverQuota)} over quota`}</strong><span>{formatBytes(storagePreview.totalSizeBytes)} used · {formatBytes(storagePreview.protectedSizeBytes)} protected across {storagePreview.protectedCount} clip{storagePreview.protectedCount === 1 ? "" : "s"}</span></div>
+            {storagePreview.candidates.length > 0 ? <>
+              <p>{storagePreview.canMeetQuota ? `Deleting these ${storagePreview.candidates.length} oldest unprotected clips would leave about ${formatBytes(storagePreview.remainingSizeBytes)}.` : `All unprotected clips are listed, but protected clips keep the Library above quota. The remaining size would be about ${formatBytes(storagePreview.remainingSizeBytes)}.`}</p>
+              <ol>{storagePreview.candidates.map((candidate) => <li key={candidate.clipId}><span>{candidate.displayName}</span><small>{new Date(candidate.createdAtMs).toLocaleString()} · {formatBytes(candidate.fileSizeBytes)}</small></li>)}</ol>
+              <button className="danger" type="button" disabled={storagePending} onClick={() => void executeStorageCleanup()}>Delete Listed Clips…</button>
+            </> : <p>No cleanup is needed. Protected clips are always excluded from automatic quota planning.</p>}
+          </div>}
+          {storageMessage && <span className={storageMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{storageMessage.text}</span>}
         </SettingsSection>
 
         <SettingsSection title="Cloud">

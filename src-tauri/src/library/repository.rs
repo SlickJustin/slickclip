@@ -5,7 +5,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, Tra
 
 use super::models::{
     ClipAudioTrack, ClipFingerprint, ClipListItem, ClipListRequest, ClipSortOrder, ClipUpsert,
-    CollectionSummary, LibrarySummary, CLIP_METADATA_VERSION,
+    CollectionSummary, LibrarySummary, StorageCleanupCandidate, CLIP_METADATA_VERSION,
 };
 
 pub fn upsert_clip(connection: &mut Connection, clip: &ClipUpsert) -> Result<String, String> {
@@ -187,7 +187,7 @@ pub fn list_clips(
                 width, height, fps_numerator, fps_denominator, video_codec, video_profile,
                 video_bitrate_bps, total_bitrate_bps, capture_target_label, capture_target_type,
                 favorite, imported_existing_file, audio_stream_count, default_audio_stream_title,
-                metadata_version, play_count, last_watched_at_ms
+                metadata_version, play_count, last_watched_at_ms, pinned
          FROM clips{where_sql} ORDER BY {order} LIMIT ? OFFSET ?"
     );
     let mut query_values = values;
@@ -213,7 +213,7 @@ pub fn get_clip(connection: &Connection, clip_id: &str) -> Result<Option<ClipLis
                     width, height, fps_numerator, fps_denominator, video_codec, video_profile,
                     video_bitrate_bps, total_bitrate_bps, capture_target_label, capture_target_type,
                     favorite, imported_existing_file, audio_stream_count, default_audio_stream_title,
-                    metadata_version, play_count, last_watched_at_ms
+                    metadata_version, play_count, last_watched_at_ms, pinned
              FROM clips WHERE id = ?1",
         )
         .map_err(database_error)?;
@@ -239,6 +239,40 @@ pub fn set_favorite(connection: &Connection, clip_id: &str, favorite: bool) -> R
             .map_err(database_error)?,
         clip_id,
     )
+}
+
+pub fn set_pinned(connection: &Connection, clip_id: &str, pinned: bool) -> Result<(), String> {
+    require_one(
+        connection
+            .execute(
+                "UPDATE clips SET pinned = ?1 WHERE id = ?2",
+                params![i64::from(pinned), clip_id],
+            )
+            .map_err(database_error)?,
+        clip_id,
+    )
+}
+
+pub fn cleanup_candidates(connection: &Connection) -> Result<Vec<StorageCleanupCandidate>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, display_name, created_at_ms, file_size_bytes
+             FROM clips WHERE pinned = 0 ORDER BY created_at_ms ASC, id ASC",
+        )
+        .map_err(database_error)?;
+    let result = statement
+        .query_map([], |row| {
+            Ok(StorageCleanupCandidate {
+                clip_id: row.get(0)?,
+                display_name: row.get(1)?,
+                created_at_ms: row.get(2)?,
+                file_size_bytes: from_i64(row.get(3)?),
+            })
+        })
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error);
+    result
 }
 
 pub fn rename_display_name(
@@ -316,6 +350,8 @@ pub fn library_summary(connection: &Connection) -> Result<LibrarySummary, String
         .query_row(
             "SELECT COUNT(*), COALESCE(SUM(file_size_bytes), 0),
                     COALESCE(SUM(CASE WHEN favorite = 1 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN pinned = 1 THEN file_size_bytes ELSE 0 END), 0),
                     (SELECT COUNT(*) FROM collections)
              FROM clips",
             [],
@@ -324,7 +360,9 @@ pub fn library_summary(connection: &Connection) -> Result<LibrarySummary, String
                     clip_count: from_i64(row.get(0)?),
                     total_size_bytes: from_i64(row.get(1)?),
                     favorites_count: from_i64(row.get(2)?),
-                    collections_count: from_i64(row.get(3)?),
+                    protected_count: from_i64(row.get(3)?),
+                    protected_size_bytes: from_i64(row.get(4)?),
+                    collections_count: from_i64(row.get(5)?),
                 })
             },
         )
@@ -579,6 +617,7 @@ fn map_clip_row(row: &Row<'_>) -> rusqlite::Result<ClipListItem> {
         metadata_version: row.get(24)?,
         play_count: from_i64(row.get(25)?),
         last_watched_at_ms: row.get(26)?,
+        pinned: row.get::<_, i64>(27)? != 0,
         collection_ids: Vec::new(),
         audio_tracks: Vec::new(),
     })
@@ -746,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn favorite_and_display_name_persist_after_database_reopen() {
+    fn favorite_protection_and_display_name_persist_after_database_reopen() {
         let root = std::env::temp_dir().join(format!("stage12-persistence-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let database_path = root.join("clips.db");
@@ -759,6 +798,7 @@ mod tests {
             )
             .unwrap();
             set_favorite(&connection, "persistent", true).unwrap();
+            set_pinned(&connection, "persistent", true).unwrap();
             rename_display_name(&connection, "persistent", "Persistent Name").unwrap();
         }
         drop(database);
@@ -768,6 +808,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(saved.favorite);
+        assert!(saved.pinned);
         assert_eq!(saved.display_name, "Persistent Name");
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -788,6 +829,7 @@ mod tests {
         upsert_clip(&mut connection, &second).unwrap();
         upsert_clip(&mut connection, &third).unwrap();
         set_favorite(&connection, "first", true).unwrap();
+        set_pinned(&connection, "third", true).unwrap();
 
         create_collection(&connection, "funny", "Funny 雪", 10).unwrap();
         create_collection(&connection, "best", "Best Clips", 11).unwrap();
@@ -858,7 +900,18 @@ mod tests {
         assert_eq!(totals.clip_count, 3);
         assert_eq!(totals.total_size_bytes, 875);
         assert_eq!(totals.favorites_count, 1);
+        assert_eq!(totals.protected_count, 1);
+        assert_eq!(totals.protected_size_bytes, 500);
         assert_eq!(totals.collections_count, 2);
+
+        assert_eq!(
+            cleanup_candidates(&connection)
+                .unwrap()
+                .iter()
+                .map(|item| item.clip_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
 
         rename_collection(&connection, "funny", "Funny Stuff", 400).unwrap();
         assert_eq!(

@@ -13,7 +13,7 @@ use windows::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
-const UI_PREFERENCES_SCHEMA_VERSION: u32 = 3;
+const UI_PREFERENCES_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -31,6 +31,7 @@ pub struct UiPreferences {
     pub start_with_windows: bool,
     pub close_to_tray: bool,
     pub save_overlay_enabled: bool,
+    pub storage_quota_gib: u32,
     pub game_detection_enabled: bool,
     pub game_auto_arm: bool,
     pub game_detection_approved_processes: Vec<String>,
@@ -53,6 +54,7 @@ impl Default for UiPreferences {
             start_with_windows: false,
             close_to_tray: true,
             save_overlay_enabled: true,
+            storage_quota_gib: 50,
             game_detection_enabled: false,
             game_auto_arm: false,
             game_detection_approved_processes: Vec::new(),
@@ -97,6 +99,7 @@ impl UiPreferences {
             self.clips_grid_size = "comfortable".into();
         }
         self.clips_search_query.truncate(500);
+        self.storage_quota_gib = self.storage_quota_gib.clamp(1, 10 * 1024);
         self.selected_collection_id = self
             .selected_collection_id
             .take()
@@ -162,6 +165,7 @@ pub struct UiPreferencesPatch {
     pub start_with_windows: Option<bool>,
     pub close_to_tray: Option<bool>,
     pub save_overlay_enabled: Option<bool>,
+    pub storage_quota_gib: Option<u32>,
     pub game_detection_enabled: Option<bool>,
     pub game_auto_arm: Option<bool>,
     pub game_detection_approved_processes: Option<Vec<String>>,
@@ -279,6 +283,9 @@ fn apply_patch(mut value: UiPreferences, patch: UiPreferencesPatch) -> UiPrefere
     if let Some(next) = patch.save_overlay_enabled {
         value.save_overlay_enabled = next;
     }
+    if let Some(next) = patch.storage_quota_gib {
+        value.storage_quota_gib = next;
+    }
     if let Some(next) = patch.game_detection_enabled {
         value.game_detection_enabled = next;
     }
@@ -388,6 +395,7 @@ mod tests {
         assert!(!upgraded.start_with_windows);
         assert!(upgraded.close_to_tray);
         assert!(upgraded.save_overlay_enabled);
+        assert_eq!(upgraded.storage_quota_gib, 50);
         assert!(!upgraded.game_detection_enabled);
         assert!(!upgraded.game_auto_arm);
         assert!(upgraded.game_detection_approved_processes.is_empty());
@@ -413,6 +421,7 @@ mod tests {
             start_with_windows: Some(true),
             close_to_tray: Some(false),
             save_overlay_enabled: Some(false),
+            storage_quota_gib: Some(12_000),
             game_detection_enabled: Some(true),
             game_auto_arm: Some(true),
             game_detection_approved_processes: Some(vec![
@@ -435,6 +444,7 @@ mod tests {
         assert!(loaded.start_with_windows);
         assert!(!loaded.close_to_tray);
         assert!(!loaded.save_overlay_enabled);
+        assert_eq!(loaded.storage_quota_gib, 10 * 1024);
         assert!(loaded.game_detection_enabled);
         assert!(loaded.game_auto_arm);
         assert_eq!(loaded.game_detection_approved_processes, vec!["Game"]);

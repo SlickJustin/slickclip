@@ -229,6 +229,13 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
     replaceClip(response.clip);
   }
 
+  async function setPinned(clip: ClipListItem) {
+    const response = await invoke<ClipMutationResponse>("set_clip_pinned", { request: { clipId: clip.id, pinned: !clip.pinned } });
+    if (!response.success || !response.clip) return setError(response.errorMessage ?? "Protection update failed.");
+    replaceClip(response.clip);
+    onToast(response.clip.pinned ? "Clip protected" : "Protection removed", response.clip.pinned ? "Storage cleanup will skip this clip." : "This clip may be included in a future storage cleanup.", true);
+  }
+
   async function renameClip(clip: ClipListItem) {
     const name = window.prompt("Library display name (leave empty to restore the filename-derived name):", clip.displayName);
     if (name === null) return;
@@ -353,7 +360,7 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
       {loading ? <LibraryState title="Loading clips..." detail="Reading the local Clips database." /> : clips.length === 0 && !error ? <LibraryState title="No matching clips" detail="Try another view, collection, or search." /> : <div className={`clips-library-grid grid-${preferences.clipsGridSize}`}>
         {clips.map((clip) => <article className="clip-card" key={clip.id}><ClipThumbnail clip={clip} onPlay={() => setPlayingClip(clip)} /><div className="clip-card-body">
           <div className="clip-card-heading"><div><button className="clip-title-button" type="button" onClick={() => setPlayingClip(clip)}>{clip.displayName}</button><small>{new Date(clip.createdAtMs).toLocaleString()}</small>{clip.lastWatchedAtMs && <small title={new Date(clip.lastWatchedAtMs).toLocaleString()}>{formatLastWatched(clip.lastWatchedAtMs)}</small>}</div><button className={`favorite-button${clip.favorite ? " active" : ""}`} type="button" aria-label={clip.favorite ? "Remove favorite" : "Add favorite"} title={clip.favorite ? "Remove favorite" : "Add favorite"} onClick={() => void setFavorite(clip)}>{clip.favorite ? "★" : "☆"}</button></div>
-          <div className="clip-card-facts"><span>{formatDuration100ns(clip.duration100ns)}</span><span>{formatBytes(clip.fileSizeBytes)}</span><span>{formatFps(clip.fpsNumerator, clip.fpsDenominator)} FPS</span>{clip.playCount > 0 && <span>▶ {clip.playCount} {clip.playCount === 1 ? "play" : "plays"}</span>}{clip.captureTargetLabel && <span>{clip.captureTargetLabel}</span>}</div>
+          <div className="clip-card-facts"><span>{formatDuration100ns(clip.duration100ns)}</span><span>{formatBytes(clip.fileSizeBytes)}</span><span>{formatFps(clip.fpsNumerator, clip.fpsDenominator)} FPS</span>{clip.pinned && <span className="clip-protected-badge" title="Excluded from storage cleanup">Protected</span>}{clip.playCount > 0 && <span>▶ {clip.playCount} {clip.playCount === 1 ? "play" : "plays"}</span>}{clip.captureTargetLabel && <span>{clip.captureTargetLabel}</span>}</div>
           {clip.audioTracks.length > 0 && <div className="clip-audio-badges">{clip.audioTracks.map((track) => <span key={track.streamIndex}>{audioLabel(track)}</span>)}</div>}
           <div className="clip-card-actions">
             <button className="clip-play-button" type="button" onClick={() => setPlayingClip(clip)}>▶ Play</button>
@@ -400,6 +407,7 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
           <button type="button" role="menuitem" onClick={() => { closeMoreMenu(); void clipAction("open_clip_file", moreMenuClip); }}>Open Externally</button>
           <button type="button" role="menuitem" onClick={() => { closeMoreMenu(); void clipAction("open_clip_folder", moreMenuClip); }}>Open Folder</button>
           <button type="button" role="menuitem" onClick={() => { closeMoreMenu(); void renameClip(moreMenuClip); }}>Rename</button>
+          <button type="button" role="menuitem" onClick={() => { closeMoreMenu(); void setPinned(moreMenuClip); }}>{moreMenuClip.pinned ? "Remove Protection" : "Protect from Cleanup"}</button>
           <button className="danger" type="button" role="menuitem" onClick={() => { closeMoreMenu(); void deleteClip(moreMenuClip); }}>Delete Clip</button>
         </div>
       </div>,

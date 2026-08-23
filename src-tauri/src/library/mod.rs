@@ -7,6 +7,7 @@ mod models;
 mod reconcile;
 mod repository;
 mod safety;
+mod storage;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +25,8 @@ pub use models::{
     CollectionMutationResponse, CollectionsResponse, CreateCollectionRequest, LibraryTelemetry,
     PrepareClipAudioRequest, PrepareClipMediaRequest, PrepareClipMediaResponse, ReconcileResponse,
     RenameClipRequest, RenameCollectionRequest, SetClipCollectionRequest, SetFavoriteRequest,
+    SetPinnedRequest, StorageCleanupExecuteRequest, StorageCleanupExecutionResponse,
+    StorageCleanupPreviewRequest, StorageCleanupPreviewResponse,
 };
 
 use database::LibraryDatabase;
@@ -31,11 +34,13 @@ use media::{media_response, CacheClip, MediaCacheManager};
 use models::{ClipListItem, ClipUpsert, ReconciliationTelemetry};
 use reconcile::{reconcile, FfprobeMediaInspector};
 use repository::{
-    count_clips, create_collection, delete_clip_row, delete_collection, get_clip, library_summary,
-    list_clips as query_clips, list_collections, record_clip_watch, rename_collection,
-    rename_display_name, set_clip_collection, set_favorite, upsert_clip,
+    cleanup_candidates, count_clips, create_collection, delete_clip_row, delete_collection,
+    get_clip, library_summary, list_clips as query_clips, list_collections, record_clip_watch,
+    rename_collection, rename_display_name, set_clip_collection, set_favorite, set_pinned,
+    upsert_clip,
 };
 use safety::validate_owned_clip;
+use storage::{build_cleanup_preview, same_cleanup_scope, StoredCleanupPlan};
 
 #[derive(Clone, Debug)]
 pub struct SavedClipMetadata {
@@ -70,6 +75,8 @@ pub struct ClipLibraryManager {
     telemetry: Arc<Mutex<LibraryTelemetry>>,
     reconciliation_running: Arc<AtomicBool>,
     media_cache: MediaCacheManager,
+    pending_cleanup: Arc<Mutex<Option<StoredCleanupPlan>>>,
+    cleanup_execution: Arc<Mutex<()>>,
 }
 
 impl ClipLibraryManager {
@@ -94,6 +101,8 @@ impl ClipLibraryManager {
             })),
             reconciliation_running: Arc::new(AtomicBool::new(false)),
             media_cache: MediaCacheManager::new(cache_root),
+            pending_cleanup: Arc::new(Mutex::new(None)),
+            cleanup_execution: Arc::new(Mutex::new(())),
         };
         manager.refresh_indexed_count();
         manager
@@ -274,6 +283,139 @@ impl ClipLibraryManager {
         self.mutate_clip(&request.clip_id, |connection| {
             set_favorite(connection, &request.clip_id, request.favorite)
         })
+    }
+
+    fn mutate_pinned(&self, request: SetPinnedRequest) -> ClipMutationResponse {
+        let _cleanup_guard = self
+            .cleanup_execution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *self
+            .pending_cleanup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.mutate_clip(&request.clip_id, |connection| {
+            set_pinned(connection, &request.clip_id, request.pinned)
+        })
+    }
+
+    fn preview_storage_cleanup(
+        &self,
+        request: StorageCleanupPreviewRequest,
+    ) -> StorageCleanupPreviewResponse {
+        *self
+            .pending_cleanup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        let result = (|| {
+            let database = self.database()?;
+            let connection = database.open()?;
+            let summary = library_summary(&connection)?;
+            let candidates = cleanup_candidates(&connection)?;
+            let (preview, plan) = build_cleanup_preview(request.quota_bytes, &summary, candidates)?;
+            for candidate in &preview.candidates {
+                let (clip, _) = self.resolved_clip(&candidate.clip_id)?;
+                if clip.pinned {
+                    return Err(format!(
+                        "Protected clip '{}' entered a cleanup preview.",
+                        clip.display_name
+                    ));
+                }
+            }
+            *self
+                .pending_cleanup
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = plan;
+            Ok(preview)
+        })();
+        result.unwrap_or_else(|error| StorageCleanupPreviewResponse {
+            success: false,
+            plan_id: None,
+            quota_bytes: request.quota_bytes,
+            total_size_bytes: 0,
+            bytes_over_quota: 0,
+            planned_reclaim_bytes: 0,
+            remaining_size_bytes: 0,
+            protected_count: 0,
+            protected_size_bytes: 0,
+            can_meet_quota: false,
+            candidates: Vec::new(),
+            error_message: Some(error),
+        })
+    }
+
+    fn execute_storage_cleanup(
+        &self,
+        request: StorageCleanupExecuteRequest,
+    ) -> StorageCleanupExecutionResponse {
+        let _cleanup_guard = self
+            .cleanup_execution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stored = self
+            .pending_cleanup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let mut deleted_count = 0_u64;
+        let mut deleted_bytes = 0_u64;
+        let result = (|| {
+            let stored = stored
+                .ok_or_else(|| "The cleanup preview expired. Preview cleanup again.".to_string())?;
+            if stored.plan_id != request.plan_id {
+                return Err("The cleanup preview token is invalid or expired.".into());
+            }
+            let database = self.database()?;
+            let connection = database.open()?;
+            let summary = library_summary(&connection)?;
+            let candidates = cleanup_candidates(&connection)?;
+            let (_, current) = build_cleanup_preview(stored.quota_bytes, &summary, candidates)?;
+            let current = current
+                .ok_or_else(|| "The Library no longer needs cleanup. Preview again.".to_string())?;
+            if !same_cleanup_scope(&stored, &current) {
+                return Err("The Library changed after the preview. No clips were deleted; preview cleanup again.".into());
+            }
+            for (clip_id, _) in &stored.candidates {
+                let (clip, _) = self.resolved_clip(clip_id)?;
+                if clip.pinned {
+                    return Err("A clip became protected after the preview. No clips were deleted; preview again.".into());
+                }
+            }
+            for (clip_id, size) in &stored.candidates {
+                self.delete_internal(clip_id, true)?;
+                deleted_count += 1;
+                deleted_bytes = deleted_bytes.saturating_add(*size);
+            }
+            let remaining_size_bytes = library_summary(&database.open()?)?.total_size_bytes;
+            Ok(remaining_size_bytes)
+        })();
+        match result {
+            Ok(remaining_size_bytes) => StorageCleanupExecutionResponse {
+                success: true,
+                deleted_count,
+                deleted_bytes,
+                remaining_size_bytes,
+                error_message: None,
+            },
+            Err(error) => {
+                let remaining_size_bytes = self
+                    .database()
+                    .and_then(|database| library_summary(&database.open()?))
+                    .map(|summary| summary.total_size_bytes)
+                    .unwrap_or(0);
+                StorageCleanupExecutionResponse {
+                    success: false,
+                    deleted_count,
+                    deleted_bytes,
+                    remaining_size_bytes,
+                    error_message: Some(if deleted_count == 0 {
+                        error
+                    } else {
+                        format!("Cleanup stopped after deleting {deleted_count} clip(s): {error}")
+                    }),
+                }
+            }
+        }
     }
 
     fn record_watch(&self, clip_id: &str) -> ClipMutationResponse {
@@ -543,24 +685,40 @@ impl ClipLibraryManager {
     }
 
     fn delete(&self, clip_id: &str) -> ClipActionResponse {
-        action_result((|| {
-            let path = self.trusted_clip_path(clip_id)?;
-            std::fs::remove_file(&path).map_err(|error| {
-                format!(
-                    "Could not permanently delete clip '{}': {error}",
-                    path.display()
-                )
-            })?;
-            let database = self.database()?;
-            delete_clip_row(&mut database.open()?, clip_id).map_err(|error| {
+        let _cleanup_guard = self
+            .cleanup_execution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *self
+            .pending_cleanup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        action_result(self.delete_internal(clip_id, false))
+    }
+
+    fn delete_internal(&self, clip_id: &str, require_unprotected: bool) -> Result<(), String> {
+        let (clip, path) = self.resolved_clip(clip_id)?;
+        if require_unprotected && clip.pinned {
+            return Err(format!(
+                "Refused to clean up protected clip '{}'.",
+                clip.display_name
+            ));
+        }
+        std::fs::remove_file(&path).map_err(|error| {
+            format!(
+                "Could not permanently delete clip '{}': {error}",
+                path.display()
+            )
+        })?;
+        let database = self.database()?;
+        delete_clip_row(&mut database.open()?, clip_id).map_err(|error| {
                 format!(
                     "The MP4 was deleted, but its database row could not be removed: {error}. Refresh Clips to reconcile it."
                 )
             })?;
-            let _ = self.media_cache.cleanup_clip(clip_id);
-            self.refresh_indexed_count();
-            Ok(())
-        })())
+        let _ = self.media_cache.cleanup_clip(clip_id);
+        self.refresh_indexed_count();
+        Ok(())
     }
 
     fn database(&self) -> Result<&LibraryDatabase, String> {
@@ -801,6 +959,39 @@ pub async fn set_clip_favorite(
 }
 
 #[tauri::command]
+pub async fn set_clip_pinned(
+    manager: State<'_, ClipLibraryManager>,
+    request: SetPinnedRequest,
+) -> Result<ClipMutationResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.mutate_pinned(request))
+        .await
+        .map_err(|error| format!("The protection update worker failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn preview_storage_cleanup(
+    manager: State<'_, ClipLibraryManager>,
+    request: StorageCleanupPreviewRequest,
+) -> Result<StorageCleanupPreviewResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.preview_storage_cleanup(request))
+        .await
+        .map_err(|error| format!("The storage preview worker failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn execute_storage_cleanup(
+    manager: State<'_, ClipLibraryManager>,
+    request: StorageCleanupExecuteRequest,
+) -> Result<StorageCleanupExecutionResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.execute_storage_cleanup(request))
+        .await
+        .map_err(|error| format!("The storage cleanup worker failed: {error}"))
+}
+
+#[tauri::command]
 pub async fn rename_clip_display_name(
     manager: State<'_, ClipLibraryManager>,
     request: RenameClipRequest,
@@ -910,6 +1101,26 @@ mod tests {
     use super::models::CURRENT_SCHEMA_VERSION;
     use super::*;
 
+    fn saved_metadata(path: PathBuf, created_at_ms: i64) -> SavedClipMetadata {
+        SavedClipMetadata {
+            file_path: path,
+            created_at_ms,
+            duration_100ns: 10_000_000,
+            requested_duration_seconds: 30,
+            width: 1920,
+            height: 1080,
+            fps_numerator: 60,
+            fps_denominator: 1,
+            video_codec: "h264".into(),
+            video_profile: None,
+            video_bitrate_bps: None,
+            total_bitrate_bps: None,
+            capture_target_label: None,
+            capture_target_type: None,
+            audio_tracks: Vec::new(),
+        }
+    }
+
     #[test]
     fn database_initialization_failure_is_a_library_error_not_a_panic() {
         let root = std::env::temp_dir().join(format!("stage12-manager-{}", std::process::id()));
@@ -998,6 +1209,98 @@ mod tests {
             count_clips(&manager.database().unwrap().open().unwrap()).unwrap(),
             0
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn storage_cleanup_deletes_oldest_unprotected_and_preserves_protected_file() {
+        let root = std::env::temp_dir().join(format!("stage24-cleanup-{}", Uuid::new_v4()));
+        let clips = root.join("Clips");
+        fs::create_dir_all(&clips).unwrap();
+        let oldest = clips.join("oldest.mp4");
+        let protected = clips.join("protected.mp4");
+        let newest = clips.join("newest.mp4");
+        fs::write(&oldest, b"oldest").unwrap();
+        fs::write(&protected, b"protected").unwrap();
+        fs::write(&newest, b"newest").unwrap();
+        let manager = ClipLibraryManager::initialize(root.join("clips.db"), clips);
+        let oldest_id = manager
+            .index_saved_clip(saved_metadata(oldest.clone(), 1))
+            .unwrap()
+            .clip_id;
+        let protected_id = manager
+            .index_saved_clip(saved_metadata(protected.clone(), 2))
+            .unwrap()
+            .clip_id;
+        let newest_id = manager
+            .index_saved_clip(saved_metadata(newest.clone(), 3))
+            .unwrap()
+            .clip_id;
+        let connection = manager.database().unwrap().open().unwrap();
+        connection
+            .execute("UPDATE clips SET file_size_bytes = 734003200", [])
+            .unwrap();
+        set_pinned(&connection, &protected_id, true).unwrap();
+        drop(connection);
+
+        let preview = manager.preview_storage_cleanup(StorageCleanupPreviewRequest {
+            quota_bytes: storage::MIN_QUOTA_BYTES,
+        });
+        assert!(preview.success);
+        assert_eq!(
+            preview
+                .candidates
+                .iter()
+                .map(|item| item.clip_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![oldest_id.as_str(), newest_id.as_str()]
+        );
+        let execution = manager.execute_storage_cleanup(StorageCleanupExecuteRequest {
+            plan_id: preview.plan_id.unwrap(),
+        });
+        assert!(execution.success);
+        assert_eq!(execution.deleted_count, 2);
+        assert!(!oldest.exists());
+        assert!(protected.exists());
+        assert!(!newest.exists());
+        assert!(manager.clip_by_id(&protected_id).unwrap().unwrap().pinned);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn storage_preview_rejects_database_path_outside_owned_clips_without_deleting_it() {
+        let root = std::env::temp_dir().join(format!("stage24-path-safety-{}", Uuid::new_v4()));
+        let clips = root.join("Clips");
+        fs::create_dir_all(&clips).unwrap();
+        let owned = clips.join("owned.mp4");
+        let outside = root.join("outside.mp4");
+        fs::write(&owned, b"owned").unwrap();
+        fs::write(&outside, b"outside").unwrap();
+        let manager = ClipLibraryManager::initialize(root.join("clips.db"), clips);
+        let id = manager
+            .index_saved_clip(saved_metadata(owned.clone(), 1))
+            .unwrap()
+            .clip_id;
+        let connection = manager.database().unwrap().open().unwrap();
+        connection
+            .execute(
+                "UPDATE clips SET file_path = ?1, file_size_bytes = ?2 WHERE id = ?3",
+                rusqlite::params![
+                    outside.to_string_lossy(),
+                    i64::try_from(storage::MIN_QUOTA_BYTES + 1).unwrap(),
+                    id
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let preview = manager.preview_storage_cleanup(StorageCleanupPreviewRequest {
+            quota_bytes: storage::MIN_QUOTA_BYTES,
+        });
+        assert!(!preview.success);
+        assert!(preview.error_message.unwrap().contains("outside"));
+        assert!(outside.exists());
+        assert!(owned.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1144,6 +1447,6 @@ mod tests {
 
     #[test]
     fn schema_version_constant_is_current() {
-        assert_eq!(CURRENT_SCHEMA_VERSION, 2);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 3);
     }
 }

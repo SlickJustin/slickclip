@@ -59,6 +59,7 @@ function clip(overrides: Partial<ClipListItem> = {}): ClipListItem {
     captureTargetLabel: "Game",
     captureTargetType: "window",
     favorite: false,
+    pinned: false,
     importedExistingFile: false,
     audioStreamCount: 1,
     defaultAudioStreamTitle: "Combined",

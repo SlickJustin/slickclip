@@ -1657,6 +1657,7 @@ mod tests {
             capture_target_label: None,
             capture_target_type: None,
             favorite: false,
+            pinned: false,
             imported_existing_file: false,
             audio_stream_count: u32::try_from(audio_tracks.len()).unwrap(),
             default_audio_stream_title: Some("Combined".into()),

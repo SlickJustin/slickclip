@@ -121,6 +121,25 @@ pub fn apply_migrations(connection: &mut Connection) -> Result<i64, String> {
             .map_err(database_error)?;
         transaction.commit().map_err(database_error)?;
     }
+    if current < 3 {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        transaction
+            .execute_batch(
+                "ALTER TABLE clips ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0 CHECK(pinned IN (0, 1));
+                 CREATE INDEX clips_pinned_created_idx ON clips(pinned, created_at_ms ASC, id ASC);",
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "INSERT INTO schema_migrations(version, applied_at_ms)
+                 VALUES(3, CAST(strftime('%s','now') AS INTEGER) * 1000)",
+                [],
+            )
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)?;
+    }
     Ok(CURRENT_SCHEMA_VERSION)
 }
 
@@ -138,14 +157,14 @@ mod tests {
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
             .unwrap();
-        assert_eq!(apply_migrations(&mut connection).unwrap(), 2);
-        assert_eq!(apply_migrations(&mut connection).unwrap(), 2);
+        assert_eq!(apply_migrations(&mut connection).unwrap(), 3);
+        assert_eq!(apply_migrations(&mut connection).unwrap(), 3);
         let count: i64 = connection
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(count, 3);
     }
 
     #[test]
@@ -175,14 +194,14 @@ mod tests {
              INSERT INTO clips VALUES('clip-1','C:/clip.mp4','clip.mp4','Existing',1,2,3,4,5,NULL,1920,1080,60,1,'hevc',NULL,NULL,NULL,NULL,NULL,1,0,0,NULL,1);"
         ).unwrap();
 
-        assert_eq!(apply_migrations(&mut connection).unwrap(), 2);
-        let row: (String, i64, Option<i64>) = connection
+        assert_eq!(apply_migrations(&mut connection).unwrap(), 3);
+        let row: (String, i64, Option<i64>, i64) = connection
             .query_row(
-                "SELECT display_name, play_count, last_watched_at_ms FROM clips WHERE id='clip-1'",
+                "SELECT display_name, play_count, last_watched_at_ms, pinned FROM clips WHERE id='clip-1'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        assert_eq!(row, ("Existing".into(), 0, None));
+        assert_eq!(row, ("Existing".into(), 0, None, 0));
     }
 }

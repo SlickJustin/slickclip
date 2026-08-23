@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 pub const CLIP_METADATA_VERSION: i64 = 1;
 
 #[derive(Clone, Debug, Serialize)]
@@ -42,6 +42,7 @@ pub struct ClipListItem {
     pub capture_target_label: Option<String>,
     pub capture_target_type: Option<String>,
     pub favorite: bool,
+    pub pinned: bool,
     pub imported_existing_file: bool,
     pub audio_stream_count: u32,
     pub default_audio_stream_title: Option<String>,
@@ -115,6 +116,8 @@ pub struct LibrarySummary {
     pub clip_count: u64,
     pub total_size_bytes: u64,
     pub favorites_count: u64,
+    pub protected_count: u64,
+    pub protected_size_bytes: u64,
     pub collections_count: u64,
 }
 
@@ -182,6 +185,61 @@ pub struct ClipIdRequest {
 pub struct SetFavoriteRequest {
     pub clip_id: String,
     pub favorite: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetPinnedRequest {
+    pub clip_id: String,
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageCleanupPreviewRequest {
+    pub quota_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageCleanupExecuteRequest {
+    pub plan_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageCleanupCandidate {
+    pub clip_id: String,
+    pub display_name: String,
+    pub created_at_ms: i64,
+    pub file_size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageCleanupPreviewResponse {
+    pub success: bool,
+    pub plan_id: Option<String>,
+    pub quota_bytes: u64,
+    pub total_size_bytes: u64,
+    pub bytes_over_quota: u64,
+    pub planned_reclaim_bytes: u64,
+    pub remaining_size_bytes: u64,
+    pub protected_count: u64,
+    pub protected_size_bytes: u64,
+    pub can_meet_quota: bool,
+    pub candidates: Vec<StorageCleanupCandidate>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageCleanupExecutionResponse {
+    pub success: bool,
+    pub deleted_count: u64,
+    pub deleted_bytes: u64,
+    pub remaining_size_bytes: u64,
+    pub error_message: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
