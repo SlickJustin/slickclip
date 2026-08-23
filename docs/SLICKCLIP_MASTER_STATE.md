@@ -32,7 +32,8 @@ Repository: `C:\Users\Jakea\source\replay-app`
 - Stage 20 Replay Roulette has provisional checkpoint `6b40cc6`. Its automated checks pass, but manual UI validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 21 Animated Launch Experience has provisional checkpoint `f5c14f2`. Its automated checks pass, but manual native startup/focus/reduced-motion validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 22 Tray, Background, Startup, and Save Overlay has provisional checkpoint `db7328c`. Its automated checks pass, but manual native tray/startup/focus/background-capture validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
-- Stage 23 has not started.
+- Stage 23 Game Detection and Auto-Arm has provisional checkpoint `4c8e3ec`. Its automated checks pass, but manual representative-game/launcher/fullscreen/false-positive validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
+- Stage 24 has not started.
 - The waveform experiment was deliberately deferred and remains in Git stash as `Stage 19 waveform experiment - deferred`.
 - The four project-control documents were accidentally committed as empty files in commit `07b3216`; this document set restores their intended content.
 
@@ -163,6 +164,22 @@ Automated results reported for this Stage 22 diff:
 - No lint script exists.
 
 These results do not replace the outstanding Windows tray/startup/focus/background-capture gate. Stage 22 remains provisionally complete rather than manually verified.
+
+## Stage 23 provisional checkpoint
+
+Stage 23 adds a two-second background detector that reuses existing capturable-window enumeration and the existing Replay Buffer manager. Dimension/title/process heuristics produce review-only suggestions. Auto-arm is opt-in and additionally requires exactly one live window whose process the user explicitly approved; explicit exclusions win, and the native target is resolved again by the normal replay start path. A successful auto-arm uses Automatic encoding, a 120-second/60 FPS buffer, and a Game process-audio track for the detected PID. The Ready toast/overlay waits for the real replay state to become `running`. Only buffers tracked as auto-armed are stopped when their game closes, detection is disabled, or approval is removed. Preference schema v3 persists the feature toggle, auto-arm toggle, approvals, and exclusions with normalization and bounded lists.
+
+Automated results reported for this Stage 23 diff:
+
+- `npm test`: 67 passed.
+- `npm run build`: passed.
+- `cargo check`: passed.
+- `cargo test -- --nocapture`: 155 passed, including suggestion-only, approval/exclusion precedence, and launcher/productivity filtering coverage.
+- `cargo fmt -- --check`: passed with the known environment canonicalization warning.
+- `git diff --check`: passed.
+- No lint script exists.
+
+These results do not replace the outstanding representative real-game/launcher/fullscreen/false-positive gate. Stage 23 remains provisionally complete rather than manually verified.
 
 ## Architecture invariants
 
