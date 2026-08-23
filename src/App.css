@@ -3942,6 +3942,11 @@ summary:active {
 .watch-party-layout-preview.pictureInPicture i { inset: 7% 4%; }
 .watch-party-layout-preview.pictureInPicture b { inset: 53% 7% 12% 69%; box-shadow: 0 2px 8px rgb(0 0 0 / 45%); }
 .watch-party-start { margin-top: var(--space-5); }
+.watch-party-experimental { display: flex !important; grid-template-columns: none !important; align-items: flex-start; gap: var(--space-3) !important; padding: var(--space-3); border: 1px solid #514665; border-radius: 7px; background: #211d2b; }
+.watch-party-experimental input { margin-top: 3px; accent-color: var(--accent); }
+.watch-party-experimental span { display: grid; gap: 4px; }
+.watch-party-experimental strong { color: var(--text); }
+.watch-party-experimental small, .watch-party-detection { color: var(--text-secondary); line-height: 1.45; }
 .watch-party-source-health { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
 .watch-party-source-health > div { display: grid; gap: 5px; padding: var(--space-3); border: 1px solid var(--border); border-radius: 7px; background: var(--surface-control); }
 .watch-party-source-health span, .watch-party-source-health small { color: var(--text-secondary); }

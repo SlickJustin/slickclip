@@ -22,6 +22,9 @@ type WatchPartyStatus = {
   outputPath: string | null;
   errorMessage: string | null;
   recoverableSessionIds: string[];
+  participantAware: boolean;
+  detectedParticipantCount: number;
+  participantDetectionConfidence: number | null;
 };
 type CommandResult = { success: boolean; status: WatchPartyStatus; errorMessage: string | null };
 
@@ -31,6 +34,7 @@ const stoppedStatus: WatchPartyStatus = {
   mainSource: { label: null, width: 0, height: 0, framesReceived: 0, closed: false, errorMessage: null },
   reactionSource: { label: null, width: 0, height: 0, framesReceived: 0, closed: false, errorMessage: null },
   outputPath: null, errorMessage: null, recoverableSessionIds: [],
+  participantAware: false, detectedParticipantCount: 0, participantDetectionConfidence: null,
 };
 
 export function WatchPartyPage() {
@@ -45,6 +49,7 @@ export function WatchPartyPage() {
   const [discordAudioPid, setDiscordAudioPid] = useState("");
   const [microphoneId, setMicrophoneId] = useState("");
   const [layout, setLayout] = useState<Layout>("reactionsRight");
+  const [participantAware, setParticipantAware] = useState(false);
   const [status, setStatus] = useState<WatchPartyStatus>(stoppedStatus);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -109,7 +114,7 @@ export function WatchPartyPage() {
     const mainAudio = applications.find((application) => String(application.processId) === mainAudioPid);
     const microphone = microphones.find((device) => device.id === microphoneId);
     const result = await invoke<CommandResult>("start_watch_party", { request: {
-      mainTarget: { targetType: mainType, id: mainId }, reactionWindowId: reactionWindow.id, layout,
+      mainTarget: { targetType: mainType, id: mainId }, reactionWindowId: reactionWindow.id, layout, participantAware,
       audio: { tracks: [
         { role: "game", enabled: true, sourceKind: "process", processId: Number(mainAudioPid), sourceLabel: mainAudio?.displayName ?? "Main Content" },
         { role: "voiceChat", enabled: true, sourceKind: "process", processId: Number(discordAudioPid), sourceLabel: "Discord / Voice Chat" },
@@ -156,12 +161,13 @@ export function WatchPartyPage() {
       ["reactionStrip", "Reaction strip", "Main content above a full-width reaction strip."],
       ["pictureInPicture", "Picture in picture", "Main content full-frame with Discord inset."],
     ] as [Layout, string, string][]).map(([id, name, detail]) => <button type="button" key={id} disabled={active} className={layout === id ? "selected" : ""} onClick={() => setLayout(id)}><span className={`watch-party-layout-preview ${id}`} aria-hidden="true"><i /><b /></span><strong>{name}</strong><small>{detail}</small></button>)}</div>
+      <label className="watch-party-experimental"><input type="checkbox" checked={participantAware} disabled={active} onChange={(event) => setParticipantAware(event.target.checked)} /><span><strong>Experimental participant-aware reaction grid</strong><small>Opt in to confidence-gated visual tile detection for 2–4 participants. SlickClip falls back to the whole Discord window when detection is uncertain.</small></span></label>
       {loadError && <p className="capture-target-load-error">{loadError}</p>}
       <button className="save-replay-button watch-party-start" type="button" disabled={!canStart} onClick={() => void start()}>Start Watch Party</button>
       {!canStart && !active && <span className="disabled-reason">Choose main video/audio, one Discord window/audio session, and a microphone.</span>}
     </section>
 
-    {active && <section className="panel watch-party-panel"><span className="eyebrow">LIVE SOURCES</span><div className="watch-party-source-health"><SourceHealth name="Main content" source={status.mainSource} /><SourceHealth name="Discord reactions" source={status.reactionSource} /></div></section>}
+    {active && <section className="panel watch-party-panel"><span className="eyebrow">LIVE SOURCES</span><div className="watch-party-source-health"><SourceHealth name="Main content" source={status.mainSource} /><SourceHealth name="Discord reactions" source={status.reactionSource} /></div>{status.participantAware && <p className="watch-party-detection">{status.detectedParticipantCount > 0 ? `${status.detectedParticipantCount} participant tiles detected · ${Math.round((status.participantDetectionConfidence ?? 0) * 100)}% confidence` : "Whole-window fallback active · no stable high-confidence participant grid"}</p>}</section>}
     {status.recoverableSessionIds.length > 0 && !active && <section className="panel watch-party-panel"><span className="eyebrow">RECOVERY</span><h2>Finalized material found</h2><p className="watch-party-help">Recoverable sessions contain only atomically checkpointed, finalized segments. Recovery creates a video-only Library clip.</p>{status.recoverableSessionIds.map((id) => <div className="watch-party-recovery" key={id}><code>{id}</code><button type="button" onClick={() => void recover(id)}>Recover</button></div>)}</section>}
   </div>;
 }

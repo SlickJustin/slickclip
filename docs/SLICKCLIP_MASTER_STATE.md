@@ -37,6 +37,7 @@ Repository: `C:\Users\Jakea\source\replay-app`
 - Stage 25 Final SlickClip Migration and Distribution has provisional checkpoint `cc79345`. Its automated checks and unsigned NSIS bundle pass, but disposable-data migration and clean-machine install/capture/save/playback/edit/export/uninstall validation remain pending and are tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
 - Stage 26 Updater and Release Candidate has provisional implementation checkpoint `3322c46`. Its updater/release code and unsigned packaging checks pass, but signing credentials, hosted release infrastructure, a signed candidate, clean-PC upgrade/failure tests, and the complete release gate remain pending. SlickClip v1.0.0 is not approved for release.
 - Stage 27 Watch Party / Reaction Capture has provisional checkpoint `cf82ba8` and is automatically clean. Its real Windows multi-hour/dynamic-participant/synchronization/failure/recovery/playback/Editor validation is pending in `docs/MANUAL_VALIDATION_PENDING.md`.
+- Stage 27.1 Advanced Participant-Aware Reaction Layouts is provisionally implemented as an opt-in, confidence-gated layer with automatic whole-window fallback. Real Discord layout-variant validation remains pending.
 - The waveform experiment was deliberately deferred and remains in Git stash as `Stage 19 waveform experiment - deferred`.
 - The four project-control documents were accidentally committed as empty files in commit `07b3216`; this document set restores their intended content.
 
@@ -293,4 +294,22 @@ Automated results reported for this Stage 27 diff:
 
 Manual validation is still mandatory. No real Discord participant, multi-hour soak, real audio synchronization, disk-pressure, crash recovery, playback, or Editor behavior is claimed as passed.
 
-A later Stage 27.1 may detect and crop individual Discord camera tiles, position them independently, and dynamically reflow 2/3/4-person layouts. Because Discord does not provide clean individual participant streams to SlickClip, this participant-aware crop/reflow remains an explicitly advanced, fragile option and was not introduced into Stage 27.
+## Stage 27.1 provisional participant-aware layer
+
+The optional participant-aware checkbox adds a local-only visual detector above Stage 27 without changing its default. A bounded 48-column downsample estimates Discord's border/background color, finds separated visual tile components, accepts only balanced high-coverage 2/3/4-tile results, and samples at 2 Hz. A stability tracker requires three similar detections before enabling crops and returns to the entire Discord window after ten uncertain observations. The UI reports active tile count/confidence or explicit whole-window fallback.
+
+The compositor's existing GPU path now accepts normalized UV crops through a D3D11 constant buffer and arranges 2, 3, or 4 detected tiles within the selected Reactions Right, Reaction Strip, or Picture-in-Picture reaction region. Participant images are never identified, named, uploaded, or persisted as detection records. The original whole Discord frame remains the only captured reaction source. No bot, Discord API, token, OCR, face recognition, or Editor architecture change was added.
+
+This remains an experimental/manual-validation feature because Discord does not expose clean participant streams and can change its UI. False or uncertain detection must visibly fall back to Stage 27's whole-window composition, never silently omit the reaction source. Saved custom layouts were not added because the roadmap lists them as potential scope and persistence would not improve detector reliability before real Discord validation.
+
+Automated results reported for this Stage 27.1 diff:
+
+- `npm test`: 67 passed.
+- `npm run build`: passed.
+- `cargo check`: passed.
+- `cargo test -- --nocapture`: 181 passed, including synthetic 2/3/4-tile detection, unsupported-count fallback, stabilization/timeout, bounded crop placement, and the D3D11 UV crop path.
+- `cargo fmt -- --check`: passed with the known environment canonicalization warning.
+- `git diff --check`: passed; line-ending notices are advisory only.
+- No lint script exists.
+
+Manual validation is still mandatory; no real Discord tile detection accuracy is claimed as passed.

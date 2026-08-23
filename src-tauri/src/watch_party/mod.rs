@@ -1,6 +1,7 @@
 mod checkpoint;
 mod compositor;
 mod layout;
+mod participants;
 mod recording;
 
 use tauri::State;

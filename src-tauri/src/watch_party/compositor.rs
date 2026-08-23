@@ -5,21 +5,22 @@ use windows::Win32::Graphics::Direct3D::{
     Fxc::D3DCompile, ID3DBlob, D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11DepthStencilView, ID3D11Device, ID3D11DeviceContext, ID3D11PixelShader,
+    ID3D11Buffer, ID3D11DepthStencilView, ID3D11Device, ID3D11DeviceContext, ID3D11PixelShader,
     ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D,
-    ID3D11VertexShader, D3D11_BIND_SHADER_RESOURCE, D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-    D3D11_SAMPLER_DESC, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT,
-    D3D11_VIEWPORT,
+    ID3D11VertexShader, D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC,
+    D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_SAMPLER_DESC, D3D11_TEXTURE2D_DESC,
+    D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT, D3D11_VIEWPORT,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows_capture::d3d11::create_d3d_device;
 use windows_capture::encoder::DetachedFrame;
 use windows_capture::settings::ColorFormat;
 
-use super::layout::{CompositionPlan, RectF};
+use super::layout::{CompositionPlan, SourcePlacement};
 
 const SHADER: &[u8] = br#"
 struct VOut { float4 position : SV_POSITION; float2 uv : TEXCOORD0; };
+cbuffer Crop : register(b0) { float4 crop; };
 VOut vs_main(uint id : SV_VertexID) {
   const float2 positions[4] = {
     float2(-1.0, 1.0), float2(1.0, 1.0),
@@ -29,7 +30,7 @@ VOut vs_main(uint id : SV_VertexID) {
     float2(0.0, 0.0), float2(1.0, 0.0),
     float2(0.0, 1.0), float2(1.0, 1.0)
   };
-  VOut output; output.position = float4(positions[id], 0.0, 1.0); output.uv = uvs[id]; return output;
+  VOut output; output.position = float4(positions[id], 0.0, 1.0); output.uv = crop.xy + uvs[id] * crop.zw; return output;
 }
 Texture2D image : register(t0); SamplerState image_sampler : register(s0);
 float4 ps_main(VOut input) : SV_TARGET { return image.Sample(image_sampler, input.uv); }
@@ -60,6 +61,7 @@ pub struct GpuCompositor {
     vertex_shader: ID3D11VertexShader,
     pixel_shader: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
+    crop_buffer: ID3D11Buffer,
     main: Option<SourceTexture>,
     reaction: Option<SourceTexture>,
 }
@@ -111,6 +113,20 @@ impl GpuCompositor {
                 .CreateSamplerState(&sampler_desc, Some(&mut sampler))
                 .map_err(|error| format!("Could not create the Watch Party sampler: {error}"))?;
         }
+        let crop_desc = D3D11_BUFFER_DESC {
+            ByteWidth: 16,
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+            ..Default::default()
+        };
+        let mut crop_buffer = None;
+        unsafe {
+            device
+                .CreateBuffer(&crop_desc, None, Some(&mut crop_buffer))
+                .map_err(|error| {
+                    format!("Could not create the Watch Party crop buffer: {error}")
+                })?;
+        }
 
         Ok(Self {
             device,
@@ -123,6 +139,8 @@ impl GpuCompositor {
             pixel_shader: pixel_shader
                 .ok_or_else(|| "D3D11 returned no Watch Party pixel shader.".to_string())?,
             sampler: sampler.ok_or_else(|| "D3D11 returned no Watch Party sampler.".to_string())?,
+            crop_buffer: crop_buffer
+                .ok_or_else(|| "D3D11 returned no Watch Party crop buffer.".to_string())?,
             main: None,
             reaction: None,
         })
@@ -152,14 +170,62 @@ impl GpuCompositor {
         }
         draw_source(
             &self.context,
+            &self.crop_buffer,
             self.main.as_ref().unwrap(),
-            plan.main.destination,
+            plan.main,
         );
         draw_source(
             &self.context,
+            &self.crop_buffer,
             self.reaction.as_ref().unwrap(),
-            plan.reaction.destination,
+            plan.reaction,
         );
+        unsafe {
+            self.context.PSSetShaderResources(0, Some(&[None]));
+            self.context.Flush();
+        }
+        Ok(&self.output)
+    }
+
+    pub fn compose_participants(
+        &mut self,
+        main: &CpuFrame,
+        reaction: &CpuFrame,
+        main_placement: SourcePlacement,
+        reactions: &[SourcePlacement],
+    ) -> Result<&DetachedFrame, String> {
+        update_source(&self.device, &self.context, &mut self.main, main)?;
+        update_source(&self.device, &self.context, &mut self.reaction, reaction)?;
+        unsafe {
+            self.context.OMSetRenderTargets(
+                Some(&[Some(self.target.clone())]),
+                None::<&ID3D11DepthStencilView>,
+            );
+            self.context
+                .ClearRenderTargetView(&self.target, &[0.018, 0.020, 0.027, 1.0]);
+            self.context
+                .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            self.context.VSSetShader(&self.vertex_shader, None);
+            self.context.PSSetShader(&self.pixel_shader, None);
+            self.context
+                .PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            self.context
+                .VSSetConstantBuffers(0, Some(&[Some(self.crop_buffer.clone())]));
+        }
+        draw_source(
+            &self.context,
+            &self.crop_buffer,
+            self.main.as_ref().unwrap(),
+            main_placement,
+        );
+        for placement in reactions {
+            draw_source(
+                &self.context,
+                &self.crop_buffer,
+                self.reaction.as_ref().unwrap(),
+                *placement,
+            );
+        }
         unsafe {
             self.context.PSSetShaderResources(0, Some(&[None]));
             self.context.Flush();
@@ -236,7 +302,13 @@ fn update_source(
     Ok(())
 }
 
-fn draw_source(context: &ID3D11DeviceContext, source: &SourceTexture, destination: RectF) {
+fn draw_source(
+    context: &ID3D11DeviceContext,
+    crop_buffer: &ID3D11Buffer,
+    source: &SourceTexture,
+    placement: SourcePlacement,
+) {
+    let destination = placement.destination;
     let viewport = D3D11_VIEWPORT {
         TopLeftX: destination.x,
         TopLeftY: destination.y,
@@ -245,7 +317,15 @@ fn draw_source(context: &ID3D11DeviceContext, source: &SourceTexture, destinatio
         MinDepth: 0.0,
         MaxDepth: 1.0,
     };
+    let crop = [
+        placement.source_uv.x,
+        placement.source_uv.y,
+        placement.source_uv.width,
+        placement.source_uv.height,
+    ];
     unsafe {
+        context.UpdateSubresource(crop_buffer, 0, None, crop.as_ptr().cast::<c_void>(), 0, 0);
+        context.VSSetConstantBuffers(0, Some(&[Some(crop_buffer.clone())]));
         context.RSSetViewports(Some(&[viewport]));
         context.PSSetShaderResources(0, Some(&[Some(source.view.clone())]));
         context.Draw(4, 0);
@@ -296,7 +376,7 @@ unsafe impl Send for GpuCompositor {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::watch_party::layout::{composition_plan, WatchPartyLayout};
+    use crate::watch_party::layout::{composition_plan, RectF, SourcePlacement, WatchPartyLayout};
 
     #[test]
     fn compiles_shaders_and_gpu_composes_two_bgra_sources() {
@@ -324,5 +404,39 @@ mod tests {
         )
         .unwrap();
         compositor.compose(&main, &reaction, plan).unwrap();
+
+        let participant_crops = [
+            SourcePlacement {
+                destination: RectF {
+                    x: 220.0,
+                    y: 10.0,
+                    width: 90.0,
+                    height: 75.0,
+                },
+                source_uv: RectF {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 0.5,
+                },
+            },
+            SourcePlacement {
+                destination: RectF {
+                    x: 220.0,
+                    y: 95.0,
+                    width: 90.0,
+                    height: 75.0,
+                },
+                source_uv: RectF {
+                    x: 0.0,
+                    y: 0.5,
+                    width: 1.0,
+                    height: 0.5,
+                },
+            },
+        ];
+        compositor
+            .compose_participants(&main, &reaction, plan.main, &participant_crops)
+            .unwrap();
     }
 }

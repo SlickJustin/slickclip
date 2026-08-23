@@ -37,6 +37,7 @@ use crate::replay::{
 use super::checkpoint::{recoverable_sessions, WatchPartyCheckpoint};
 use super::compositor::{CpuFrame, GpuCompositor};
 use super::layout::{composition_plan, WatchPartyLayout};
+use super::participants::{participant_placements, ParticipantTracker};
 
 const CANVAS_WIDTH: u32 = 1920;
 const CANVAS_HEIGHT: u32 = 1080;
@@ -93,6 +94,9 @@ pub struct WatchPartyStatus {
     pub output_path: Option<String>,
     pub error_message: Option<String>,
     pub recoverable_session_ids: Vec<String>,
+    pub participant_aware: bool,
+    pub detected_participant_count: usize,
+    pub participant_detection_confidence: Option<f32>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -101,6 +105,8 @@ pub struct WatchPartyStartRequest {
     pub main_target: CaptureTargetRequest,
     pub reaction_window_id: String,
     pub layout: WatchPartyLayout,
+    #[serde(default)]
+    pub participant_aware: bool,
     #[serde(default)]
     pub audio: AudioReplayConfiguration,
 }
@@ -222,6 +228,7 @@ impl WatchPartyManager {
                 state: WatchPartyState::Starting,
                 session_id: Some(session_id.clone()),
                 layout: request.layout,
+                participant_aware: request.participant_aware,
                 ..Default::default()
             }),
             main: Arc::new(Mutex::new(LatestSource::new(
@@ -435,6 +442,7 @@ fn run_recording(
         main.max(reaction)
     };
     let mut compositor = GpuCompositor::new(CANVAS_WIDTH, CANVAS_HEIGHT)?;
+    let mut participant_tracker = ParticipantTracker::default();
     let mut segments = Vec::new();
     let mut global_frame = 0u64;
     while !shared.stop.load(Ordering::Acquire) {
@@ -448,6 +456,8 @@ fn run_recording(
             started,
             shared,
             request.layout,
+            request.participant_aware,
+            &mut participant_tracker,
             &mut compositor,
         )?;
         if segment.frame_count > 0 {
@@ -457,6 +467,7 @@ fn run_recording(
                 session_id: session_id.clone(),
                 state: "recording".to_string(),
                 layout: request.layout,
+                participant_aware: request.participant_aware,
                 main_label: main_label.clone(),
                 reaction_label: reaction_label.clone(),
                 started_at_ms,
@@ -500,6 +511,7 @@ fn run_recording(
         session_id,
         state: "completed".to_string(),
         layout: request.layout,
+        participant_aware: request.participant_aware,
         main_label,
         reaction_label,
         started_at_ms,
@@ -560,6 +572,8 @@ fn record_segment(
     session_started: Instant,
     shared: &SharedRecording,
     layout: WatchPartyLayout,
+    participant_aware: bool,
+    participant_tracker: &mut ParticipantTracker,
     compositor: &mut GpuCompositor,
 ) -> Result<CompletedSegment, String> {
     let path = session_directory.join(format!("segment-{sequence:06}.mp4"));
@@ -603,7 +617,34 @@ fn record_segment(
             (main.width, main.height),
             (reaction.width, reaction.height),
         )?;
-        let output = compositor.compose(&main, &reaction, plan)?;
+        if participant_aware && *global_frame % 15 == 0 {
+            participant_tracker.update(&reaction);
+        }
+        let output = if participant_aware {
+            if let Some(detection) = participant_tracker.current() {
+                let placements = participant_placements(
+                    layout,
+                    CANVAS_WIDTH,
+                    CANVAS_HEIGHT,
+                    (reaction.width, reaction.height),
+                    detection,
+                );
+                {
+                    let mut status = lock(&shared.status);
+                    status.detected_participant_count = placements.len();
+                    status.participant_detection_confidence = Some(detection.confidence);
+                }
+                compositor.compose_participants(&main, &reaction, plan.main, &placements)?
+            } else {
+                let mut status = lock(&shared.status);
+                status.detected_participant_count = 0;
+                status.participant_detection_confidence = None;
+                drop(status);
+                compositor.compose(&main, &reaction, plan)?
+            }
+        } else {
+            compositor.compose(&main, &reaction, plan)?
+        };
         let pts = (local_frame as i128 * 10_000_000 / FRAME_RATE as i128) as i64;
         let queued = encoder
             .encode_detached_frame(output, pts)

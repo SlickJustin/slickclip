@@ -45,10 +45,22 @@ pub fn composition_plan(
     {
         return Err("Watch Party composition dimensions must be nonzero.".to_string());
     }
+    let (main_slot, reaction_slot) = layout_slots(layout, canvas_width, canvas_height);
+    Ok(CompositionPlan {
+        main: contain(main_slot, main_size),
+        reaction: contain(reaction_slot, reaction_size),
+    })
+}
+
+pub(super) fn layout_slots(
+    layout: WatchPartyLayout,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> (RectF, RectF) {
     let canvas_width = canvas_width as f32;
     let canvas_height = canvas_height as f32;
     let margin = (canvas_width * 0.01875).round().max(18.0);
-    let (main_slot, reaction_slot) = match layout {
+    match layout {
         WatchPartyLayout::ReactionsRight => {
             let reaction_width = (canvas_width * 0.28).round();
             (
@@ -101,14 +113,10 @@ pub fn composition_plan(
                 },
             )
         }
-    };
-    Ok(CompositionPlan {
-        main: contain(main_slot, main_size),
-        reaction: contain(reaction_slot, reaction_size),
-    })
+    }
 }
 
-fn contain(slot: RectF, source: (u32, u32)) -> SourcePlacement {
+pub(super) fn contain(slot: RectF, source: (u32, u32)) -> SourcePlacement {
     let scale = (slot.width / source.0 as f32).min(slot.height / source.1 as f32);
     let width = source.0 as f32 * scale;
     let height = source.1 as f32 * scale;
