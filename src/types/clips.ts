@@ -260,6 +260,7 @@ export type UiPreferences = {
   startWithWindows: boolean;
   closeToTray: boolean;
   saveOverlayEnabled: boolean;
+  saveReplayHotkey: string;
   storageQuotaGib: number;
   gameDetectionEnabled: boolean;
   gameAutoArm: boolean;
@@ -273,10 +274,10 @@ export type UiPreferencesResponse = {
   errorMessage: string | null;
 };
 
-export type UiPreferencesPatch = Partial<Omit<UiPreferences, "schemaVersion">>;
+export type UiPreferencesPatch = Partial<Omit<UiPreferences, "schemaVersion" | "saveReplayHotkey">>;
 
 export const defaultUiPreferences: UiPreferences = {
-  schemaVersion: 4,
+  schemaVersion: 5,
   playerVolume: 1,
   playerMuted: false,
   playerLastAudibleVolume: 1,
@@ -289,6 +290,7 @@ export const defaultUiPreferences: UiPreferences = {
   startWithWindows: false,
   closeToTray: true,
   saveOverlayEnabled: true,
+  saveReplayHotkey: "Ctrl + Shift + F10",
   storageQuotaGib: 50,
   gameDetectionEnabled: false,
   gameAutoArm: false,

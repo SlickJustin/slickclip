@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 use crate::clips::{ClipSaveManager, SaveJobState};
+use crate::preferences::UiPreferencesManager;
 
 pub const DEFAULT_SAVE_REPLAY_HOTKEY: &str = "Ctrl + Shift + F10";
 const HOTKEY_TEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -70,18 +71,29 @@ struct HotkeyInner {
 
 pub struct SaveReplayHotkeyManager {
     inner: Mutex<HotkeyInner>,
+    repair_persisted_combination: bool,
 }
 
 impl SaveReplayHotkeyManager {
-    pub fn new() -> Self {
-        let parsed = parse_hotkey(DEFAULT_SAVE_REPLAY_HOTKEY)
-            .expect("the built-in Save Replay hotkey must remain valid");
+    pub fn new(initial_combination: &str) -> Self {
+        let (parsed, initial_error, repair_persisted_combination) =
+            match parse_hotkey(initial_combination) {
+                Ok(parsed) => (parsed, None, false),
+                Err(error) => (
+                    parse_hotkey(DEFAULT_SAVE_REPLAY_HOTKEY)
+                        .expect("the built-in Save Replay hotkey must remain valid"),
+                    Some(format!(
+                        "The saved Save Replay hotkey was invalid ({error}). SlickClip restored the default."
+                    )),
+                    true,
+                ),
+            };
         Self {
             inner: Mutex::new(HotkeyInner {
                 state: HotkeyState {
                     registered: false,
                     current_combination: parsed.normalized,
-                    last_registration_error: None,
+                    last_registration_error: initial_error,
                     testing: false,
                 },
                 shortcut: parsed.shortcut,
@@ -89,6 +101,7 @@ impl SaveReplayHotkeyManager {
                 active_test: None,
                 next_test_generation: 1,
             }),
+            repair_persisted_combination,
         }
     }
 
@@ -98,19 +111,48 @@ impl SaveReplayHotkeyManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    pub fn register_initial(&self, app: &AppHandle) {
+    pub fn register_initial(&self, app: &AppHandle, preferences: &UiPreferencesManager) {
         let mut inner = self.lock();
         match app.global_shortcut().register(inner.shortcut) {
             Ok(()) => {
                 inner.state.registered = true;
-                inner.state.last_registration_error = None;
+                if self.repair_persisted_combination {
+                    let combination = inner.state.current_combination.clone();
+                    if let Err(error) = preferences.save_replay_hotkey(combination) {
+                        inner.state.last_registration_error = Some(format!(
+                            "The default Save Replay hotkey is registered, but the repaired preference could not be saved: {error}"
+                        ));
+                    }
+                } else {
+                    inner.state.last_registration_error = None;
+                }
             }
             Err(error) => {
+                let unavailable_combination = inner.state.current_combination.clone();
+                if unavailable_combination != DEFAULT_SAVE_REPLAY_HOTKEY {
+                    let fallback = parse_hotkey(DEFAULT_SAVE_REPLAY_HOTKEY)
+                        .expect("the built-in Save Replay hotkey must remain valid");
+                    if app.global_shortcut().register(fallback.shortcut).is_ok() {
+                        inner.shortcut = fallback.shortcut;
+                        inner.state.registered = true;
+                        inner.state.current_combination = fallback.normalized;
+                        let mut message = format!(
+                            "Could not register the saved hotkey {unavailable_combination}: {error}. SlickClip restored {DEFAULT_SAVE_REPLAY_HOTKEY}."
+                        );
+                        if let Err(persist_error) =
+                            preferences.save_replay_hotkey(inner.state.current_combination.clone())
+                        {
+                            message.push_str(&format!(
+                                " The fallback preference could not be saved: {persist_error}"
+                            ));
+                        }
+                        inner.state.last_registration_error = Some(message);
+                        return;
+                    }
+                }
                 inner.state.registered = false;
-                inner.state.last_registration_error = Some(format_registration_error(
-                    &inner.state.current_combination,
-                    error,
-                ));
+                inner.state.last_registration_error =
+                    Some(format_registration_error(&unavailable_combination, error));
             }
         }
     }
@@ -128,7 +170,40 @@ impl SaveReplayHotkeyManager {
         inner.state.clone()
     }
 
-    pub fn rebind(&self, app: &AppHandle, combination: &str) -> HotkeyCommandResult {
+    pub fn rebind(
+        &self,
+        app: &AppHandle,
+        preferences: &UiPreferencesManager,
+        combination: &str,
+    ) -> HotkeyCommandResult {
+        self.rebind_with_operations(
+            combination,
+            |shortcut| {
+                app.global_shortcut()
+                    .register(shortcut)
+                    .map_err(|error| error.to_string())
+            },
+            |shortcut| {
+                app.global_shortcut()
+                    .unregister(shortcut)
+                    .map_err(|error| error.to_string())
+            },
+            |combination| preferences.save_replay_hotkey(combination.to_string()),
+        )
+    }
+
+    fn rebind_with_operations<Register, Unregister, Persist>(
+        &self,
+        combination: &str,
+        mut register: Register,
+        mut unregister: Unregister,
+        mut persist: Persist,
+    ) -> HotkeyCommandResult
+    where
+        Register: FnMut(Shortcut) -> Result<(), String>,
+        Unregister: FnMut(Shortcut) -> Result<(), String>,
+        Persist: FnMut(&str) -> Result<(), String>,
+    {
         let parsed = match parse_hotkey(combination) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -148,6 +223,17 @@ impl SaveReplayHotkeyManager {
         if parsed.shortcut == inner.shortcut && inner.state.registered {
             inner.recorder_active = false;
             inner.state.last_registration_error = None;
+            if let Err(error) = persist(&inner.state.current_combination) {
+                let message = format!(
+                    "The hotkey is registered, but its preference could not be saved: {error}"
+                );
+                inner.state.last_registration_error = Some(message.clone());
+                return HotkeyCommandResult {
+                    success: false,
+                    state: inner.state.clone(),
+                    error_message: Some(message),
+                };
+            }
             return HotkeyCommandResult {
                 success: true,
                 state: inner.state.clone(),
@@ -155,7 +241,7 @@ impl SaveReplayHotkeyManager {
             };
         }
 
-        if let Err(error) = app.global_shortcut().register(parsed.shortcut) {
+        if let Err(error) = register(parsed.shortcut) {
             let message = format_registration_error(&parsed.normalized, error);
             inner.recorder_active = false;
             inner.state.last_registration_error = Some(message.clone());
@@ -166,12 +252,33 @@ impl SaveReplayHotkeyManager {
             };
         }
 
+        if let Err(error) = persist(&parsed.normalized) {
+            let _ = unregister(parsed.shortcut);
+            let message = format!(
+                "{0} was available, but SlickClip could not save the preference. The previous hotkey remains active: {error}",
+                parsed.normalized
+            );
+            inner.recorder_active = false;
+            inner.state.last_registration_error = Some(message.clone());
+            return HotkeyCommandResult {
+                success: false,
+                state: inner.state.clone(),
+                error_message: Some(message),
+            };
+        }
+
         if inner.state.registered {
-            if let Err(error) = app.global_shortcut().unregister(inner.shortcut) {
-                let _ = app.global_shortcut().unregister(parsed.shortcut);
-                let message = format!(
-                    "The new hotkey was available, but the previous hotkey could not be unregistered: {error}"
+            if let Err(error) = unregister(inner.shortcut) {
+                let rollback_error = persist(&inner.state.current_combination).err();
+                let _ = unregister(parsed.shortcut);
+                let mut message = format!(
+                    "The new hotkey was available, but the previous hotkey could not be unregistered: {error}. The previous hotkey remains active."
                 );
+                if let Some(rollback_error) = rollback_error {
+                    message.push_str(&format!(
+                        " The saved preference also could not be restored: {rollback_error}"
+                    ));
+                }
                 inner.recorder_active = false;
                 inner.state.last_registration_error = Some(message.clone());
                 return HotkeyCommandResult {
@@ -352,9 +459,10 @@ pub fn get_save_replay_hotkey(manager: tauri::State<'_, SaveReplayHotkeyManager>
 pub fn set_save_replay_hotkey(
     app: AppHandle,
     manager: tauri::State<'_, SaveReplayHotkeyManager>,
+    preferences: tauri::State<'_, UiPreferencesManager>,
     combination: String,
 ) -> HotkeyCommandResult {
-    manager.rebind(&app, &combination)
+    manager.rebind(&app, &preferences, &combination)
 }
 
 #[tauri::command]
@@ -437,12 +545,8 @@ fn parse_hotkey(input: &str) -> Result<ParsedHotkey, String> {
         key = Some(parse_key(part)?);
     }
 
-    if modifiers.is_empty() {
-        return Err("Global hotkeys must include Ctrl, Shift, Alt, or Win.".to_string());
-    }
-    let (key_name, code) = key.ok_or_else(|| {
-        "Hotkey must include one keyboard key in addition to its modifiers.".to_string()
-    })?;
+    let (key_name, code) =
+        key.ok_or_else(|| "Hotkey must include one non-modifier keyboard key.".to_string())?;
 
     let ordered = [
         ("Ctrl", Modifiers::CONTROL),
@@ -458,83 +562,71 @@ fn parse_hotkey(input: &str) -> Result<ParsedHotkey, String> {
 
     Ok(ParsedHotkey {
         normalized: normalized.join(" + "),
-        shortcut: Shortcut::new(Some(modifiers), code),
+        shortcut: Shortcut::new((!modifiers.is_empty()).then_some(modifiers), code),
     })
 }
 
 fn parse_key(input: &str) -> Result<(String, Code), String> {
-    let upper = input.trim().to_ascii_uppercase();
-    let result = match upper.as_str() {
-        "A" => ("A", Code::KeyA),
-        "B" => ("B", Code::KeyB),
-        "C" => ("C", Code::KeyC),
-        "D" => ("D", Code::KeyD),
-        "E" => ("E", Code::KeyE),
-        "F" => ("F", Code::KeyF),
-        "G" => ("G", Code::KeyG),
-        "H" => ("H", Code::KeyH),
-        "I" => ("I", Code::KeyI),
-        "J" => ("J", Code::KeyJ),
-        "K" => ("K", Code::KeyK),
-        "L" => ("L", Code::KeyL),
-        "M" => ("M", Code::KeyM),
-        "N" => ("N", Code::KeyN),
-        "O" => ("O", Code::KeyO),
-        "P" => ("P", Code::KeyP),
-        "Q" => ("Q", Code::KeyQ),
-        "R" => ("R", Code::KeyR),
-        "S" => ("S", Code::KeyS),
-        "T" => ("T", Code::KeyT),
-        "U" => ("U", Code::KeyU),
-        "V" => ("V", Code::KeyV),
-        "W" => ("W", Code::KeyW),
-        "X" => ("X", Code::KeyX),
-        "Y" => ("Y", Code::KeyY),
-        "Z" => ("Z", Code::KeyZ),
-        "0" => ("0", Code::Digit0),
-        "1" => ("1", Code::Digit1),
-        "2" => ("2", Code::Digit2),
-        "3" => ("3", Code::Digit3),
-        "4" => ("4", Code::Digit4),
-        "5" => ("5", Code::Digit5),
-        "6" => ("6", Code::Digit6),
-        "7" => ("7", Code::Digit7),
-        "8" => ("8", Code::Digit8),
-        "9" => ("9", Code::Digit9),
-        "F1" => ("F1", Code::F1),
-        "F2" => ("F2", Code::F2),
-        "F3" => ("F3", Code::F3),
-        "F4" => ("F4", Code::F4),
-        "F5" => ("F5", Code::F5),
-        "F6" => ("F6", Code::F6),
-        "F7" => ("F7", Code::F7),
-        "F8" => ("F8", Code::F8),
-        "F9" => ("F9", Code::F9),
-        "F10" => ("F10", Code::F10),
-        "F11" => ("F11", Code::F11),
-        "F12" => ("F12", Code::F12),
-        "SPACE" => ("Space", Code::Space),
-        "ENTER" => ("Enter", Code::Enter),
-        "ESC" | "ESCAPE" => ("Escape", Code::Escape),
-        "TAB" => ("Tab", Code::Tab),
-        "BACKSPACE" => ("Backspace", Code::Backspace),
-        "DELETE" | "DEL" => ("Delete", Code::Delete),
-        "INSERT" | "INS" => ("Insert", Code::Insert),
-        "HOME" => ("Home", Code::Home),
-        "END" => ("End", Code::End),
-        "PAGEUP" | "PGUP" => ("PageUp", Code::PageUp),
-        "PAGEDOWN" | "PGDN" => ("PageDown", Code::PageDown),
-        "ARROWUP" | "UP" => ("ArrowUp", Code::ArrowUp),
-        "ARROWDOWN" | "DOWN" => ("ArrowDown", Code::ArrowDown),
-        "ARROWLEFT" | "LEFT" => ("ArrowLeft", Code::ArrowLeft),
-        "ARROWRIGHT" | "RIGHT" => ("ArrowRight", Code::ArrowRight),
-        _ => {
-            return Err(format!(
-                "Unsupported hotkey key '{input}'. Use a letter, number, F1-F12, navigation key, Space, Enter, or Tab."
-            ));
+    let trimmed = input.trim();
+    let upper = trimmed.to_ascii_uppercase();
+    let canonical = if upper.len() == 1 && upper.as_bytes()[0].is_ascii_alphabetic() {
+        format!("Key{upper}")
+    } else if upper.len() == 1 && upper.as_bytes()[0].is_ascii_digit() {
+        format!("Digit{upper}")
+    } else if let Some(number) = upper
+        .strip_prefix('F')
+        .and_then(|value| value.parse::<u8>().ok())
+    {
+        if (1..=35).contains(&number) {
+            format!("F{number}")
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        match upper.as_str() {
+            "ESC" | "ESCAPE" => "Escape".to_string(),
+            "DEL" | "DELETE" => "Delete".to_string(),
+            "INS" | "INSERT" => "Insert".to_string(),
+            "PGUP" | "PAGEUP" => "PageUp".to_string(),
+            "PGDN" | "PAGEDOWN" => "PageDown".to_string(),
+            "UP" | "ARROWUP" => "ArrowUp".to_string(),
+            "DOWN" | "ARROWDOWN" => "ArrowDown".to_string(),
+            "LEFT" | "ARROWLEFT" => "ArrowLeft".to_string(),
+            "RIGHT" | "ARROWRIGHT" => "ArrowRight".to_string(),
+            "SPACE" => "Space".to_string(),
+            "RETURN" | "ENTER" => "Enter".to_string(),
+            "NUMENTER" | "NUMPADENTER" => "NumpadEnter".to_string(),
+            _ => trimmed.to_string(),
         }
     };
-    Ok((result.0.to_string(), result.1))
+    let code = canonical.parse::<Code>().map_err(|_| {
+        format!(
+            "Unsupported hotkey key '{input}'. Press a standard keyboard, function, navigation, punctuation, or numpad key."
+        )
+    })?;
+    if matches!(
+        code,
+        Code::AltLeft
+            | Code::AltRight
+            | Code::ControlLeft
+            | Code::ControlRight
+            | Code::MetaLeft
+            | Code::MetaRight
+            | Code::ShiftLeft
+            | Code::ShiftRight
+            | Code::Fn
+            | Code::FnLock
+            | Code::Unidentified
+    ) {
+        return Err("Hotkey must include one non-modifier keyboard key.".to_string());
+    }
+    let code_name = code.to_string();
+    let display_name = code_name
+        .strip_prefix("Key")
+        .or_else(|| code_name.strip_prefix("Digit"))
+        .unwrap_or(&code_name)
+        .to_string();
+    Ok((display_name, code))
 }
 
 #[cfg(test)]
@@ -558,10 +650,30 @@ mod tests {
     }
 
     #[test]
-    fn rejects_single_keys_and_modifier_only_bindings() {
-        assert!(parse_hotkey("A").is_err());
-        assert!(parse_hotkey("Space").is_err());
+    fn accepts_unmodified_function_alphanumeric_and_numpad_keys() {
+        assert_eq!(parse_hotkey("F8").unwrap().normalized, "F8");
+        assert_eq!(parse_hotkey("R").unwrap().normalized, "R");
+        assert_eq!(parse_hotkey("5").unwrap().normalized, "5");
+        assert_eq!(parse_hotkey("Numpad5").unwrap().normalized, "Numpad5");
+        assert_eq!(
+            parse_hotkey("Shift + Numpad0").unwrap().normalized,
+            "Shift + Numpad0"
+        );
+    }
+
+    #[test]
+    fn accepts_broad_modified_shortcuts_and_rejects_modifier_only_bindings() {
+        assert_eq!(
+            parse_hotkey("Ctrl + Alt + R").unwrap().normalized,
+            "Ctrl + Alt + R"
+        );
+        assert_eq!(parse_hotkey("Ctrl + F24").unwrap().normalized, "Ctrl + F24");
+        assert_eq!(
+            parse_hotkey("Alt + Semicolon").unwrap().normalized,
+            "Alt + Semicolon"
+        );
         assert!(parse_hotkey("Ctrl + Shift").is_err());
+        assert!(parse_hotkey("ControlLeft").is_err());
     }
 
     #[test]
@@ -573,11 +685,11 @@ mod tests {
     #[test]
     fn rejects_empty_and_unsupported_combinations() {
         assert!(parse_hotkey("Ctrl++A").is_err());
-        assert!(parse_hotkey("Ctrl + MediaPlayPause").is_err());
+        assert!(parse_hotkey("Ctrl + NotARealKey").is_err());
     }
 
     fn manager_with_registered_default() -> (SaveReplayHotkeyManager, super::ParsedHotkey) {
-        let manager = SaveReplayHotkeyManager::new();
+        let manager = SaveReplayHotkeyManager::new(DEFAULT_SAVE_REPLAY_HOTKEY);
         let parsed = parse_hotkey(DEFAULT_SAVE_REPLAY_HOTKEY).unwrap();
         {
             let mut inner = manager.lock();
@@ -645,5 +757,86 @@ mod tests {
             manager.shortcut_action(&parsed.shortcut, Instant::now()),
             ShortcutAction::SaveReplay
         );
+    }
+
+    #[test]
+    fn failed_registration_retains_the_previous_working_shortcut() {
+        let (manager, _) = manager_with_registered_default();
+        let persistence_attempts = std::cell::Cell::new(0);
+        let result = manager.rebind_with_operations(
+            "F8",
+            |_| Err("already registered".to_string()),
+            |_| Ok(()),
+            |_| {
+                persistence_attempts.set(persistence_attempts.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert!(!result.success);
+        assert_eq!(persistence_attempts.get(), 0);
+        assert!(result.state.registered);
+        assert_eq!(result.state.current_combination, DEFAULT_SAVE_REPLAY_HOTKEY);
+        assert!(result.error_message.unwrap().contains("already registered"));
+    }
+
+    #[test]
+    fn successful_rebind_persists_then_releases_the_previous_shortcut() {
+        let (manager, _) = manager_with_registered_default();
+        let operations = std::cell::RefCell::new(Vec::new());
+        let result = manager.rebind_with_operations(
+            "Shift + Numpad0",
+            |_| {
+                operations.borrow_mut().push("register");
+                Ok(())
+            },
+            |_| {
+                operations.borrow_mut().push("unregister");
+                Ok(())
+            },
+            |combination| {
+                assert_eq!(combination, "Shift + Numpad0");
+                operations.borrow_mut().push("persist");
+                Ok(())
+            },
+        );
+
+        assert!(result.success);
+        assert_eq!(result.state.current_combination, "Shift + Numpad0");
+        assert_eq!(*operations.borrow(), ["register", "persist", "unregister"]);
+    }
+
+    #[test]
+    fn persistence_failure_rolls_back_new_registration_and_keeps_old_state() {
+        let (manager, _) = manager_with_registered_default();
+        let unregister_count = std::cell::Cell::new(0);
+        let result = manager.rebind_with_operations(
+            "F9",
+            |_| Ok(()),
+            |_| {
+                unregister_count.set(unregister_count.get() + 1);
+                Ok(())
+            },
+            |_| Err("disk full".to_string()),
+        );
+
+        assert!(!result.success);
+        assert_eq!(unregister_count.get(), 1);
+        assert!(result.state.registered);
+        assert_eq!(result.state.current_combination, DEFAULT_SAVE_REPLAY_HOTKEY);
+    }
+
+    #[test]
+    fn manager_initializes_from_a_persisted_shortcut_and_repairs_invalid_values() {
+        let persisted = SaveReplayHotkeyManager::new("Shift + Numpad0");
+        assert_eq!(persisted.state().current_combination, "Shift + Numpad0");
+        assert!(persisted.state().last_registration_error.is_none());
+
+        let repaired = SaveReplayHotkeyManager::new("Ctrl + NotARealKey");
+        assert_eq!(
+            repaired.state().current_combination,
+            DEFAULT_SAVE_REPLAY_HOTKEY
+        );
+        assert!(repaired.state().last_registration_error.is_some());
     }
 }

@@ -135,13 +135,18 @@ pub fn run() {
             app.manage(replay_manager);
             let audio_tests_directory = slickclip_video_root.join("DevTests").join("Audio");
             app.manage(audio::AudioCaptureTestManager::new(audio_tests_directory));
-            app.manage(preferences::UiPreferencesManager::initialize(
+            let preferences = preferences::UiPreferencesManager::initialize(
                 app_data.join("Preferences").join("ui-preferences.json"),
-            ));
+            );
+            let save_replay_hotkey = preferences.get().preferences.save_replay_hotkey;
+            app.manage(preferences);
             app.manage(updater::UpdateManager::default());
-            app.manage(hotkey::SaveReplayHotkeyManager::new());
+            app.manage(hotkey::SaveReplayHotkeyManager::new(&save_replay_hotkey));
             app.state::<hotkey::SaveReplayHotkeyManager>()
-                .register_initial(app.handle());
+                .register_initial(
+                    app.handle(),
+                    &app.state::<preferences::UiPreferencesManager>(),
+                );
             desktop::setup(app)?;
             let game_detection = game_detection::GameDetectionManager::new();
             game_detection

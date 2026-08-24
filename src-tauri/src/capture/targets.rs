@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use windows_capture::monitor::Monitor;
 use windows_capture::window::Window;
 
+use crate::audio::resolve_process_metadata;
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MonitorTarget {
@@ -23,6 +25,14 @@ pub struct WindowTarget {
     pub(crate) process_id: u32,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    #[serde(skip_serializing)]
+    pub(crate) executable_path: Option<String>,
+    #[serde(skip_serializing)]
+    pub(crate) monitor_width: Option<u32>,
+    #[serde(skip_serializing)]
+    pub(crate) monitor_height: Option<u32>,
+    #[serde(skip_serializing)]
+    pub(crate) title_bar_height: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -177,13 +187,26 @@ pub(crate) fn enumerate_windows() -> Result<Vec<WindowTarget>, String> {
             _ => continue,
         };
 
+        let process_metadata = resolve_process_metadata(process_id);
+        let process_name = window.process_name().ok().or_else(|| {
+            process_metadata
+                .as_ref()
+                .map(|metadata| metadata.process_name.clone())
+        });
+        let executable_path = process_metadata.and_then(|metadata| metadata.executable_path);
+        let monitor = window.monitor();
+
         targets.push(WindowTarget {
             id: window_id(window, process_id),
             title,
-            process_name: window.process_name().ok(),
+            process_name,
             process_id,
             width,
             height,
+            executable_path,
+            monitor_width: monitor.and_then(|monitor| monitor.width().ok()),
+            monitor_height: monitor.and_then(|monitor| monitor.height().ok()),
+            title_bar_height: window.title_bar_height().ok(),
         });
     }
 

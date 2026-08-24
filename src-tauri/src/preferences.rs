@@ -13,7 +13,7 @@ use windows::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
-const UI_PREFERENCES_SCHEMA_VERSION: u32 = 4;
+const UI_PREFERENCES_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -31,6 +31,7 @@ pub struct UiPreferences {
     pub start_with_windows: bool,
     pub close_to_tray: bool,
     pub save_overlay_enabled: bool,
+    pub save_replay_hotkey: String,
     pub storage_quota_gib: u32,
     pub game_detection_enabled: bool,
     pub game_auto_arm: bool,
@@ -54,6 +55,7 @@ impl Default for UiPreferences {
             start_with_windows: false,
             close_to_tray: true,
             save_overlay_enabled: true,
+            save_replay_hotkey: crate::hotkey::DEFAULT_SAVE_REPLAY_HOTKEY.to_string(),
             storage_quota_gib: 50,
             game_detection_enabled: false,
             game_auto_arm: false,
@@ -165,6 +167,7 @@ pub struct UiPreferencesPatch {
     pub start_with_windows: Option<bool>,
     pub close_to_tray: Option<bool>,
     pub save_overlay_enabled: Option<bool>,
+    pub save_replay_hotkey: Option<String>,
     pub storage_quota_gib: Option<u32>,
     pub game_detection_enabled: Option<bool>,
     pub game_auto_arm: Option<bool>,
@@ -218,6 +221,20 @@ impl UiPreferencesManager {
             success: true,
             preferences: self.lock().clone(),
             error_message: None,
+        }
+    }
+
+    pub fn save_replay_hotkey(&self, combination: String) -> Result<(), String> {
+        let response = self.update(UiPreferencesPatch {
+            save_replay_hotkey: Some(combination),
+            ..Default::default()
+        });
+        if response.success {
+            Ok(())
+        } else {
+            Err(response.error_message.unwrap_or_else(|| {
+                "The Save Replay hotkey preference could not be saved.".to_string()
+            }))
         }
     }
 
@@ -282,6 +299,9 @@ fn apply_patch(mut value: UiPreferences, patch: UiPreferencesPatch) -> UiPrefere
     }
     if let Some(next) = patch.save_overlay_enabled {
         value.save_overlay_enabled = next;
+    }
+    if let Some(next) = patch.save_replay_hotkey {
+        value.save_replay_hotkey = next;
     }
     if let Some(next) = patch.storage_quota_gib {
         value.storage_quota_gib = next;
@@ -364,6 +384,8 @@ pub fn update_ui_preferences(
     // The registry entry and this preference are kept together by
     // desktop::set_start_with_windows.
     patch.start_with_windows = None;
+    // The hotkey preference changes only after the global registration succeeds.
+    patch.save_replay_hotkey = None;
     manager.update(patch)
 }
 
@@ -395,6 +417,10 @@ mod tests {
         assert!(!upgraded.start_with_windows);
         assert!(upgraded.close_to_tray);
         assert!(upgraded.save_overlay_enabled);
+        assert_eq!(
+            upgraded.save_replay_hotkey,
+            crate::hotkey::DEFAULT_SAVE_REPLAY_HOTKEY
+        );
         assert_eq!(upgraded.storage_quota_gib, 50);
         assert!(!upgraded.game_detection_enabled);
         assert!(!upgraded.game_auto_arm);
@@ -421,6 +447,7 @@ mod tests {
             start_with_windows: Some(true),
             close_to_tray: Some(false),
             save_overlay_enabled: Some(false),
+            save_replay_hotkey: Some("Shift + Numpad0".into()),
             storage_quota_gib: Some(12_000),
             game_detection_enabled: Some(true),
             game_auto_arm: Some(true),
@@ -444,6 +471,7 @@ mod tests {
         assert!(loaded.start_with_windows);
         assert!(!loaded.close_to_tray);
         assert!(!loaded.save_overlay_enabled);
+        assert_eq!(loaded.save_replay_hotkey, "Shift + Numpad0");
         assert_eq!(loaded.storage_quota_gib, 10 * 1024);
         assert!(loaded.game_detection_enabled);
         assert!(loaded.game_auto_arm);
@@ -500,6 +528,21 @@ mod tests {
         let cleared: UiPreferencesPatch =
             serde_json::from_str(r#"{"selectedCollectionId":null}"#).unwrap();
         assert_eq!(cleared.selected_collection_id, Some(None));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn save_replay_hotkey_persists_across_manager_restart() {
+        let root = directory("hotkey");
+        let path = root.join("ui-preferences.json");
+        let manager = UiPreferencesManager::initialize(path.clone());
+        manager
+            .save_replay_hotkey("F8".to_string())
+            .expect("hotkey preference should save");
+        drop(manager);
+
+        let restarted = UiPreferencesManager::initialize(path);
+        assert_eq!(restarted.get().preferences.save_replay_hotkey, "F8");
         fs::remove_dir_all(root).unwrap();
     }
 }

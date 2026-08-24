@@ -2746,21 +2746,74 @@ kbd.hotkey-recording {
 
 .settings-grid {
   display: grid;
-  gap: 24px;
+  gap: 12px;
   padding-bottom: 20px;
 }
 
-.settings-section h2 {
-  margin: 0 0 8px 2px;
-  color: #87818e;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 1.15px;
-  text-transform: uppercase;
+.settings-category {
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
 }
 
-.settings-section-body {
+.settings-category > summary {
+  display: flex;
+  min-height: 72px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 15px 20px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.settings-category > summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-category > summary:hover {
+  background: rgba(255, 255, 255, .018);
+}
+
+.settings-category > summary:focus-visible {
+  outline: 2px solid rgba(134, 108, 240, .65);
+  outline-offset: -2px;
+}
+
+.settings-category h2 {
+  margin: 0;
+  color: #ddd8e2;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -.1px;
+}
+
+.settings-category summary p {
+  margin: 4px 0 0;
+  color: #817b88;
+  font-size: 11px;
+}
+
+.settings-category-chevron {
+  color: #827990;
+  font-size: 20px;
+  line-height: 1;
+  transform: rotate(-90deg);
+  transition: transform 140ms ease;
+}
+
+.settings-category[open] .settings-category-chevron {
+  transform: rotate(0);
+}
+
+.settings-category > .settings-section-body {
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
   padding: 0 20px;
+  background: rgba(10, 10, 13, .14);
 }
 
 .settings-row {
@@ -2785,12 +2838,37 @@ kbd.hotkey-recording {
   color: #a8a3ae;
 }
 
-.not-configured {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: #8c8792 !important;
-  font-size: 11px !important;
+.hotkey-recorder-help {
+  display: block;
+  margin-top: 12px;
+  color: #91899b;
+  font-size: 11px;
+}
+
+.advanced-settings-group {
+  padding: 20px 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.advanced-settings-group:first-child {
+  border-top: 0;
+}
+
+.advanced-settings-heading {
+  margin-bottom: 14px;
+}
+
+.advanced-settings-heading h3 {
+  margin: 0;
+  color: #d5d0da;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.advanced-settings-heading p {
+  margin: 4px 0 0;
+  color: #817b88;
+  font-size: 11px;
 }
 
 .visually-hidden {
@@ -4730,7 +4808,7 @@ select:hover,
   color: #938b99;
 }
 
-.settings-grid { gap: var(--space-7); }
+.settings-grid { gap: var(--space-4); }
 
 .settings-section h2 {
   margin-bottom: 10px;

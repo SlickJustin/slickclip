@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { AudioCaptureTest } from "../components/AudioCaptureTest";
 import { Toggle } from "../components/Toggle";
+import { combinationFromKeyboardEvent, isBareAlphanumericShortcut, isModifierCode, shortcutDraftFromKeyboardEvent } from "../lib/hotkeyShortcut";
 import type { StorageCleanupExecutionResponse, StorageCleanupPreviewResponse, UiPreferences, UiPreferencesPatch, UiPreferencesResponse } from "../types/clips";
 import { defaultUiPreferences, formatBytes } from "../types/clips";
 
@@ -86,12 +87,12 @@ export function SettingsPage() {
   const [encoder, setEncoder] = useState("Automatic");
   const [hotkey, setHotkey] = useState<HotkeyState>(initialHotkeyState);
   const [recordingHotkey, setRecordingHotkey] = useState(false);
+  const [hotkeyDraft, setHotkeyDraft] = useState("Press a shortcut…");
   const [hotkeyPending, setHotkeyPending] = useState(false);
   const [hotkeyMessage, setHotkeyMessage] = useState<{ text: string; success: boolean } | null>(null);
   const [preferences, setPreferences] = useState<UiPreferences>(defaultUiPreferences);
   const [desktopSettingsPending, setDesktopSettingsPending] = useState(false);
   const [desktopSettingsMessage, setDesktopSettingsMessage] = useState<{ text: string; success: boolean } | null>(null);
-  const [desktopPrivacy, setDesktopPrivacy] = useState(true);
   const [gameDetection, setGameDetection] = useState<GameDetectionStatus>(initialGameDetectionStatus);
   const [storageQuotaInput, setStorageQuotaInput] = useState(String(defaultUiPreferences.storageQuotaGib));
   const [storagePreview, setStoragePreview] = useState<StorageCleanupPreviewResponse | null>(null);
@@ -296,7 +297,11 @@ export function SettingsPage() {
     const handleKeyDown = (event: KeyboardEvent) => {
       event.preventDefault();
       event.stopPropagation();
-      if (event.repeat || isModifierCode(event.code)) return;
+      if (event.repeat) return;
+      if (isModifierCode(event.code)) {
+        setHotkeyDraft(shortcutDraftFromKeyboardEvent(event));
+        return;
+      }
       if (event.code === "Escape" && !event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey) {
         void stopHotkeyRecording();
         return;
@@ -304,14 +309,25 @@ export function SettingsPage() {
 
       const combination = combinationFromKeyboardEvent(event);
       if (!combination) {
-        setHotkeyMessage({ text: "Use Ctrl, Shift, Alt, or Win with a supported keyboard key.", success: false });
+        setHotkeyMessage({ text: "That key cannot be represented as a global shortcut. Try a standard, function, navigation, punctuation, or numpad key.", success: false });
         return;
       }
+      setHotkeyDraft(combination);
       void submitHotkey(combination);
     };
 
+    const handleKeyUp = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (isModifierCode(event.code)) setHotkeyDraft(shortcutDraftFromKeyboardEvent(event));
+    };
+
     window.addEventListener("keydown", handleKeyDown, true);
-    return () => window.removeEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("keyup", handleKeyUp, true);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("keyup", handleKeyUp, true);
+    };
   }, [recordingHotkey]);
 
   useEffect(() => () => {
@@ -323,6 +339,7 @@ export function SettingsPage() {
     try {
       const state = await invoke<HotkeyState>("set_hotkey_recorder_active", { active: true });
       setHotkey(state);
+      setHotkeyDraft("Press a shortcut…");
       setRecordingHotkey(true);
     } catch (error) {
       setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false });
@@ -345,6 +362,7 @@ export function SettingsPage() {
 
   async function stopHotkeyRecording() {
     setRecordingHotkey(false);
+    setHotkeyDraft("Press a shortcut…");
     try {
       const state = await invoke<HotkeyState>("set_hotkey_recorder_active", { active: false });
       setHotkey(state);
@@ -363,7 +381,9 @@ export function SettingsPage() {
       setRecordingHotkey(false);
       setHotkeyMessage({
         text: result.success
-          ? `Save Replay hotkey changed to ${result.state.currentCombination}.`
+          ? isBareAlphanumericShortcut(result.state.currentCombination)
+            ? `Save Replay hotkey changed to ${result.state.currentCombination}. Single-key shortcuts can trigger while typing in other applications.`
+            : `Save Replay hotkey changed to ${result.state.currentCombination}.`
           : result.errorMessage ?? "The global hotkey could not be registered.",
         success: result.success,
       });
@@ -383,20 +403,27 @@ export function SettingsPage() {
       <header className="page-header">
         <div>
           <h1>Settings</h1>
-          <p>Configure Replay for your setup.</p>
+          <p>Configure SlickClip for your setup.</p>
         </div>
       </header>
 
       <div className="settings-grid">
-        <SettingsSection title="Capture">
+        <SettingsCategory title="General" description="Windows startup and background behavior." defaultOpen>
+          <SettingsToggle label="Start SlickClip with Windows" description="Launches quietly in the system tray after sign-in." checked={preferences.startWithWindows} disabled={desktopSettingsPending} onChange={(value) => void setStartWithWindows(value)} />
+          <SettingsToggle label="Close or minimize to tray" description="Keeps active replay capture running in the background." checked={preferences.closeToTray} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ closeToTray: value })} />
+          <SettingsToggle label="Show Replay Saved overlay" description="Shows a brief notification without taking focus." checked={preferences.saveOverlayEnabled} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ saveOverlayEnabled: value })} />
+          {desktopSettingsMessage && <span className={desktopSettingsMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{desktopSettingsMessage.text}</span>}
+        </SettingsCategory>
+
+        <SettingsCategory title="Capture" description="Defaults used when configuring replay capture.">
           <SettingSelect label="Default Capture Mode" value={captureMode} onChange={setCaptureMode} options={["Game", "Desktop", "Window"]} />
           <SettingSelect label="Default Clip Length" value={clipLength} onChange={setClipLength} options={["30 Seconds", "1 Minute", "2 Minutes", "3 Minutes", "5 Minutes"]} />
           <SettingSelect label="Resolution" value={resolution} onChange={setResolution} options={["720p", "1080p", "1440p"]} />
           <SettingSelect label="Frame Rate" value={frameRate} onChange={setFrameRate} options={["30 FPS", "60 FPS"]} />
           <SettingSelect label="Preferred Encoder" value={encoder} onChange={setEncoder} options={["NVIDIA NVENC AV1", "NVIDIA NVENC HEVC", "NVIDIA NVENC H.264", "Automatic"]} />
-        </SettingsSection>
+        </SettingsCategory>
 
-        <SettingsSection title="Hotkeys">
+        <SettingsCategory title="Hotkeys" description="Global controls that work while SlickClip is in the background.">
           <div className="hotkey-setting">
             <div className="hotkey-setting-copy">
               <span>Save Replay Hotkey</span>
@@ -408,7 +435,7 @@ export function SettingsPage() {
             </div>
             <div className="hotkey-setting-controls">
               <kbd className={recordingHotkey ? "hotkey-recording" : undefined}>
-                {recordingHotkey ? "Press a combination..." : hotkey.currentCombination}
+                {recordingHotkey ? hotkeyDraft : hotkey.currentCombination}
               </kbd>
               <button
                 className="secondary-button"
@@ -421,18 +448,15 @@ export function SettingsPage() {
               <button className="secondary-button" type="button" disabled={!hotkey.registered || recordingHotkey || hotkeyPending || hotkey.testing} onClick={() => void testHotkey()}>{hotkey.testing ? "Listening…" : "Test Hotkey"}</button>
             </div>
           </div>
+          {recordingHotkey && <small className="hotkey-recorder-help">Press the shortcut you want. Escape cancels. Bare letter and number keys are allowed but may trigger while typing.</small>}
           {(hotkeyMessage || hotkey.lastRegistrationError) && (
             <span className={hotkeyMessage?.success && !hotkey.lastRegistrationError ? "hotkey-message-success" : "hotkey-message-error"} role="status">
               {hotkeyMessage?.text ?? hotkey.lastRegistrationError}
             </span>
           )}
-        </SettingsSection>
+        </SettingsCategory>
 
-        <SettingsSection title="Audio Capture Test">
-          <AudioCaptureTest />
-        </SettingsSection>
-
-        <SettingsSection title="Storage">
+        <SettingsCategory title="Storage" description="Clip location, quota, and safety-reviewed cleanup.">
           <div className="settings-row">
             <div><span>Save Location</span><small>Where completed clips will be stored</small></div>
             <div className="path-value">Videos\SlickClip\Clips</div>
@@ -454,37 +478,10 @@ export function SettingsPage() {
             </> : <p>No cleanup is needed. Protected clips are always excluded from automatic quota planning.</p>}
           </div>}
           {storageMessage && <span className={storageMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{storageMessage.text}</span>}
-        </SettingsSection>
+        </SettingsCategory>
 
-        <SettingsSection title="Cloud">
-          <div className="settings-row">
-            <div><span>Cloud Storage</span><small>Optional backup and sharing</small></div>
-            <span className="not-configured"><span className="status-dot" />Not configured</span>
-          </div>
-        </SettingsSection>
-
-        <SettingsSection title="Startup">
-          <SettingsToggle label="Start SlickClip with Windows" description="Launches quietly in the system tray after sign-in." checked={preferences.startWithWindows} disabled={desktopSettingsPending} onChange={(value) => void setStartWithWindows(value)} />
-          <SettingsToggle label="Close or minimize to tray" description="Keeps active replay capture running in the background." checked={preferences.closeToTray} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ closeToTray: value })} />
-          <SettingsToggle label="Show Replay Saved overlay" description="Shows a brief notification without taking focus." checked={preferences.saveOverlayEnabled} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ saveOverlayEnabled: value })} />
-          {desktopSettingsMessage && <span className={desktopSettingsMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{desktopSettingsMessage.text}</span>}
-        </SettingsSection>
-
-        <SettingsSection title="Updates">
-          <div className="settings-row update-setting-row">
-            <div><span>SlickClip {updateConfiguration?.currentVersion ?? "…"}</span><small>{updateConfiguration?.message ?? "Reading signed update configuration…"}</small></div>
-            <button className="secondary-button" type="button" disabled={updatePending || !updateConfiguration?.configured} onClick={() => void checkForUpdates()}>{updatePending ? "Working…" : "Check for Updates"}</button>
-          </div>
-          {availableUpdate?.updateAvailable && availableUpdate.version && <div className="update-available-card" role="status">
-            <div><strong>SlickClip {availableUpdate.version}</strong>{availableUpdate.publishedAt && <small>Published {new Date(availableUpdate.publishedAt).toLocaleString()}</small>}</div>
-            {availableUpdate.notes && <p>{availableUpdate.notes}</p>}
-            <button className="primary-button" type="button" disabled={updatePending} onClick={() => void installUpdate()}>Update & Restart</button>
-          </div>}
-          {updateMessage && <span className={updateMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{updateMessage.text}</span>}
-        </SettingsSection>
-
-        <SettingsSection title="Game Detection">
-          <SettingsToggle label="Detect likely games" description="Surfaces large dedicated windows as suggestions. Detection alone never starts capture." checked={preferences.gameDetectionEnabled} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ gameDetectionEnabled: value, gameAutoArm: value ? preferences.gameAutoArm : false })} />
+        <SettingsCategory title="Game Detection" description="Conservative process approval and auto-arm controls.">
+          <SettingsToggle label="Detect likely games" description="Uses install, launcher, and window evidence to suggest games. Detection alone never starts capture." checked={preferences.gameDetectionEnabled} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ gameDetectionEnabled: value, gameAutoArm: value ? preferences.gameAutoArm : false })} />
           <SettingsToggle label="Auto-arm approved games" description="Starts only when exactly one explicitly approved game window is live; suggestions are never auto-armed." checked={preferences.gameAutoArm} disabled={desktopSettingsPending || !preferences.gameDetectionEnabled} onChange={(value) => void updateDesktopPreference({ gameAutoArm: value })} />
           <div className="game-detection-rules">
             <div className="game-detection-heading"><div><span>Process rules</span><small>Exclusions override approvals. Executable names are matched without case or .exe.</small></div><button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={addApprovedProcess}>+ Approve Process</button></div>
@@ -500,68 +497,41 @@ export function SettingsPage() {
               <div>{candidate.approved ? <span className="game-approved-badge">Approved</span> : <button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={() => approveProcess(candidate.processName)}>Approve</button>}<button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={() => excludeProcess(candidate.processName)}>Exclude</button></div>
             </article>)}
           </div>
-        </SettingsSection>
+        </SettingsCategory>
 
-        <SettingsSection title="Privacy">
-          <SettingsToggle
-            label="Desktop Capture Privacy"
-            description="Application exclusions and privacy rules will be added in a later stage."
-            checked={desktopPrivacy}
-            onChange={setDesktopPrivacy}
-          />
-        </SettingsSection>
+        <SettingsCategory title="Advanced" description="Diagnostics, hardware checks, and signed application updates.">
+          <div className="advanced-settings-group">
+            <div className="advanced-settings-heading"><h3>Audio Capture Test</h3><p>Inspect device and process-audio support without changing capture preferences.</p></div>
+            <AudioCaptureTest />
+          </div>
+          <div className="advanced-settings-group">
+            <div className="advanced-settings-heading"><h3>Updates</h3><p>Check the configured signed SlickClip release channel.</p></div>
+            <div className="settings-row update-setting-row">
+              <div><span>SlickClip {updateConfiguration?.currentVersion ?? "…"}</span><small>{updateConfiguration?.message ?? "Reading signed update configuration…"}</small></div>
+              <button className="secondary-button" type="button" disabled={updatePending || !updateConfiguration?.configured} onClick={() => void checkForUpdates()}>{updatePending ? "Working…" : "Check for Updates"}</button>
+            </div>
+            {availableUpdate?.updateAvailable && availableUpdate.version && <div className="update-available-card" role="status">
+              <div><strong>SlickClip {availableUpdate.version}</strong>{availableUpdate.publishedAt && <small>Published {new Date(availableUpdate.publishedAt).toLocaleString()}</small>}</div>
+              {availableUpdate.notes && <p>{availableUpdate.notes}</p>}
+              <button className="primary-button" type="button" disabled={updatePending} onClick={() => void installUpdate()}>Update & Restart</button>
+            </div>}
+            {updateMessage && <span className={updateMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{updateMessage.text}</span>}
+          </div>
+        </SettingsCategory>
       </div>
     </div>
   );
 }
 
-function isModifierCode(code: string) {
-  return ["ControlLeft", "ControlRight", "ShiftLeft", "ShiftRight", "AltLeft", "AltRight", "MetaLeft", "MetaRight"].includes(code);
-}
-
-function combinationFromKeyboardEvent(event: KeyboardEvent) {
-  const key = displayKeyFromCode(event.code);
-  if (!key) return null;
-  const parts = [
-    event.ctrlKey ? "Ctrl" : null,
-    event.shiftKey ? "Shift" : null,
-    event.altKey ? "Alt" : null,
-    event.metaKey ? "Win" : null,
-  ].filter((part): part is string => part !== null);
-  if (!parts.length) return null;
-  return [...parts, key].join(" + ");
-}
-
-function displayKeyFromCode(code: string) {
-  if (/^Key[A-Z]$/.test(code)) return code.slice(3);
-  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
-  if (/^F(?:[1-9]|1[0-2])$/.test(code)) return code;
-  const keys: Record<string, string> = {
-    Space: "Space",
-    Enter: "Enter",
-    Escape: "Escape",
-    Tab: "Tab",
-    Backspace: "Backspace",
-    Delete: "Delete",
-    Insert: "Insert",
-    Home: "Home",
-    End: "End",
-    PageUp: "PageUp",
-    PageDown: "PageDown",
-    ArrowUp: "ArrowUp",
-    ArrowDown: "ArrowDown",
-    ArrowLeft: "ArrowLeft",
-    ArrowRight: "ArrowRight",
-  };
-  return keys[code] ?? null;
-}
-
-function SettingsSection({ title, children }: { title: string; children: React.ReactNode }) {
+function SettingsCategory({ title, description, children, defaultOpen = false }: { title: string; description: string; children: React.ReactNode; defaultOpen?: boolean }) {
   return (
-    <section className="settings-section">
-      <h2>{title}</h2>
+    <details className="settings-category" open={defaultOpen || undefined}>
+      <summary>
+        <div><h2>{title}</h2><p>{description}</p></div>
+        <span className="settings-category-chevron" aria-hidden="true">⌄</span>
+      </summary>
       <div className="settings-section-body">{children}</div>
-    </section>
+    </details>
   );
 }
 

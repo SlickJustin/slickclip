@@ -1,4 +1,5 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::mem::size_of;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex, MutexGuard,
@@ -8,7 +9,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
 
+use crate::audio::OwnedHandle;
 use crate::capture::encoder::EncoderChoice;
 use crate::capture::targets::{self, CaptureTargetRequest, CaptureTargetType, WindowTarget};
 use crate::preferences::{UiPreferences, UiPreferencesManager};
@@ -31,6 +36,8 @@ pub struct GameCandidate {
     height: u32,
     approved: bool,
     reason: String,
+    #[serde(skip)]
+    confidence_score: u8,
 }
 
 #[derive(Clone, Serialize)]
@@ -71,6 +78,83 @@ struct DetectionRuntime {
     status: GameDetectionStatus,
     last_failed_target: Option<(String, Instant)>,
     ready_notified_target: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ProcessSnapshotEntry {
+    parent_process_id: u32,
+    process_name: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ProcessTree {
+    entries: BTreeMap<u32, ProcessSnapshotEntry>,
+}
+
+impl ProcessTree {
+    fn capture() -> Self {
+        let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+            return Self::default();
+        };
+        let snapshot = OwnedHandle(snapshot);
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        if unsafe { Process32FirstW(snapshot.0, &mut entry) }.is_err() {
+            return Self::default();
+        }
+
+        let mut entries = BTreeMap::new();
+        loop {
+            let process_name = String::from_utf16_lossy(
+                &entry
+                    .szExeFile
+                    .iter()
+                    .take_while(|value| **value != 0)
+                    .copied()
+                    .collect::<Vec<_>>(),
+            );
+            entries.insert(
+                entry.th32ProcessID,
+                ProcessSnapshotEntry {
+                    parent_process_id: entry.th32ParentProcessID,
+                    process_name,
+                },
+            );
+            if unsafe { Process32NextW(snapshot.0, &mut entry) }.is_err() {
+                break;
+            }
+        }
+        Self { entries }
+    }
+
+    fn process_name(&self, process_id: u32) -> Option<&str> {
+        self.entries
+            .get(&process_id)
+            .map(|entry| entry.process_name.as_str())
+            .filter(|name| !name.trim().is_empty())
+    }
+
+    fn launcher_ancestor(&self, process_id: u32) -> Option<&'static str> {
+        let mut current = process_id;
+        let mut visited = BTreeSet::new();
+        for _ in 0..6 {
+            if !visited.insert(current) {
+                return None;
+            }
+            let parent_process_id = self.entries.get(&current)?.parent_process_id;
+            if parent_process_id == 0 || parent_process_id == current {
+                return None;
+            }
+            let parent = self.entries.get(&parent_process_id)?;
+            if let Some(launcher) = recognized_launcher(&normalize_process(&parent.process_name)) {
+                return Some(launcher);
+            }
+            current = parent_process_id;
+        }
+        None
+    }
 }
 
 impl Default for DetectionRuntime {
@@ -284,14 +368,9 @@ fn scan_and_auto_arm(app: &AppHandle, runtime: &Arc<Mutex<DetectionRuntime>>) {
     {
         return;
     }
-    let approved = candidates
-        .iter()
-        .filter(|candidate| candidate.approved)
-        .collect::<Vec<_>>();
-    if approved.len() != 1 {
+    let Some(candidate) = single_approved_candidate(&candidates) else {
         return;
-    }
-    let candidate = approved[0];
+    };
     let retry_blocked = lock_runtime(runtime)
         .last_failed_target
         .as_ref()
@@ -347,6 +426,12 @@ fn scan_and_auto_arm(app: &AppHandle, runtime: &Arc<Mutex<DetectionRuntime>>) {
     }
 }
 
+fn single_approved_candidate(candidates: &[GameCandidate]) -> Option<&GameCandidate> {
+    let mut approved = candidates.iter().filter(|candidate| candidate.approved);
+    let candidate = approved.next()?;
+    approved.next().is_none().then_some(candidate)
+}
+
 fn stop_tracked_buffer_if_needed(
     replay: &ReplayBufferManager,
     runtime: &Arc<Mutex<DetectionRuntime>>,
@@ -364,16 +449,25 @@ fn stop_tracked_buffer_if_needed(
 }
 
 fn classify_windows(windows: &[WindowTarget], preferences: &UiPreferences) -> Vec<GameCandidate> {
+    classify_windows_with_process_tree(windows, preferences, &ProcessTree::capture())
+}
+
+fn classify_windows_with_process_tree(
+    windows: &[WindowTarget],
+    preferences: &UiPreferences,
+    process_tree: &ProcessTree,
+) -> Vec<GameCandidate> {
     let approved = normalized_set(&preferences.game_detection_approved_processes);
     let excluded = normalized_set(&preferences.game_detection_excluded_processes);
     let mut candidates = windows
         .iter()
-        .filter_map(|window| classify_window(window, &approved, &excluded))
+        .filter_map(|window| classify_window(window, &approved, &excluded, process_tree))
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
         right
             .approved
             .cmp(&left.approved)
+            .then_with(|| right.confidence_score.cmp(&left.confidence_score))
             .then_with(|| {
                 (u64::from(right.width) * u64::from(right.height))
                     .cmp(&(u64::from(left.width) * u64::from(left.height)))
@@ -387,14 +481,33 @@ fn classify_window(
     window: &WindowTarget,
     approved: &BTreeSet<String>,
     excluded: &BTreeSet<String>,
+    process_tree: &ProcessTree,
 ) -> Option<GameCandidate> {
-    let process_name = window.process_name.as_ref()?.trim();
+    let process_name = window
+        .process_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            window
+                .executable_path
+                .as_deref()
+                .and_then(executable_name_from_path)
+        })
+        .or_else(|| process_tree.process_name(window.process_id))?
+        .trim();
     let normalized = normalize_process(process_name);
     if normalized.is_empty() || excluded.contains(&normalized) {
         return None;
     }
     let explicitly_approved = approved.contains(&normalized);
-    if !explicitly_approved && default_process_exclusions().contains(normalized.as_str()) {
+    if !explicitly_approved
+        && (default_process_exclusions().contains(normalized.as_str())
+            || looks_like_helper_process(&normalized)
+            || window
+                .executable_path
+                .as_deref()
+                .is_some_and(is_infrastructure_path))
+    {
         return None;
     }
     if window.width < 800 || window.height < 450 {
@@ -416,10 +529,45 @@ fn classify_window(
     {
         return None;
     }
+    let game_install_source = window
+        .executable_path
+        .as_deref()
+        .and_then(game_install_source);
+    let launcher_ancestor = process_tree.launcher_ancestor(window.process_id);
+    let near_monitor = is_near_monitor_sized(window);
+    let borderless = window.title_bar_height.is_some_and(|height| height <= 8);
     let aspect = window.width as f64 / window.height as f64;
-    if !explicitly_approved && !(1.2..=3.8).contains(&aspect) {
+    if !explicitly_approved && game_install_source.is_none() && !(1.2..=3.8).contains(&aspect) {
         return None;
     }
+    if !explicitly_approved
+        && game_install_source.is_none()
+        && launcher_ancestor.is_none()
+        && !(near_monitor && borderless)
+    {
+        return None;
+    }
+    let confidence_score = if explicitly_approved {
+        u8::MAX
+    } else {
+        u8::from(near_monitor)
+            + u8::from(borderless)
+            + game_install_source.map_or(0, |_| 5)
+            + launcher_ancestor.map_or(0, |_| 4)
+    };
+    let reason = if explicitly_approved {
+        "Approved · explicit process rule".to_string()
+    } else if let Some(source) = game_install_source {
+        if near_monitor && borderless {
+            format!("High confidence · {source} + borderless near-monitor window")
+        } else {
+            format!("High confidence · {source} + substantial game window")
+        }
+    } else if let Some(launcher) = launcher_ancestor {
+        format!("High confidence · {launcher} launch ancestry + substantial game window")
+    } else {
+        "Possible game · borderless near-monitor window".to_string()
+    };
     Some(GameCandidate {
         target_id: window.id.clone(),
         title: window.title.clone(),
@@ -428,12 +576,118 @@ fn classify_window(
         width: window.width,
         height: window.height,
         approved: explicitly_approved,
-        reason: if explicitly_approved {
-            "Explicitly approved for auto-arm".to_string()
-        } else {
-            "Large dedicated window; approval required before auto-arm".to_string()
-        },
+        reason,
+        confidence_score,
     })
+}
+
+fn executable_name_from_path(path: &str) -> Option<&str> {
+    path.rsplit(['\\', '/'])
+        .find(|component| !component.trim().is_empty())
+}
+
+fn path_components(path: &str) -> Vec<String> {
+    path.split(['\\', '/'])
+        .map(str::trim)
+        .filter(|component| !component.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn game_install_source(path: &str) -> Option<&'static str> {
+    let components = path_components(path);
+    if components
+        .windows(2)
+        .any(|pair| pair[0] == "steamapps" && pair[1] == "common")
+    {
+        return Some("Steam game directory");
+    }
+    if components.iter().any(|component| component == "xboxgames") {
+        return Some("Xbox game directory");
+    }
+    if components
+        .iter()
+        .any(|component| component == "modifiablewindowsapps")
+    {
+        return Some("Microsoft game directory");
+    }
+    if let Some(epic_index) = components
+        .iter()
+        .position(|component| component == "epic games")
+    {
+        let tail = &components[epic_index + 1..];
+        if !tail.is_empty() && !tail.iter().any(|component| component == "launcher") {
+            return Some("Epic Games directory");
+        }
+    }
+    if components
+        .windows(2)
+        .any(|pair| pair[0] == "gog galaxy" && pair[1] == "games")
+    {
+        return Some("GOG game directory");
+    }
+    if components
+        .windows(2)
+        .any(|pair| pair[0] == "amazon games" && pair[1] == "library")
+    {
+        return Some("Amazon Games directory");
+    }
+    None
+}
+
+fn is_near_monitor_sized(window: &WindowTarget) -> bool {
+    let (Some(monitor_width), Some(monitor_height)) = (window.monitor_width, window.monitor_height)
+    else {
+        return false;
+    };
+    let width = u64::from(window.width);
+    let height = u64::from(window.height);
+    let monitor_width = u64::from(monitor_width);
+    let monitor_height = u64::from(monitor_height);
+    width * 100 >= monitor_width * 88
+        && width * 100 <= monitor_width * 110
+        && height * 100 >= monitor_height * 88
+        && height * 100 <= monitor_height * 110
+}
+
+fn looks_like_helper_process(normalized_process: &str) -> bool {
+    [
+        "bootstrapper",
+        "crashhandler",
+        "crashreporter",
+        "dlcunlocker",
+        "helper",
+        "installer",
+        "launcher",
+        "overlay",
+        "patcher",
+        "uninstaller",
+        "unlocker",
+        "updater",
+    ]
+    .iter()
+    .any(|term| normalized_process.contains(term))
+}
+
+fn is_infrastructure_path(path: &str) -> bool {
+    let normalized = path.replace('/', "\\").to_ascii_lowercase();
+    normalized.contains("\\windows\\system32\\")
+        || normalized.contains("\\windows\\syswow64\\")
+        || normalized.contains("\\epic games\\launcher\\")
+        || normalized.contains("\\riot games\\riot client\\")
+}
+
+fn recognized_launcher(normalized_process: &str) -> Option<&'static str> {
+    match normalized_process {
+        "steam" | "steamservice" => Some("Steam"),
+        "epicgameslauncher" => Some("Epic Games"),
+        "battle.net" | "battlenet" => Some("Battle.net"),
+        "eadesktop" | "origin" => Some("EA"),
+        "galaxyclient" => Some("GOG Galaxy"),
+        "ubisoftconnect" | "upc" => Some("Ubisoft Connect"),
+        "gamingservices" | "xboxpcapp" => Some("Xbox"),
+        _ => None,
+    }
 }
 
 fn normalize_process(value: &str) -> String {
@@ -454,15 +708,22 @@ fn normalized_set(values: &[String]) -> BTreeSet<String> {
 fn default_process_exclusions() -> BTreeSet<&'static str> {
     [
         "applicationframehost",
+        "battle.net",
+        "battlenet",
+        "chatgpt",
         "chrome",
         "code",
         "devenv",
         "discord",
+        "eadesktop",
         "epicgameslauncher",
         "explorer",
         "firefox",
+        "galaxyclient",
         "msedge",
+        "ms-teams",
         "obs64",
+        "origin",
         "powershell",
         // Keep excluding the legacy executable name during upgrades.
         "replay-app",
@@ -470,11 +731,17 @@ fn default_process_exclusions() -> BTreeSet<&'static str> {
         "riotclientservices",
         "searchhost",
         "shellexperiencehost",
+        "slack",
+        "spotify",
         "startmenuexperiencehost",
         "steam",
         "steamwebhelper",
         "systemsettings",
+        "teams",
         "textinputhost",
+        "ubisoftconnect",
+        "upc",
+        "whatsapp",
         "windowsterminal",
     ]
     .into_iter()
@@ -512,7 +779,42 @@ mod tests {
             process_id: 42,
             width,
             height,
+            executable_path: None,
+            monitor_width: Some(1920),
+            monitor_height: Some(1080),
+            title_bar_height: Some(32),
         }
+    }
+
+    fn with_path(mut window: WindowTarget, executable_path: &str) -> WindowTarget {
+        window.executable_path = Some(executable_path.to_string());
+        window
+    }
+
+    fn borderless(mut window: WindowTarget) -> WindowTarget {
+        window.title_bar_height = Some(0);
+        window
+    }
+
+    fn process_tree(entries: &[(u32, u32, &str)]) -> ProcessTree {
+        ProcessTree {
+            entries: entries
+                .iter()
+                .map(|(process_id, parent_process_id, process_name)| {
+                    (
+                        *process_id,
+                        ProcessSnapshotEntry {
+                            parent_process_id: *parent_process_id,
+                            process_name: (*process_name).to_string(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn classify(windows: &[WindowTarget], preferences: &UiPreferences) -> Vec<GameCandidate> {
+        classify_windows_with_process_tree(windows, preferences, &ProcessTree::default())
     }
 
     #[test]
@@ -521,8 +823,11 @@ mod tests {
             game_detection_enabled: true,
             ..UiPreferences::default()
         };
-        let candidates = classify_windows(
-            &[window("GreatGame.exe", "Great Game", 1920, 1080)],
+        let candidates = classify(
+            &[with_path(
+                window("GreatGame.exe", "Great Game", 1920, 1080),
+                r"D:\SteamLibrary\steamapps\common\Great Game\GreatGame.exe",
+            )],
             &preferences,
         );
         assert_eq!(candidates.len(), 1);
@@ -537,9 +842,9 @@ mod tests {
             ..UiPreferences::default()
         };
         let running = [window("Discord.exe", "Approved stream", 1280, 720)];
-        assert!(classify_windows(&running, &preferences)[0].approved);
+        assert!(classify(&running, &preferences)[0].approved);
         preferences.game_detection_excluded_processes = vec!["discord.exe".into()];
-        assert!(classify_windows(&running, &preferences).is_empty());
+        assert!(classify(&running, &preferences).is_empty());
     }
 
     #[test]
@@ -553,6 +858,192 @@ mod tests {
             window("chrome.exe", "A large video", 1920, 1080),
             window("TinyGame.exe", "Tiny Game", 640, 360),
         ];
-        assert!(classify_windows(&windows, &preferences).is_empty());
+        assert!(classify(&windows, &preferences).is_empty());
+    }
+
+    #[test]
+    fn real_mw4_fixture_qualifies_from_general_steam_path_and_window_evidence() {
+        let preferences = UiPreferences {
+            game_detection_enabled: true,
+            ..UiPreferences::default()
+        };
+        let mut mw4 = with_path(
+            borderless(window(
+                "cod26-cod.exe",
+                "Call of Duty®: Modern Warfare® 4",
+                1920,
+                1080,
+            )),
+            r"G:\SteamLibrary\steamapps\common\Modern Warfare 4 - Beta\cod26-cod.exe",
+        );
+        // Reproduce the access pattern that caused the old classifier to drop the window.
+        mw4.process_name = None;
+        mw4.process_id = 23_740;
+
+        let tree = process_tree(&[(23_740, 8_788, "cod26-cod.exe"), (8_788, 1, "steam.exe")]);
+        let candidates = classify_windows_with_process_tree(&[mw4], &preferences, &tree);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].process_name, "cod26-cod.exe");
+        assert!(!candidates[0].approved);
+        assert!(candidates[0].reason.contains("Steam game directory"));
+    }
+
+    #[test]
+    fn unknown_executable_in_steam_common_is_a_likely_game() {
+        let preferences = UiPreferences {
+            game_detection_enabled: true,
+            ..UiPreferences::default()
+        };
+        let candidate = with_path(
+            window("x7_qz.exe", "Unknown Game", 1280, 720),
+            r"E:\Games\steamapps\common\Unknown Game\x7_qz.exe",
+        );
+        let candidates = classify(&[candidate], &preferences);
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].reason.starts_with("High confidence"));
+    }
+
+    #[test]
+    fn known_library_paths_are_generic_and_launcher_directories_are_not_games() {
+        assert_eq!(
+            game_install_source(r"D:\Epic Games\Unknown Title\game.exe"),
+            Some("Epic Games directory")
+        );
+        assert_eq!(
+            game_install_source(r"C:\XboxGames\Unknown Title\Content\game.exe"),
+            Some("Xbox game directory")
+        );
+        assert_eq!(
+            game_install_source(r"C:\Program Files\ModifiableWindowsApps\Unknown\game.exe"),
+            Some("Microsoft game directory")
+        );
+        assert_eq!(
+            game_install_source(r"C:\Program Files\Epic Games\Launcher\Portal\launcher.exe"),
+            None
+        );
+    }
+
+    #[test]
+    fn large_normal_unknown_desktop_window_is_not_enough_by_itself() {
+        let preferences = UiPreferences {
+            game_detection_enabled: true,
+            ..UiPreferences::default()
+        };
+        let candidate = window("UnknownDesktop.exe", "Work dashboard", 1920, 1040);
+        assert!(classify(&[candidate], &preferences).is_empty());
+    }
+
+    #[test]
+    fn maximized_desktop_apps_and_helper_processes_are_not_likely_games() {
+        let preferences = UiPreferences {
+            game_detection_enabled: true,
+            ..UiPreferences::default()
+        };
+        let windows = [
+            borderless(window("ChatGPT.exe", "ChatGPT", 1920, 1080)),
+            borderless(window("Spotify.exe", "Spotify Premium", 1920, 1080)),
+            borderless(window("chrome.exe", "YouTube", 1920, 1080)),
+            borderless(window("Discord.exe", "Friends", 1920, 1080)),
+            borderless(window("steamwebhelper.exe", "Steam", 1920, 1080)),
+            borderless(window("VyxxnnDLCUnlocker.exe", "DLC Unlocker", 1920, 1080)),
+        ];
+        assert!(classify(&windows, &preferences).is_empty());
+    }
+
+    #[test]
+    fn launcher_is_not_a_target_but_its_substantial_child_can_be_detected() {
+        let preferences = UiPreferences {
+            game_detection_enabled: true,
+            ..UiPreferences::default()
+        };
+        let mut launcher = borderless(window("steam.exe", "Steam", 1920, 1080));
+        launcher.process_id = 100;
+        let mut game = window("opaque.exe", "Opaque Game", 1600, 900);
+        game.process_id = 200;
+        game.process_name = None;
+        let tree = process_tree(&[(100, 1, "steam.exe"), (200, 100, "opaque.exe")]);
+        let candidates = classify_windows_with_process_tree(&[launcher, game], &preferences, &tree);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].process_name, "opaque.exe");
+        assert!(candidates[0].reason.contains("Steam launch ancestry"));
+    }
+
+    #[test]
+    fn explicit_approval_keeps_unusual_process_auto_arm_eligible() {
+        let preferences = UiPreferences {
+            game_detection_enabled: true,
+            game_auto_arm: true,
+            game_detection_approved_processes: vec!["odd_name.exe".into()],
+            ..UiPreferences::default()
+        };
+        let candidates = classify(
+            &[window(
+                "ODD_NAME.EXE",
+                "Unrecognized application",
+                1280,
+                720,
+            )],
+            &preferences,
+        );
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].approved);
+        assert!(single_approved_candidate(&candidates).is_some());
+    }
+
+    #[test]
+    fn explicit_exclusion_still_overrides_approval() {
+        let preferences = UiPreferences {
+            game_detection_enabled: true,
+            game_auto_arm: true,
+            game_detection_approved_processes: vec!["odd_name".into()],
+            game_detection_excluded_processes: vec!["ODD_NAME.exe".into()],
+            ..UiPreferences::default()
+        };
+        assert!(classify(
+            &[window("odd_name.exe", "Odd Game", 1280, 720)],
+            &preferences,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn approved_game_disappearance_and_reappearance_stays_unambiguous() {
+        let preferences = UiPreferences {
+            game_detection_enabled: true,
+            game_auto_arm: true,
+            game_detection_approved_processes: vec!["reappearing_game".into()],
+            ..UiPreferences::default()
+        };
+        let live = [window(
+            "Reappearing_Game.exe",
+            "Reappearing Game",
+            1920,
+            1080,
+        )];
+        let first = classify(&live, &preferences);
+        assert!(single_approved_candidate(&first).is_some());
+        let disappeared = classify(&[], &preferences);
+        assert!(single_approved_candidate(&disappeared).is_none());
+        let reappeared = classify(&live, &preferences);
+        assert!(single_approved_candidate(&reappeared).is_some());
+    }
+
+    #[test]
+    fn more_than_one_approved_live_target_never_auto_arms() {
+        let preferences = UiPreferences {
+            game_detection_enabled: true,
+            game_auto_arm: true,
+            game_detection_approved_processes: vec!["game_one".into(), "game_two".into()],
+            ..UiPreferences::default()
+        };
+        let candidates = classify(
+            &[
+                window("game_one.exe", "Game One", 1280, 720),
+                window("game_two.exe", "Game Two", 1280, 720),
+            ],
+            &preferences,
+        );
+        assert_eq!(candidates.len(), 2);
+        assert!(single_approved_candidate(&candidates).is_none());
     }
 }
