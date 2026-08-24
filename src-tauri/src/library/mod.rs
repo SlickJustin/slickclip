@@ -1268,6 +1268,84 @@ mod tests {
     }
 
     #[test]
+    fn migrated_verbatim_paths_preview_current_files_and_exclude_protected_clip() {
+        let root = std::env::temp_dir().join(format!("stage24-migrated-{}", Uuid::new_v4()));
+        let legacy_app = root.join("com.replayapp.desktop");
+        let current_app = root.join("com.slickclip.desktop");
+        let legacy_video = root.join("Videos").join("JustIn Replay");
+        let current_video = root.join("Videos").join("SlickClip");
+        let legacy_clips = legacy_video.join("Clips");
+        let oldest = legacy_clips.join("JustInReplay-20260816-040724.mp4");
+        let protected = legacy_clips.join("protected.mp4");
+        fs::create_dir_all(&legacy_clips).unwrap();
+        fs::write(&oldest, b"oldest migrated clip").unwrap();
+        fs::write(&protected, b"protected migrated clip").unwrap();
+        let legacy_database = legacy_app.join("Library").join("clips.db");
+        let legacy_manager =
+            ClipLibraryManager::initialize(legacy_database.clone(), legacy_clips.clone());
+        let oldest_id = legacy_manager
+            .index_saved_clip(saved_metadata(oldest, 1))
+            .unwrap()
+            .clip_id;
+        let protected_id = legacy_manager
+            .index_saved_clip(saved_metadata(protected, 2))
+            .unwrap()
+            .clip_id;
+        let connection = legacy_manager.database().unwrap().open().unwrap();
+        connection
+            .execute("UPDATE clips SET file_size_bytes = 734003200", [])
+            .unwrap();
+        set_pinned(&connection, &protected_id, true).unwrap();
+        drop(connection);
+        drop(legacy_manager);
+
+        crate::migration::migrate_legacy_installation(
+            &legacy_app,
+            &current_app,
+            &legacy_video,
+            &current_video,
+        )
+        .unwrap();
+
+        let current_clips = current_video.join("Clips");
+        let manager = ClipLibraryManager::initialize(
+            current_app.join("Library").join("clips.db"),
+            current_clips.clone(),
+        );
+        let preview = manager.preview_storage_cleanup(StorageCleanupPreviewRequest {
+            quota_bytes: storage::MIN_QUOTA_BYTES,
+        });
+
+        assert!(preview.success, "{:?}", preview.error_message);
+        assert_eq!(
+            preview
+                .candidates
+                .iter()
+                .map(|candidate| candidate.clip_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![oldest_id.as_str()]
+        );
+        assert!(manager.clip_by_id(&protected_id).unwrap().unwrap().pinned);
+        assert_eq!(
+            manager.resolved_clip(&oldest_id).unwrap().1,
+            current_clips
+                .join("JustInReplay-20260816-040724.mp4")
+                .canonicalize()
+                .unwrap()
+        );
+        assert_eq!(
+            manager.resolved_clip(&protected_id).unwrap().1.parent(),
+            Some(current_clips.canonicalize().unwrap().as_path())
+        );
+        assert!(current_clips
+            .join("JustInReplay-20260816-040724.mp4")
+            .exists());
+        assert!(current_clips.join("protected.mp4").exists());
+        drop(manager);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn storage_preview_rejects_database_path_outside_owned_clips_without_deleting_it() {
         let root = std::env::temp_dir().join(format!("stage24-path-safety-{}", Uuid::new_v4()));
         let clips = root.join("Clips");

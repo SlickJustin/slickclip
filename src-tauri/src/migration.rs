@@ -2,12 +2,9 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-use std::path::PathBuf;
-
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 use uuid::Uuid;
 use windows::core::PCWSTR;
@@ -233,24 +230,36 @@ fn rewrite_library_paths(
     drop(statement);
 
     let affected = rows
-        .into_iter()
+        .iter()
         .filter(|(_, stored_path)| {
             Path::new(stored_path)
                 .parent()
                 .is_some_and(|parent| paths_equal_ignoring_case(parent, legacy_clips))
         })
+        .cloned()
         .collect::<Vec<_>>();
     if affected.is_empty() {
         return Ok(());
     }
-    let canonical_root = slickclip_clips.canonicalize().map_err(migration_io_error)?;
     let mut updates = Vec::new();
+    let mut destinations = Vec::<(PathBuf, String)>::new();
     for (id, stored_path) in affected {
         let stored = Path::new(&stored_path);
         let filename = stored
             .file_name()
             .ok_or_else(|| format!("Legacy clip row '{id}' has no filename."))?;
         let migrated = slickclip_clips.join(filename);
+        if stored.exists() && migrated.exists() {
+            return Err(format!(
+                "SlickClip migration found both legacy and current clip data for Library row '{id}'. Nothing was overwritten."
+            ));
+        }
+        if !migrated.exists() {
+            // A missing file remains under the existing reconciliation behavior. In particular,
+            // never invent a destination merely because a row resembles a legacy path.
+            continue;
+        }
+        let canonical_root = slickclip_clips.canonicalize().map_err(migration_io_error)?;
         let canonical = migrated.canonicalize().map_err(|error| {
             format!(
                 "Migrated clip '{}' is missing or inaccessible: {error}",
@@ -269,18 +278,180 @@ fn rewrite_library_paths(
                 slickclip_clips.display()
             ));
         }
-        updates.push((id, canonical.to_string_lossy().into_owned()));
+        if let Some((_, other_id)) = destinations
+            .iter()
+            .find(|(destination, _)| paths_equal_ignoring_case(destination, &canonical))
+        {
+            return Err(format!(
+                "Legacy Library rows '{other_id}' and '{id}' both resolve to '{}'. Nothing was changed.",
+                canonical.display()
+            ));
+        }
+        destinations.push((canonical.clone(), id.clone()));
+        let current_rows = rows
+            .iter()
+            .filter(|(row_id, row_path)| {
+                row_id != &id && paths_equal_ignoring_case(Path::new(row_path), &canonical)
+            })
+            .map(|(row_id, _)| row_id.clone())
+            .collect::<Vec<_>>();
+        if current_rows.len() > 1 {
+            return Err(format!(
+                "Migrated clip '{}' has multiple current Library records. Nothing was changed.",
+                canonical.display()
+            ));
+        }
+        updates.push(LibraryPathUpdate {
+            legacy_id: id,
+            duplicate_current_id: current_rows.into_iter().next(),
+            current_path: canonical.to_string_lossy().into_owned(),
+        });
+    }
+    if updates.is_empty() {
+        return Ok(());
     }
     let transaction = connection.transaction().map_err(database_error)?;
-    for (id, path) in updates {
-        transaction
-            .execute(
-                "UPDATE clips SET file_path = ?1 WHERE id = ?2",
-                params![path, id],
-            )
-            .map_err(database_error)?;
+    for update in updates {
+        if let Some(ref current_id) = update.duplicate_current_id {
+            merge_reconciled_duplicate(&transaction, &update, current_id)?;
+        } else {
+            transaction
+                .execute(
+                    "UPDATE clips SET file_path = ?1 WHERE id = ?2",
+                    params![update.current_path, update.legacy_id],
+                )
+                .map_err(database_error)?;
+        }
     }
     transaction.commit().map_err(database_error)
+}
+
+struct LibraryPathUpdate {
+    legacy_id: String,
+    duplicate_current_id: Option<String>,
+    current_path: String,
+}
+
+struct MutableClipMetadata {
+    display_name: String,
+    favorite: bool,
+    pinned: bool,
+    play_count: i64,
+    last_watched_at_ms: Option<i64>,
+}
+
+fn merge_reconciled_duplicate(
+    transaction: &Transaction<'_>,
+    update: &LibraryPathUpdate,
+    current_id: &str,
+) -> Result<(), String> {
+    let legacy = mutable_clip_metadata(transaction, &update.legacy_id)?;
+    let current = mutable_clip_metadata(transaction, current_id)?;
+    let default_name = Path::new(&update.current_path)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let display_name = merged_display_name(
+        default_name,
+        &legacy.display_name,
+        &current.display_name,
+        &update.legacy_id,
+        current_id,
+    )?;
+
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO clip_collections(clip_id, collection_id, added_at_ms)
+             SELECT ?1, collection_id, added_at_ms FROM clip_collections WHERE clip_id = ?2",
+            params![update.legacy_id, current_id],
+        )
+        .map_err(database_error)?;
+    transaction
+        .execute(
+            "DELETE FROM clip_audio_tracks WHERE clip_id = ?1",
+            [current_id],
+        )
+        .map_err(database_error)?;
+    transaction
+        .execute(
+            "DELETE FROM clip_collections WHERE clip_id = ?1",
+            [current_id],
+        )
+        .map_err(database_error)?;
+    transaction
+        .execute("DELETE FROM clips WHERE id = ?1", [current_id])
+        .map_err(database_error)?;
+    transaction
+        .execute(
+            "UPDATE clips SET
+                file_path = ?1,
+                display_name = ?2,
+                favorite = ?3,
+                pinned = ?4,
+                play_count = ?5,
+                last_watched_at_ms = ?6
+             WHERE id = ?7",
+            params![
+                update.current_path,
+                display_name,
+                i64::from(legacy.favorite || current.favorite),
+                i64::from(legacy.pinned || current.pinned),
+                legacy.play_count.saturating_add(current.play_count),
+                latest_timestamp(legacy.last_watched_at_ms, current.last_watched_at_ms),
+                update.legacy_id,
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn mutable_clip_metadata(
+    transaction: &Transaction<'_>,
+    clip_id: &str,
+) -> Result<MutableClipMetadata, String> {
+    transaction
+        .query_row(
+            "SELECT display_name, favorite, pinned, play_count, last_watched_at_ms
+             FROM clips WHERE id = ?1",
+            [clip_id],
+            |row| {
+                Ok(MutableClipMetadata {
+                    display_name: row.get(0)?,
+                    favorite: row.get::<_, i64>(1)? != 0,
+                    pinned: row.get::<_, i64>(2)? != 0,
+                    play_count: row.get(3)?,
+                    last_watched_at_ms: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(database_error)?
+        .ok_or_else(|| format!("SlickClip Library migration could not find clip '{clip_id}'."))
+}
+
+fn merged_display_name(
+    default_name: &str,
+    legacy_name: &str,
+    current_name: &str,
+    legacy_id: &str,
+    current_id: &str,
+) -> Result<String, String> {
+    if legacy_name == current_name || current_name == default_name {
+        Ok(legacy_name.to_string())
+    } else if legacy_name == default_name {
+        Ok(current_name.to_string())
+    } else {
+        Err(format!(
+            "Legacy clip '{legacy_id}' and reconciled clip '{current_id}' have different custom names. Nothing was changed."
+        ))
+    }
+}
+
+fn latest_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (left, right) => left.or(right),
+    }
 }
 
 fn rewrite_cache_metadata(
@@ -339,27 +510,53 @@ fn rewrite_json_paths(value: &mut Value, legacy_root: &Path, slickclip_root: &Pa
 }
 
 fn replace_path_prefix(value: &mut String, legacy_root: &Path, slickclip_root: &Path) -> bool {
-    let legacy = legacy_root.to_string_lossy();
-    if value.len() < legacy.len()
-        || !value[..legacy.len()].eq_ignore_ascii_case(&legacy)
-        || value
+    let normalized_value = normalized_windows_path_text(value);
+    let legacy = normalized_windows_path(legacy_root);
+    if normalized_value.len() < legacy.len()
+        || !normalized_value[..legacy.len()].eq_ignore_ascii_case(&legacy)
+        || normalized_value
             .as_bytes()
             .get(legacy.len())
             .is_some_and(|separator| *separator != b'\\' && *separator != b'/')
     {
         return false;
     }
+    let current = normalized_windows_path(slickclip_root);
+    let verbatim = value
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\"));
     *value = format!(
-        "{}{}",
-        slickclip_root.to_string_lossy(),
-        &value[legacy.len()..]
+        "{}{}{}",
+        if verbatim { r"\\?\" } else { "" },
+        current,
+        &normalized_value[legacy.len()..]
     );
     true
 }
 
 fn paths_equal_ignoring_case(left: &Path, right: &Path) -> bool {
-    left.to_string_lossy()
-        .eq_ignore_ascii_case(&right.to_string_lossy())
+    normalized_windows_path(left).eq_ignore_ascii_case(&normalized_windows_path(right))
+}
+
+fn normalized_windows_path(path: &Path) -> String {
+    normalized_windows_path_text(&path.to_string_lossy())
+}
+
+fn normalized_windows_path_text(value: &str) -> String {
+    let normalized = value.replace('/', "\\");
+    if normalized
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\UNC\"))
+    {
+        format!(r"\\{}", &normalized[8..])
+    } else if normalized
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\"))
+    {
+        normalized[4..].to_string()
+    } else {
+        normalized
+    }
 }
 
 fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -399,9 +596,81 @@ fn database_error(error: rusqlite::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::library::{ClipAudioTrack, ClipLibraryManager, SavedClipMetadata};
 
     fn root(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("slickclip-stage25-{name}-{}", Uuid::new_v4()))
+    }
+
+    fn saved_metadata(path: PathBuf, created_at_ms: i64) -> SavedClipMetadata {
+        SavedClipMetadata {
+            file_path: path,
+            created_at_ms,
+            duration_100ns: 30_000_000,
+            requested_duration_seconds: 3,
+            width: 1920,
+            height: 1080,
+            fps_numerator: 60,
+            fps_denominator: 1,
+            video_codec: "h264".into(),
+            video_profile: Some("High".into()),
+            video_bitrate_bps: Some(8_000_000),
+            total_bitrate_bps: Some(8_192_000),
+            capture_target_label: Some("Migration fixture".into()),
+            capture_target_type: Some("window".into()),
+            audio_tracks: vec![ClipAudioTrack {
+                stream_index: 1,
+                role: "Combined".into(),
+                title: Some("Combined".into()),
+                handler_name: Some("Combined".into()),
+                codec: "aac".into(),
+                profile: Some("LC".into()),
+                sample_rate: Some(48_000),
+                channels: Some(2),
+                bitrate_bps: Some(192_000),
+                is_default: true,
+            }],
+        }
+    }
+
+    fn clone_clip_row(
+        connection: &Connection,
+        source_id: &str,
+        new_id: &str,
+        new_path: &Path,
+        display_name: &str,
+    ) {
+        let filename = new_path.file_name().unwrap().to_string_lossy();
+        connection
+            .execute(
+                "INSERT INTO clips
+                 SELECT ?1, ?2, ?3, ?4, created_at_ms, library_added_at_ms,
+                        file_modified_at_ms, file_size_bytes, duration_100ns,
+                        requested_duration_seconds, width, height, fps_numerator,
+                        fps_denominator, video_codec, video_profile, video_bitrate_bps,
+                        total_bitrate_bps, capture_target_label, capture_target_type,
+                        favorite, imported_existing_file, audio_stream_count,
+                        default_audio_stream_title, metadata_version, play_count,
+                        last_watched_at_ms, pinned
+                 FROM clips WHERE id = ?5",
+                params![
+                    new_id,
+                    new_path.to_string_lossy(),
+                    filename,
+                    display_name,
+                    source_id
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clip_audio_tracks
+                 SELECT ?1, stream_index, role, title, handler_name, codec, profile,
+                        sample_rate, channels, bitrate_bps, is_default
+                 FROM clip_audio_tracks WHERE clip_id = ?2",
+                params![new_id, source_id],
+            )
+            .unwrap();
     }
 
     #[test]
@@ -501,6 +770,370 @@ mod tests {
         assert!(!legacy_video.exists());
         drop(migrated_database);
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn repairs_verbatim_legacy_path_and_preserves_identity_and_metadata() {
+        let base = root("verbatim-path");
+        let current_app = base.join("com.slickclip.desktop");
+        let legacy_video = base.join("Videos").join("JustIn Replay");
+        let current_video = base.join("Videos").join("SlickClip");
+        let legacy_clip = legacy_video
+            .join("Clips")
+            .join("JustInReplay-20260816-040724.mp4");
+        fs::create_dir_all(legacy_clip.parent().unwrap()).unwrap();
+        fs::write(&legacy_clip, b"real observed fixture").unwrap();
+        let database = current_app.join("Library").join("clips.db");
+        let manager = ClipLibraryManager::initialize(database.clone(), legacy_video.join("Clips"));
+        let original_id = manager
+            .index_saved_clip(saved_metadata(legacy_clip.clone(), 100))
+            .unwrap()
+            .clip_id;
+        drop(manager);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "UPDATE clips SET display_name = 'Migration Favorite', favorite = 1,
+                                  pinned = 1, play_count = 7, last_watched_at_ms = 1234
+                 WHERE id = ?1",
+                [&original_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO collections(id, name, created_at_ms, updated_at_ms)
+                 VALUES('collection-1', 'Highlights', 1, 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clip_collections(clip_id, collection_id, added_at_ms)
+                 VALUES(?1, 'collection-1', 1)",
+                [&original_id],
+            )
+            .unwrap();
+        let stored_before: String = connection
+            .query_row(
+                "SELECT file_path FROM clips WHERE id = ?1",
+                [&original_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored_before.starts_with(r"\\?\"));
+        drop(connection);
+
+        fs::create_dir_all(current_video.parent().unwrap()).unwrap();
+        fs::rename(&legacy_video, &current_video).unwrap();
+        rewrite_library_paths(
+            &database,
+            &legacy_video.join("Clips"),
+            &current_video.join("Clips"),
+        )
+        .unwrap();
+
+        let connection = Connection::open(&database).unwrap();
+        let stored: (String, String, i64, i64, i64, Option<i64>) = connection
+            .query_row(
+                "SELECT id, file_path, favorite, pinned, play_count, last_watched_at_ms
+                 FROM clips",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored.0, original_id);
+        assert_eq!(
+            PathBuf::from(stored.1),
+            current_video
+                .join("Clips")
+                .join("JustInReplay-20260816-040724.mp4")
+                .canonicalize()
+                .unwrap()
+        );
+        assert_eq!(
+            (stored.2, stored.3, stored.4, stored.5),
+            (1, 1, 7, Some(1234))
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM clip_collections", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let audio: (String, i64) = connection
+            .query_row(
+                "SELECT role, is_default FROM clip_audio_tracks WHERE clip_id = ?1",
+                [&stored.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(audio, ("Combined".into(), 1));
+        drop(connection);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn consolidates_reconciled_duplicate_without_losing_user_metadata() {
+        let base = root("reconciled-duplicate");
+        let current_app = base.join("com.slickclip.desktop");
+        let legacy_video = base.join("Videos").join("JustIn Replay");
+        let current_video = base.join("Videos").join("SlickClip");
+        let legacy_clip = legacy_video.join("Clips").join("duplicate.mp4");
+        fs::create_dir_all(legacy_clip.parent().unwrap()).unwrap();
+        fs::write(&legacy_clip, b"one physical clip").unwrap();
+        let database = current_app.join("Library").join("clips.db");
+        let manager = ClipLibraryManager::initialize(database.clone(), legacy_video.join("Clips"));
+        let legacy_id = manager
+            .index_saved_clip(saved_metadata(legacy_clip.clone(), 100))
+            .unwrap()
+            .clip_id;
+        drop(manager);
+        fs::create_dir_all(current_video.parent().unwrap()).unwrap();
+        fs::rename(&legacy_video, &current_video).unwrap();
+        let current_clip = current_video
+            .join("Clips")
+            .join("duplicate.mp4")
+            .canonicalize()
+            .unwrap();
+        let current_id = "reconciled-current-id";
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "UPDATE clips SET display_name = 'Original custom name', favorite = 1,
+                                  play_count = 3, last_watched_at_ms = 100
+                 WHERE id = ?1",
+                [&legacy_id],
+            )
+            .unwrap();
+        clone_clip_row(
+            &connection,
+            &legacy_id,
+            current_id,
+            &current_clip,
+            "duplicate",
+        );
+        connection
+            .execute(
+                "UPDATE clips SET favorite = 0, pinned = 1, play_count = 2,
+                                  last_watched_at_ms = 200 WHERE id = ?1",
+                [current_id],
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO collections VALUES('legacy-collection', 'Legacy', 1, 1);
+                 INSERT INTO collections VALUES('current-collection', 'Current', 1, 1);",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clip_collections VALUES(?1, 'legacy-collection', 1)",
+                [&legacy_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clip_collections VALUES(?1, 'current-collection', 2)",
+                [current_id],
+            )
+            .unwrap();
+        drop(connection);
+
+        rewrite_library_paths(
+            &database,
+            &legacy_video.join("Clips"),
+            &current_video.join("Clips"),
+        )
+        .unwrap();
+
+        let connection = Connection::open(&database).unwrap();
+        let stored: (String, String, String, i64, i64, i64, Option<i64>) = connection
+            .query_row(
+                "SELECT id, file_path, display_name, favorite, pinned, play_count,
+                        last_watched_at_ms FROM clips",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored.0, legacy_id);
+        assert_eq!(PathBuf::from(stored.1), current_clip);
+        assert_eq!(stored.2, "Original custom name");
+        assert_eq!(
+            (stored.3, stored.4, stored.5, stored.6),
+            (1, 1, 5, Some(200))
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM clip_collections", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM clip_audio_tracks", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn current_external_and_missing_rows_are_not_guessed_or_rewritten() {
+        let base = root("unrelated-paths");
+        let current_app = base.join("com.slickclip.desktop");
+        let legacy_clips = base.join("Videos").join("JustIn Replay").join("Clips");
+        let current_clips = base.join("Videos").join("SlickClip").join("Clips");
+        let current_clip = current_clips.join("current.mp4");
+        fs::create_dir_all(&current_clips).unwrap();
+        fs::write(&current_clip, b"current").unwrap();
+        let database = current_app.join("Library").join("clips.db");
+        let manager = ClipLibraryManager::initialize(database.clone(), current_clips.clone());
+        let current_id = manager
+            .index_saved_clip(saved_metadata(current_clip.clone(), 100))
+            .unwrap()
+            .clip_id;
+        drop(manager);
+        let connection = Connection::open(&database).unwrap();
+        let missing_path = legacy_clips.join("missing.mp4");
+        let external_path = base.join("External").join("outside.mp4");
+        clone_clip_row(
+            &connection,
+            &current_id,
+            "missing-id",
+            &missing_path,
+            "missing",
+        );
+        clone_clip_row(
+            &connection,
+            &current_id,
+            "external-id",
+            &external_path,
+            "outside",
+        );
+        let current_before: String = connection
+            .query_row(
+                "SELECT file_path FROM clips WHERE id = ?1",
+                [&current_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+
+        rewrite_library_paths(&database, &legacy_clips, &current_clips).unwrap();
+
+        let connection = Connection::open(&database).unwrap();
+        let path_for = |id: &str| {
+            connection
+                .query_row("SELECT file_path FROM clips WHERE id = ?1", [id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(path_for(&current_id), current_before);
+        assert_eq!(PathBuf::from(path_for("missing-id")), missing_path);
+        assert_eq!(PathBuf::from(path_for("external-id")), external_path);
+        drop(connection);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn legacy_and_current_clip_copies_fail_closed_without_database_changes() {
+        let base = root("clip-collision");
+        let current_app = base.join("com.slickclip.desktop");
+        let legacy_video = base.join("Videos").join("JustIn Replay");
+        let current_video = base.join("Videos").join("SlickClip");
+        let legacy_clip = legacy_video.join("Clips").join("collision.mp4");
+        let current_clip = current_video.join("Clips").join("collision.mp4");
+        fs::create_dir_all(legacy_clip.parent().unwrap()).unwrap();
+        fs::create_dir_all(current_clip.parent().unwrap()).unwrap();
+        fs::write(&legacy_clip, b"legacy bytes").unwrap();
+        fs::write(&current_clip, b"current bytes").unwrap();
+        let database = current_app.join("Library").join("clips.db");
+        let manager = ClipLibraryManager::initialize(database.clone(), legacy_video.join("Clips"));
+        let id = manager
+            .index_saved_clip(saved_metadata(legacy_clip.clone(), 100))
+            .unwrap()
+            .clip_id;
+        drop(manager);
+        let before: String = Connection::open(&database)
+            .unwrap()
+            .query_row("SELECT file_path FROM clips WHERE id = ?1", [&id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        let error = migrate_legacy_installation(
+            &base.join("com.replayapp.desktop"),
+            &current_app,
+            &legacy_video,
+            &current_video,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("both legacy and current data"));
+        assert_eq!(fs::read(&legacy_clip).unwrap(), b"legacy bytes");
+        assert_eq!(fs::read(&current_clip).unwrap(), b"current bytes");
+        let after: String = Connection::open(&database)
+            .unwrap()
+            .query_row("SELECT file_path FROM clips WHERE id = ?1", [&id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(after, before);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn cache_path_rewrite_recognizes_verbatim_legacy_prefix() {
+        let legacy = PathBuf::from(r"C:\Users\Fixture\Videos\JustIn Replay\Clips");
+        let current = PathBuf::from(r"C:\Users\Fixture\Videos\SlickClip\Clips");
+        let mut value = r"\\?\C:\Users\Fixture\Videos\JustIn Replay\Clips\clip.mp4".to_string();
+
+        assert!(replace_path_prefix(&mut value, &legacy, &current));
+        assert_eq!(
+            value,
+            r"\\?\C:\Users\Fixture\Videos\SlickClip\Clips\clip.mp4"
+        );
+    }
+
+    #[test]
+    fn reconciled_rename_is_preserved_and_conflicting_custom_names_fail_closed() {
+        assert_eq!(
+            merged_display_name("clip", "clip", "Renamed clip", "legacy", "current").unwrap(),
+            "Renamed clip"
+        );
+        assert!(merged_display_name(
+            "clip",
+            "Legacy rename",
+            "Current rename",
+            "legacy",
+            "current"
+        )
+        .unwrap_err()
+        .contains("Nothing was changed"));
     }
 
     #[test]
