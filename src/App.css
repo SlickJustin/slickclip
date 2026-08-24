@@ -6112,3 +6112,211 @@ select,
 @media (max-width: 1080px) {
   .editor-workspace { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Clips multi-select */
+.clips-batch-bar {
+  display: flex;
+  min-height: 54px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 14px;
+  border-top: 1px solid #3d3158;
+  border-bottom: 1px solid #3d3158;
+  color: #ddd5f0;
+  background: #1b1724;
+}
+
+.clips-batch-bar > strong {
+  min-width: max-content;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.clips-batch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.clips-batch-actions > button,
+.clips-batch-menu > summary {
+  min-height: 34px;
+  padding: 7px 11px;
+  border: 1px solid #48404f;
+  border-radius: 6px;
+  color: #c9c4d1;
+  background: #242129;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.clips-batch-actions > button:not(:disabled):hover,
+.clips-batch-menu > summary:hover {
+  border-color: #6b568e;
+  color: #f2edf9;
+  background: #2b2437;
+}
+
+.clips-batch-actions button:disabled {
+  cursor: wait;
+  opacity: .55;
+}
+
+.clips-batch-clear {
+  color: #9d98a6 !important;
+  background: transparent !important;
+}
+
+.clips-batch-menu {
+  position: relative;
+}
+
+.clips-batch-menu > summary {
+  display: flex;
+  align-items: center;
+  list-style: none;
+}
+
+.clips-batch-menu > summary::-webkit-details-marker { display: none; }
+
+.clips-batch-menu > summary::after {
+  content: "▾";
+  margin-left: 8px;
+  color: #8f829f;
+}
+
+.clips-batch-menu > div {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 7px);
+  right: 0;
+  display: grid;
+  width: max-content;
+  min-width: 190px;
+  max-width: 300px;
+  gap: 3px;
+  padding: 6px;
+  border: 1px solid #48434f;
+  border-radius: 7px;
+  background: #191a1f;
+  box-shadow: 0 14px 34px rgb(0 0 0 / 42%);
+}
+
+.clips-batch-menu > div > span {
+  padding: 9px;
+  color: #888b94;
+  font-size: 12px;
+}
+
+.clips-batch-menu > div > button {
+  overflow: hidden;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 5px;
+  color: #c7c9d0;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clips-batch-menu > div > button:not(:disabled):hover {
+  color: #eeeaf5;
+  background: #28242f;
+}
+
+.clips-batch-menu > div > button.danger { color: #ef9aa2; }
+
+.clips-batch-collection {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 5px;
+  padding: 4px;
+}
+
+.clips-batch-collection > span {
+  overflow: hidden;
+  padding: 0 5px;
+  color: #c7c9d0;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clips-batch-collection > button {
+  padding: 5px 7px;
+  border: 1px solid #403a47;
+  border-radius: 5px;
+  color: #bdb7c7;
+  background: #242129;
+  font: inherit;
+  font-size: 10.5px;
+}
+
+.clips-batch-collection > button:not(:disabled):hover {
+  border-color: #6b568e;
+  color: #f2edf9;
+}
+
+.clip-card {
+  position: relative;
+}
+
+.clip-card.selected {
+  border-color: #7055a7;
+  background: #1b1821;
+  box-shadow: 0 0 0 1px rgb(131 98 190 / 28%), 0 13px 28px rgb(0 0 0 / 24%);
+}
+
+.clip-card:focus-visible {
+  outline: 2px solid #9273ce;
+  outline-offset: 2px;
+}
+
+.clip-selection-toggle {
+  position: absolute;
+  z-index: 4;
+  top: 10px;
+  left: 10px;
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #716a7b;
+  border-radius: 6px;
+  color: #fff;
+  background: rgb(18 19 24 / 88%);
+  box-shadow: 0 2px 7px rgb(0 0 0 / 32%);
+  opacity: 0;
+  transition: opacity 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.clip-card:hover .clip-selection-toggle,
+.clip-card:focus-within .clip-selection-toggle,
+.clip-selection-toggle[aria-pressed="true"] {
+  opacity: 1;
+}
+
+.clip-selection-toggle[aria-pressed="true"] {
+  border-color: #a68adf;
+  background: #684b9b;
+}
+
+.clip-selection-toggle span {
+  font-size: 14px;
+  line-height: 1;
+}
+
+@media (max-width: 900px) {
+  .clips-batch-bar { align-items: flex-start; flex-direction: column; }
+  .clips-batch-actions { justify-content: flex-start; }
+  .clips-batch-menu > div { right: auto; left: 0; }
+}

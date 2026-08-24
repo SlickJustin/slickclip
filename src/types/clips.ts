@@ -153,6 +153,13 @@ export type ClipActionResponse = {
   errorMessage: string | null;
 };
 
+export type BatchDeleteClipsResponse = {
+  success: boolean;
+  requestedCount: number;
+  deletedCount: number;
+  errorMessage: string | null;
+};
+
 export type CacheArtifactState = "missing" | "preparing" | "ready" | "error";
 
 export type CacheArtifactStatus = {

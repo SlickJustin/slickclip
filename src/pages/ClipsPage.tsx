@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ClipPlayer } from "../components/ClipPlayer";
 import { ClipThumbnail } from "../components/ClipThumbnail";
 import type {
-  ClipActionResponse, ClipListItem, ClipListResponse, ClipMutationResponse, ClipSortOrder,
+  BatchDeleteClipsResponse, ClipActionResponse, ClipListItem, ClipListResponse, ClipMutationResponse, ClipSortOrder,
   ClipsGridSize, ClipsView, CollectionMutationResponse, CollectionsResponse, CollectionSummary,
   LibrarySummary, LibraryTelemetry, ReconcileResponse, ReconciliationTelemetry, UiPreferences,
   UiPreferencesPatch, UiPreferencesResponse,
@@ -15,6 +15,10 @@ import {
   formatLastWatched,
 } from "../types/clips";
 import { resolvedCollectionSelection } from "../utils/libraryPreferences";
+import {
+  batchBooleanTarget, batchDeleteTargets, confirmBatchDelete,
+  emptyClipSelection, reconcileClipSelection, selectAllVisible, selectClip, selectedVisibleItems,
+} from "../utils/clipSelection";
 
 type Toast = (title: string, message: string, success: boolean) => void;
 type Props = {
@@ -47,11 +51,15 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
   const [refreshResult, setRefreshResult] = useState<ReconciliationTelemetry | null>(null);
   const [playingClip, setPlayingClip] = useState<ClipListItem | null>(null);
   const [moreMenu, setMoreMenu] = useState<ClipMoreMenuState | null>(null);
+  const [selection, setSelection] = useState(emptyClipSelection);
+  const [batchPending, setBatchPending] = useState(false);
   const listRequestToken = useRef(0);
   const moreMenuRef = useRef<HTMLDivElement>(null);
   const moreButtonRef = useRef<HTMLButtonElement>(null);
   const reconciliationActive = refreshing || telemetry?.reconciliationRunning === true;
   const moreMenuClip = moreMenu ? clips.find((clip) => clip.id === moreMenu.clipId) ?? null : null;
+  const selectedClips = selectedVisibleItems(selection.selectedIds, clips);
+  const visibleClipIds = clips.map((clip) => clip.id);
 
   const closeMoreMenu = useCallback((restoreFocus = false) => {
     setMoreMenu(null);
@@ -149,6 +157,38 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
     setPlayingClip(playClip);
     onPlayClipConsumed();
   }, [onPlayClipConsumed, playClip]);
+
+  useEffect(() => {
+    setSelection(emptyClipSelection());
+  }, [
+    preferences.clipsFavoritesOnly,
+    preferences.clipsSearchQuery,
+    preferences.clipsSort,
+    preferences.clipsView,
+    preferences.selectedCollectionId,
+  ]);
+
+  useEffect(() => {
+    setSelection((current) => reconcileClipSelection(current, clips.map((clip) => clip.id)));
+  }, [clips]);
+
+  useEffect(() => {
+    function onSelectionShortcut(event: KeyboardEvent) {
+      if (playingClip || moreMenu) return;
+      const target = event.target;
+      const editing = target instanceof HTMLElement
+        && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a" && !editing) {
+        event.preventDefault();
+        setSelection(selectAllVisible(clips.map((clip) => clip.id)));
+      } else if (event.key === "Escape" && selection.selectedIds.size > 0) {
+        event.preventDefault();
+        setSelection(emptyClipSelection());
+      }
+    }
+    window.addEventListener("keydown", onSelectionShortcut);
+    return () => window.removeEventListener("keydown", onSelectionShortcut);
+  }, [clips, moreMenu, playingClip, selection.selectedIds.size]);
 
   const loadClips = useCallback(async () => {
     if (!preferencesLoaded) return;
@@ -302,6 +342,117 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
     onToast(included ? "Added to collection" : "Removed from collection", collection.name, true);
   }
 
+  async function mutateSelectedClips(
+    command: "set_clip_favorite" | "set_clip_pinned" | "set_clip_collection_membership",
+    requestFor: (clip: ClipListItem) => Record<string, unknown>,
+    successTitle: string,
+  ) {
+    if (batchPending || selectedClips.length === 0) return;
+    const snapshot = [...selectedClips];
+    setBatchPending(true);
+    setError(null);
+    let updatedCount = 0;
+    let firstError: string | null = null;
+    for (const clip of snapshot) {
+      try {
+        const response = await invoke<ClipMutationResponse>(command, { request: requestFor(clip) });
+        if (!response.success || !response.clip) {
+          firstError ??= response.errorMessage ?? `Could not update ${clip.displayName}.`;
+          continue;
+        }
+        updatedCount += 1;
+        replaceClip(response.clip);
+      } catch (cause) {
+        firstError ??= errorMessage(cause);
+      }
+    }
+    try {
+      await Promise.all([loadClips(), loadCollections()]);
+    } catch (cause) {
+      firstError ??= errorMessage(cause);
+    } finally {
+      setSelection(emptyClipSelection());
+      setBatchPending(false);
+    }
+    if (firstError) {
+      onToast(
+        `${successTitle} incomplete`,
+        `${updatedCount} of ${snapshot.length} clips updated. ${firstError}`,
+        false,
+      );
+    } else {
+      onToast(successTitle, `${updatedCount} clip${updatedCount === 1 ? "" : "s"} updated.`, true);
+    }
+  }
+
+  function setSelectedFavorite(favorite: boolean) {
+    return mutateSelectedClips(
+      "set_clip_favorite",
+      (clip) => ({ clipId: clip.id, favorite }),
+      favorite ? "Clips favorited" : "Favorites removed",
+    );
+  }
+
+  function setSelectedPinned(pinned: boolean) {
+    return mutateSelectedClips(
+      "set_clip_pinned",
+      (clip) => ({ clipId: clip.id, pinned }),
+      pinned ? "Clips protected" : "Protection removed",
+    );
+  }
+
+  function setSelectedCollection(collection: CollectionSummary, included: boolean) {
+    return mutateSelectedClips(
+      "set_clip_collection_membership",
+      (clip) => ({ clipId: clip.id, collectionId: collection.id, included }),
+      included ? `Added to ${collection.name}` : `Removed from ${collection.name}`,
+    );
+  }
+
+  async function deleteSelectedClips() {
+    if (batchPending) return;
+    const targets = batchDeleteTargets(selectedClips);
+    if (!confirmBatchDelete(targets.length, window.confirm)) return;
+    setBatchPending(true);
+    setError(null);
+    try {
+      const response = await invoke<BatchDeleteClipsResponse>("delete_clips", { request: { targets } });
+      await Promise.all([loadClips(), loadCollections()]);
+      setSelection(emptyClipSelection());
+      if (!response.success) {
+        return onToast(
+          "Batch deletion incomplete",
+          `${response.deletedCount} of ${response.requestedCount} clips deleted. ${response.errorMessage ?? "The remaining clips were not deleted."}`,
+          false,
+        );
+      }
+      onToast("Clips deleted", `${response.deletedCount} clips permanently deleted.`, true);
+    } catch (cause) {
+      setSelection(emptyClipSelection());
+      await Promise.allSettled([loadClips(), loadCollections()]);
+      onToast("Could not complete batch deletion", errorMessage(cause), false);
+    } finally {
+      setBatchPending(false);
+    }
+  }
+
+  function handleCardSelection(event: ReactMouseEvent<HTMLElement>, clipId: string) {
+    if (isInteractiveTarget(event.target)) return;
+    setSelection((current) => selectClip(current, visibleClipIds, clipId, {
+      toggle: event.ctrlKey || event.metaKey,
+      range: event.shiftKey,
+    }));
+  }
+
+  function handleCardSelectionKey(event: ReactKeyboardEvent<HTMLElement>, clipId: string) {
+    if (event.target !== event.currentTarget || !["Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    setSelection((current) => selectClip(current, visibleClipIds, clipId, {
+      toggle: event.ctrlKey || event.metaKey,
+      range: event.shiftKey,
+    }));
+  }
+
   function replaceClip(updated: ClipListItem) {
     setClips((current) => current.map((clip) => clip.id === updated.id ? updated : clip));
     setPlayingClip((current) => current?.id === updated.id ? updated : current);
@@ -355,10 +506,68 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
         <label><span className="visually-hidden">Grid size</span><select value={preferences.clipsGridSize} onChange={(event) => void persistPreferences({ clipsGridSize: event.target.value as ClipsGridSize })}><option value="compact">Compact</option><option value="comfortable">Comfortable</option><option value="large">Large</option></select></label>
       </div>
       <div className="clips-collection-toolbar"><div><button type="button" onClick={() => void createCollection()}>+ New Collection</button>{preferences.selectedCollectionId && <><button type="button" onClick={() => void renameSelectedCollection()}>Rename Collection</button><button className="danger" type="button" onClick={() => void deleteSelectedCollection()}>Delete Collection</button></>}</div>{summary && <span className="library-storage-summary">{summary.clipCount} clip{summary.clipCount === 1 ? "" : "s"} • {formatBytes(summary.totalSizeBytes)} <small>Library size</small></span>}</div>
+      {selectedClips.length > 0 && <div className="clips-batch-bar" role="region" aria-label="Selected clip actions">
+        <strong>{selectedClips.length} selected</strong>
+        <div className="clips-batch-actions">
+          <details className="clips-batch-menu">
+            <summary aria-disabled={batchPending}>Add to Collection</summary>
+            <div>
+              {collections.length === 0
+                ? <span>No collections yet.</span>
+                : collections.map((collection) => {
+                  const allIncluded = selectedClips.every((clip) => clip.collectionIds.includes(collection.id));
+                  const anyIncluded = selectedClips.some((clip) => clip.collectionIds.includes(collection.id));
+                  return <div className="clips-batch-collection" key={collection.id}>
+                    <span title={collection.name}>{collection.name}</span>
+                    <button type="button" disabled={batchPending || allIncluded} onClick={() => void setSelectedCollection(collection, true)}>Add</button>
+                    <button type="button" disabled={batchPending || !anyIncluded} onClick={() => void setSelectedCollection(collection, false)}>Remove</button>
+                  </div>;
+                })}
+            </div>
+          </details>
+          <button type="button" disabled={batchPending} onClick={() => void setSelectedFavorite(batchBooleanTarget(selectedClips, (clip) => clip.favorite))}>
+            {batchBooleanTarget(selectedClips, (clip) => clip.favorite) ? "Favorite" : "Unfavorite"}
+          </button>
+          <button type="button" disabled={batchPending} onClick={() => void setSelectedPinned(batchBooleanTarget(selectedClips, (clip) => clip.pinned))}>
+            {batchBooleanTarget(selectedClips, (clip) => clip.pinned) ? "Protect" : "Unprotect"}
+          </button>
+          <details className="clips-batch-menu">
+            <summary aria-disabled={batchPending}>More</summary>
+            <div>
+              <button type="button" disabled={batchPending} onClick={() => void setSelectedFavorite(true)}>Favorite selected</button>
+              <button type="button" disabled={batchPending} onClick={() => void setSelectedFavorite(false)}>Unfavorite selected</button>
+              <button type="button" disabled={batchPending} onClick={() => void setSelectedPinned(true)}>Protect selected</button>
+              <button type="button" disabled={batchPending} onClick={() => void setSelectedPinned(false)}>Remove protection</button>
+              <button className="danger" type="button" disabled={batchPending} onClick={() => void deleteSelectedClips()}>Delete selected</button>
+            </div>
+          </details>
+          <button className="clips-batch-clear" type="button" disabled={batchPending} onClick={() => setSelection(emptyClipSelection())}>Clear</button>
+        </div>
+      </div>}
       {error && <div className="clips-library-error" role="alert"><span>{error}</span><button type="button" onClick={refreshLibrary}>Retry</button></div>}
       {refreshResult && <div className="clips-refresh-result" role="status">Scanned {refreshResult.scannedFiles} • unchanged {refreshResult.unchanged} • added {refreshResult.added} • updated {refreshResult.updated} • removed {refreshResult.removed} • failed {refreshResult.failed} • {refreshResult.durationMs.toFixed(1)} ms</div>}
       {loading ? <LibraryState title="Loading clips..." detail="Reading the local Clips database." /> : clips.length === 0 && !error ? <LibraryState title="No matching clips" detail="Try another view, collection, or search." /> : <div className={`clips-library-grid grid-${preferences.clipsGridSize}`}>
-        {clips.map((clip) => <article className="clip-card" key={clip.id}><ClipThumbnail clip={clip} onPlay={() => setPlayingClip(clip)} /><div className="clip-card-body">
+        {clips.map((clip) => {
+          const selected = selection.selectedIds.has(clip.id);
+          return <article
+            className={`clip-card${selected ? " selected" : ""}`}
+            key={clip.id}
+            tabIndex={0}
+            aria-label={`${clip.displayName}${selected ? ", selected" : ""}`}
+            onClick={(event) => handleCardSelection(event, clip.id)}
+            onKeyDown={(event) => handleCardSelectionKey(event, clip.id)}
+          >
+          <button
+            className="clip-selection-toggle"
+            type="button"
+            aria-pressed={selected}
+            aria-label={selected ? `Remove ${clip.displayName} from selection` : `Add ${clip.displayName} to selection`}
+            onClick={(event) => {
+              event.stopPropagation();
+              setSelection((current) => selectClip(current, visibleClipIds, clip.id, { toggle: true }));
+            }}
+          ><span aria-hidden="true">{selected ? "✓" : ""}</span></button>
+          <ClipThumbnail clip={clip} onPlay={() => setPlayingClip(clip)} /><div className="clip-card-body">
           <div className="clip-card-heading">
             <div>
               <button className="clip-title-button" type="button" onClick={() => setPlayingClip(clip)}>{clip.displayName}</button>
@@ -393,7 +602,8 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
               onClick={(event) => toggleMoreMenu(clip, event.currentTarget)}
             ><span aria-hidden="true">•••</span> More</button>
           </div>
-        </div></article>)}
+        </div></article>;
+        })}
       </div>}
       <footer className="clips-library-footer"><span>{totalCount} matching clip{totalCount === 1 ? "" : "s"}</span>{telemetry && <details><summary>Library diagnostics</summary><code>Schema v{telemetry.schemaVersion} • query {telemetry.lastListQueryDurationMs?.toFixed(2) ?? "n/a"} ms</code><code>{telemetry.databasePath}</code><code>Newest Save indexed {telemetry.newestSavedClipIndexed === null ? "n/a" : telemetry.newestSavedClipIndexed ? "yes" : "no"} • {telemetry.newestSavedClipInsertionMs?.toFixed(2) ?? "n/a"} ms</code></details>}</footer>
     </section>
@@ -441,4 +651,9 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
 
 function LibraryState({ title, detail }: { title: string; detail: string }) {
   return <div className="empty-state"><div className="empty-state-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m10 9 5 3-5 3Z" /></svg></div><h2>{title}</h2><p>{detail}</p></div>;
+}
+
+function isInteractiveTarget(target: EventTarget | null) {
+  return target instanceof Element
+    && Boolean(target.closest("button, a, input, select, textarea, summary, [role='menuitem']"));
 }

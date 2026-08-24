@@ -187,6 +187,7 @@ pub fn run() {
             library::open_clip_file,
             library::open_clip_folder,
             library::delete_clip,
+            library::delete_clips,
             library::clipboard::copy_clip_to_clipboard,
             library::get_clip_playback_info,
             library::request_clip_thumbnail,

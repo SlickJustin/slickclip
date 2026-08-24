@@ -9,6 +9,7 @@ mod repository;
 mod safety;
 mod storage;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -20,13 +21,14 @@ use uuid::Uuid;
 
 pub use export::EditorExportManager;
 pub use models::{
-    ClipActionResponse, ClipAudioTrack, ClipIdRequest, ClipListRequest, ClipListResponse,
-    ClipMutationResponse, ClipPlaybackInfo, ClipPlaybackInfoResponse, CollectionIdRequest,
-    CollectionMutationResponse, CollectionsResponse, CreateCollectionRequest, LibraryTelemetry,
-    PrepareClipAudioRequest, PrepareClipMediaRequest, PrepareClipMediaResponse, ReconcileResponse,
-    RenameClipRequest, RenameCollectionRequest, SetClipCollectionRequest, SetFavoriteRequest,
-    SetPinnedRequest, StorageCleanupExecuteRequest, StorageCleanupExecutionResponse,
-    StorageCleanupPreviewRequest, StorageCleanupPreviewResponse,
+    BatchDeleteClipTarget, BatchDeleteClipsRequest, BatchDeleteClipsResponse, ClipActionResponse,
+    ClipAudioTrack, ClipIdRequest, ClipListRequest, ClipListResponse, ClipMutationResponse,
+    ClipPlaybackInfo, ClipPlaybackInfoResponse, CollectionIdRequest, CollectionMutationResponse,
+    CollectionsResponse, CreateCollectionRequest, LibraryTelemetry, PrepareClipAudioRequest,
+    PrepareClipMediaRequest, PrepareClipMediaResponse, ReconcileResponse, RenameClipRequest,
+    RenameCollectionRequest, SetClipCollectionRequest, SetFavoriteRequest, SetPinnedRequest,
+    StorageCleanupExecuteRequest, StorageCleanupExecutionResponse, StorageCleanupPreviewRequest,
+    StorageCleanupPreviewResponse,
 };
 
 use database::LibraryDatabase;
@@ -696,6 +698,138 @@ impl ClipLibraryManager {
         action_result(self.delete_internal(clip_id, false))
     }
 
+    fn delete_batch(&self, request: BatchDeleteClipsRequest) -> BatchDeleteClipsResponse {
+        let requested_count = request.targets.len() as u64;
+        let _cleanup_guard = self
+            .cleanup_execution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *self
+            .pending_cleanup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+
+        let preflight = (|| {
+            if request.targets.is_empty() {
+                return Err("Select at least one clip to delete.".to_string());
+            }
+            if request.targets.len() > 200 {
+                return Err("A batch may delete at most 200 visible clips at once.".to_string());
+            }
+            let mut ids = HashSet::with_capacity(request.targets.len());
+            for target in &request.targets {
+                if !ids.insert(target.clip_id.as_str()) {
+                    return Err(format!(
+                        "The batch contains duplicate clip ID '{}'. Nothing was deleted.",
+                        target.clip_id
+                    ));
+                }
+                self.validate_batch_delete_target(target)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = preflight {
+            return batch_delete_error(requested_count, 0, error);
+        }
+
+        let mut deleted_count = 0;
+        for target in request.targets {
+            let (clip, path) = match self.validate_batch_delete_target(&target) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    self.refresh_indexed_count();
+                    return batch_delete_error(requested_count, deleted_count, error);
+                }
+            };
+            if let Err(error) = std::fs::remove_file(&path) {
+                self.refresh_indexed_count();
+                return batch_delete_error(
+                    requested_count,
+                    deleted_count,
+                    format!(
+                        "Could not permanently delete clip '{}': {error}",
+                        path.display()
+                    ),
+                );
+            }
+            deleted_count += 1;
+            let database = match self.database() {
+                Ok(database) => database,
+                Err(error) => {
+                    self.refresh_indexed_count();
+                    return batch_delete_error(
+                        requested_count,
+                        deleted_count,
+                        format!(
+                            "The MP4 for '{}' was deleted, but its database row could not be removed: {error}. Refresh Clips to reconcile it.",
+                            clip.display_name
+                        ),
+                    );
+                }
+            };
+            let row_result = database
+                .open()
+                .and_then(|mut connection| delete_clip_row(&mut connection, &target.clip_id));
+            if let Err(error) = row_result {
+                self.refresh_indexed_count();
+                return batch_delete_error(
+                    requested_count,
+                    deleted_count,
+                    format!(
+                        "The MP4 for '{}' was deleted, but its database row could not be removed: {error}. Refresh Clips to reconcile it.",
+                        clip.display_name
+                    ),
+                );
+            }
+            let _ = self.media_cache.cleanup_clip(&target.clip_id);
+        }
+        self.refresh_indexed_count();
+        BatchDeleteClipsResponse {
+            success: true,
+            requested_count,
+            deleted_count,
+            error_message: None,
+        }
+    }
+
+    fn validate_batch_delete_target(
+        &self,
+        target: &BatchDeleteClipTarget,
+    ) -> Result<(ClipListItem, PathBuf), String> {
+        let (clip, path) = self.resolved_clip(&target.clip_id)?;
+        if clip.file_size_bytes != target.file_size_bytes
+            || clip.file_modified_at_ms != target.file_modified_at_ms
+        {
+            return Err(format!(
+                "Clip '{}' changed in the Library after it was selected. Nothing else was deleted.",
+                clip.display_name
+            ));
+        }
+        let metadata = std::fs::metadata(&path).map_err(|error| {
+            format!(
+                "Could not verify selected clip '{}': {error}. Nothing else was deleted.",
+                clip.display_name
+            )
+        })?;
+        let modified_at_ms = metadata
+            .modified()
+            .map(system_time_ms)
+            .map_err(|error| {
+                format!(
+                    "Could not verify when selected clip '{}' changed: {error}. Nothing else was deleted.",
+                    clip.display_name
+                )
+            })?;
+        if metadata.len() != target.file_size_bytes || modified_at_ms != target.file_modified_at_ms
+        {
+            return Err(format!(
+                "Clip '{}' changed on disk after it was selected. Nothing else was deleted.",
+                clip.display_name
+            ));
+        }
+        Ok((clip, path))
+    }
+
     fn delete_internal(&self, clip_id: &str, require_unprotected: bool) -> Result<(), String> {
         let (clip, path) = self.resolved_clip(clip_id)?;
         if require_unprotected && clip.pinned {
@@ -830,6 +964,19 @@ fn action_result(result: Result<(), String>) -> ClipActionResponse {
             success: false,
             error_message: Some(error),
         },
+    }
+}
+
+fn batch_delete_error(
+    requested_count: u64,
+    deleted_count: u64,
+    error: impl Into<String>,
+) -> BatchDeleteClipsResponse {
+    BatchDeleteClipsResponse {
+        success: false,
+        requested_count,
+        deleted_count,
+        error_message: Some(error.into()),
     }
 }
 
@@ -1036,6 +1183,17 @@ pub async fn delete_clip(
 }
 
 #[tauri::command]
+pub async fn delete_clips(
+    manager: State<'_, ClipLibraryManager>,
+    request: BatchDeleteClipsRequest,
+) -> Result<BatchDeleteClipsResponse, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.delete_batch(request))
+        .await
+        .map_err(|error| format!("The batch clip deletion worker failed: {error}"))
+}
+
+#[tauri::command]
 pub async fn get_clip_playback_info(
     manager: State<'_, ClipLibraryManager>,
     request: ClipIdRequest,
@@ -1118,6 +1276,15 @@ mod tests {
             capture_target_label: None,
             capture_target_type: None,
             audio_tracks: Vec::new(),
+        }
+    }
+
+    fn batch_target(manager: &ClipLibraryManager, clip_id: &str) -> BatchDeleteClipTarget {
+        let clip = manager.clip_by_id(clip_id).unwrap().unwrap();
+        BatchDeleteClipTarget {
+            clip_id: clip.id,
+            file_size_bytes: clip.file_size_bytes,
+            file_modified_at_ms: clip.file_modified_at_ms,
         }
     }
 
@@ -1209,6 +1376,177 @@ mod tests {
             count_clips(&manager.database().unwrap().open().unwrap()).unwrap(),
             0
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_delete_removes_preflighted_owned_mp4s_and_database_rows() {
+        let root = std::env::temp_dir().join(format!("clips-batch-delete-{}", Uuid::new_v4()));
+        let clips = root.join("Clips");
+        fs::create_dir_all(&clips).unwrap();
+        let first = clips.join("first.mp4");
+        let second = clips.join("second.mp4");
+        fs::write(&first, b"first clip").unwrap();
+        fs::write(&second, b"second clip").unwrap();
+        let manager = ClipLibraryManager::initialize(root.join("clips.db"), clips);
+        let first_id = manager
+            .index_saved_clip(saved_metadata(first.clone(), 1))
+            .unwrap()
+            .clip_id;
+        let second_id = manager
+            .index_saved_clip(saved_metadata(second.clone(), 2))
+            .unwrap()
+            .clip_id;
+
+        let response = manager.delete_batch(BatchDeleteClipsRequest {
+            targets: vec![
+                batch_target(&manager, &first_id),
+                batch_target(&manager, &second_id),
+            ],
+        });
+
+        assert!(response.success, "{:?}", response.error_message);
+        assert_eq!(response.requested_count, 2);
+        assert_eq!(response.deleted_count, 2);
+        assert!(!first.exists());
+        assert!(!second.exists());
+        assert_eq!(
+            count_clips(&manager.database().unwrap().open().unwrap()).unwrap(),
+            0
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_delete_changed_file_aborts_entire_preflight_without_deleting_anything() {
+        let root = std::env::temp_dir().join(format!("clips-batch-changed-{}", Uuid::new_v4()));
+        let clips = root.join("Clips");
+        fs::create_dir_all(&clips).unwrap();
+        let unchanged = clips.join("unchanged.mp4");
+        let changed = clips.join("changed.mp4");
+        fs::write(&unchanged, b"unchanged").unwrap();
+        fs::write(&changed, b"original").unwrap();
+        let manager = ClipLibraryManager::initialize(root.join("clips.db"), clips);
+        let unchanged_id = manager
+            .index_saved_clip(saved_metadata(unchanged.clone(), 1))
+            .unwrap()
+            .clip_id;
+        let changed_id = manager
+            .index_saved_clip(saved_metadata(changed.clone(), 2))
+            .unwrap()
+            .clip_id;
+        let targets = vec![
+            batch_target(&manager, &unchanged_id),
+            batch_target(&manager, &changed_id),
+        ];
+        fs::write(&changed, b"changed after selection").unwrap();
+
+        let response = manager.delete_batch(BatchDeleteClipsRequest { targets });
+
+        assert!(!response.success);
+        assert_eq!(response.deleted_count, 0);
+        assert!(response.error_message.unwrap().contains("changed on disk"));
+        assert!(unchanged.exists());
+        assert!(changed.exists());
+        assert_eq!(
+            count_clips(&manager.database().unwrap().open().unwrap()).unwrap(),
+            2
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_delete_missing_clip_id_aborts_before_deleting_valid_clip() {
+        let root = std::env::temp_dir().join(format!("clips-batch-missing-{}", Uuid::new_v4()));
+        let clips = root.join("Clips");
+        fs::create_dir_all(&clips).unwrap();
+        let owned = clips.join("owned.mp4");
+        fs::write(&owned, b"owned").unwrap();
+        let manager = ClipLibraryManager::initialize(root.join("clips.db"), clips);
+        let owned_id = manager
+            .index_saved_clip(saved_metadata(owned.clone(), 1))
+            .unwrap()
+            .clip_id;
+
+        let response = manager.delete_batch(BatchDeleteClipsRequest {
+            targets: vec![
+                batch_target(&manager, &owned_id),
+                BatchDeleteClipTarget {
+                    clip_id: "missing".into(),
+                    file_size_bytes: 0,
+                    file_modified_at_ms: 0,
+                },
+            ],
+        });
+
+        assert!(!response.success);
+        assert_eq!(response.deleted_count, 0);
+        assert!(owned.exists());
+        assert!(manager.clip_by_id(&owned_id).unwrap().is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_delete_rejects_database_path_outside_owned_clips() {
+        let root = std::env::temp_dir().join(format!("clips-batch-path-{}", Uuid::new_v4()));
+        let clips = root.join("Clips");
+        fs::create_dir_all(&clips).unwrap();
+        let owned = clips.join("owned.mp4");
+        let outside = root.join("outside.mp4");
+        fs::write(&owned, b"owned").unwrap();
+        fs::write(&outside, b"outside").unwrap();
+        let manager = ClipLibraryManager::initialize(root.join("clips.db"), clips);
+        let owned_id = manager
+            .index_saved_clip(saved_metadata(owned.clone(), 1))
+            .unwrap()
+            .clip_id;
+        let target = batch_target(&manager, &owned_id);
+        let connection = manager.database().unwrap().open().unwrap();
+        connection
+            .execute(
+                "UPDATE clips SET file_path = ?1 WHERE id = ?2",
+                rusqlite::params![outside.to_string_lossy(), owned_id],
+            )
+            .unwrap();
+        drop(connection);
+
+        let response = manager.delete_batch(BatchDeleteClipsRequest {
+            targets: vec![target],
+        });
+
+        assert!(!response.success);
+        assert_eq!(response.deleted_count, 0);
+        assert!(response.error_message.unwrap().contains("outside"));
+        assert!(outside.exists());
+        assert!(owned.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_delete_rejects_duplicate_ids_before_deleting() {
+        let root = std::env::temp_dir().join(format!("clips-batch-duplicate-{}", Uuid::new_v4()));
+        let clips = root.join("Clips");
+        fs::create_dir_all(&clips).unwrap();
+        let owned = clips.join("owned.mp4");
+        fs::write(&owned, b"owned").unwrap();
+        let manager = ClipLibraryManager::initialize(root.join("clips.db"), clips);
+        let owned_id = manager
+            .index_saved_clip(saved_metadata(owned.clone(), 1))
+            .unwrap()
+            .clip_id;
+        let target = batch_target(&manager, &owned_id);
+
+        let response = manager.delete_batch(BatchDeleteClipsRequest {
+            targets: vec![target.clone(), target],
+        });
+
+        assert!(!response.success);
+        assert_eq!(response.deleted_count, 0);
+        assert!(response
+            .error_message
+            .unwrap()
+            .contains("duplicate clip ID"));
+        assert!(owned.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

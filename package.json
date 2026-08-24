@@ -9,7 +9,7 @@
     "prepare:ffmpeg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-ffmpeg.ps1",
     "bundle": "npm run prepare:ffmpeg && tauri build --bundles nsis",
     "bundle:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
-    "test": "node --test tests/playerControls.test.ts tests/editorSession.test.ts tests/editorMixer.test.ts tests/editorExport.test.ts tests/watchProgress.test.ts tests/libraryPreferences.test.ts tests/replayRoulette.test.ts tests/hotkeyShortcut.test.ts",
+    "test": "node --test tests/playerControls.test.ts tests/editorSession.test.ts tests/editorMixer.test.ts tests/editorExport.test.ts tests/watchProgress.test.ts tests/libraryPreferences.test.ts tests/replayRoulette.test.ts tests/hotkeyShortcut.test.ts tests/clipSelection.test.ts",
     "preview": "vite preview",
     "tauri": "tauri"
   },

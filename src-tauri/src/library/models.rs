@@ -182,6 +182,29 @@ pub struct ClipIdRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BatchDeleteClipTarget {
+    pub clip_id: String,
+    pub file_size_bytes: u64,
+    pub file_modified_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchDeleteClipsRequest {
+    pub targets: Vec<BatchDeleteClipTarget>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchDeleteClipsResponse {
+    pub success: bool,
+    pub requested_count: u64,
+    pub deleted_count: u64,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SetFavoriteRequest {
     pub clip_id: String,
     pub favorite: bool,
