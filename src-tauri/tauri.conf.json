@@ -14,6 +14,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "SlickClip",
         "width": 1200,
         "height": 760,
@@ -24,6 +25,7 @@
       },
       {
         "label": "splash",
+        "create": false,
         "title": "SlickClip",
         "url": "splash.html",
         "width": 520,
@@ -38,6 +40,7 @@
       },
       {
         "label": "save-overlay",
+        "create": false,
         "title": "Replay Saved",
         "url": "save-overlay.html",
         "width": 340,

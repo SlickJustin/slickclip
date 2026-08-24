@@ -84,11 +84,6 @@ pub fn run() {
         )
         .setup(|app| {
             let background_launch = std::env::args().any(|argument| argument == "--background");
-            if background_launch {
-                if let Some(splash) = app.get_webview_window("splash") {
-                    let _ = splash.hide();
-                }
-            }
             let app_data = app.path().app_local_data_dir()?;
             let videos_directory = app.path().video_dir()?;
             let legacy_app_data = app_data
@@ -163,6 +158,8 @@ pub fn run() {
                     let _ = fallback.reveal(&fallback_app);
                 })?;
             app.manage(startup);
+            assert_required_managed_state(app.handle()).map_err(std::io::Error::other)?;
+            create_configured_windows(app, background_launch)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -269,6 +266,66 @@ pub fn run() {
     });
 }
 
+fn assert_required_managed_state(app: &tauri::AppHandle) -> Result<(), String> {
+    let mut missing = Vec::new();
+    require_managed::<replay::ReplayBufferManager>(app, "ReplayBufferManager", &mut missing);
+    require_managed::<clips::ClipSaveManager>(app, "ClipSaveManager", &mut missing);
+    require_managed::<library::ClipLibraryManager>(app, "ClipLibraryManager", &mut missing);
+    require_managed::<library::EditorExportManager>(app, "EditorExportManager", &mut missing);
+    require_managed::<preferences::UiPreferencesManager>(app, "UiPreferencesManager", &mut missing);
+    require_managed::<hotkey::SaveReplayHotkeyManager>(
+        app,
+        "SaveReplayHotkeyManager",
+        &mut missing,
+    );
+    require_managed::<game_detection::GameDetectionManager>(
+        app,
+        "GameDetectionManager",
+        &mut missing,
+    );
+    require_managed::<audio::AudioCaptureTestManager>(app, "AudioCaptureTestManager", &mut missing);
+    require_managed::<watch_party::WatchPartyManager>(app, "WatchPartyManager", &mut missing);
+    require_managed::<desktop::DesktopIntegration>(app, "DesktopIntegration", &mut missing);
+    require_managed::<updater::UpdateManager>(app, "UpdateManager", &mut missing);
+    require_managed::<StartupCoordinator>(app, "StartupCoordinator", &mut missing);
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "SlickClip initialization did not manage required state: {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+fn require_managed<T: Send + Sync + 'static>(
+    app: &tauri::AppHandle,
+    name: &'static str,
+    missing: &mut Vec<&'static str>,
+) {
+    if app.try_state::<T>().is_none() {
+        missing.push(name);
+    }
+}
+
+fn create_configured_windows(app: &mut tauri::App, background_launch: bool) -> tauri::Result<()> {
+    let windows = app.config().app.windows.clone();
+    for window in windows {
+        if window.create {
+            return Err(tauri::Error::Io(std::io::Error::other(format!(
+                "Configured window '{}' must set create=false so managed state is initialized before its webview loads.",
+                window.label
+            ))));
+        }
+        if background_launch && window.label == "splash" {
+            continue;
+        }
+        tauri::WebviewWindowBuilder::from_config(app.handle(), &window)?.build()?;
+    }
+    Ok(())
+}
+
 pub(crate) fn prepare_for_exit(app_handle: &tauri::AppHandle) {
     if let Some(integration) = app_handle.try_state::<desktop::DesktopIntegration>() {
         integration.begin_exit();
@@ -294,4 +351,26 @@ pub(crate) fn prepare_for_exit(app_handle: &tauri::AppHandle) {
     app_handle
         .state::<replay::ReplayBufferManager>()
         .shutdown_and_cleanup();
+}
+
+#[cfg(test)]
+mod initialization_tests {
+    use serde_json::Value;
+
+    #[test]
+    fn every_configured_webview_is_deferred_until_setup_finishes() {
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let windows = config["app"]["windows"].as_array().unwrap();
+        assert_eq!(windows.len(), 3);
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window["label"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["main", "splash", "save-overlay"]
+        );
+        assert!(windows
+            .iter()
+            .all(|window| window["create"].as_bool() == Some(false)));
+    }
 }
