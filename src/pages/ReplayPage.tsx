@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { InfoTip } from "../components/InfoTip";
 import { Toggle } from "../components/Toggle";
+import type { UiPreferencesResponse } from "../types/clips";
+import { defaultUiPreferences } from "../types/clips";
+import { formatReplayWindow, replayHotkeyGuidance, saveLastLabel } from "../utils/replayGuidance";
 
 type CaptureTestResult = {
   success: boolean;
@@ -473,6 +477,7 @@ const initialSaveReplayStatus: SaveReplayStatus = {
 
 export function ReplayPage() {
   const [replayDuration, setReplayDuration] = useState(120);
+  const [saveReplayHotkey, setSaveReplayHotkey] = useState(defaultUiPreferences.saveReplayHotkey);
   const [frameRate, setFrameRate] = useState(60);
   const [replayEncoder, setReplayEncoder] = useState<Exclude<EncoderId, "av1">>("automatic");
   const [replayStatus, setReplayStatus] = useState<ReplayBufferStatus>(initialReplayStatus);
@@ -513,6 +518,7 @@ export function ReplayPage() {
     void refreshReplayStatus();
     void refreshSaveReplayStatus();
     void refreshAudioSources();
+    void refreshPreferences();
   }, []);
 
   useEffect(() => {
@@ -588,6 +594,15 @@ export function ReplayPage() {
       }
     } catch (error) {
       setSaveReplayCommandError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function refreshPreferences() {
+    try {
+      const response = await invoke<UiPreferencesResponse>("get_ui_preferences");
+      if (response.success) setSaveReplayHotkey(response.preferences.saveReplayHotkey);
+    } catch {
+      // Keep the known-safe default if preferences cannot be read during startup.
     }
   }
 
@@ -854,6 +869,7 @@ export function ReplayPage() {
     (!microphoneEnabled || microphoneId !== "") &&
     (!gameEnabled || !voiceEnabled || gameProcessId !== voiceProcessId);
   const selectedTargetLabel = getSelectedTargetLabel(selectedTarget, monitors, windows);
+  const replayWindowSeconds = replayStatus.replayDurationSeconds || replayDuration;
 
   return (
     <div className="page page-replay">
@@ -963,50 +979,6 @@ export function ReplayPage() {
         </div>
       </details>
 
-      <section className="status-card" aria-labelledby="buffer-heading">
-        <div className="status-card-copy">
-          <span className="status-label">Capture status</span>
-          <h2 id="buffer-heading">Replay Buffer</h2>
-          <div className={`replay-state replay-state-${replayStatus.state}`}>
-            <span className="status-dot" aria-hidden="true" />
-            {formatReplayState(replayStatus.state)}
-          </div>
-          <div className="replay-status-summary">
-            <span>Target <strong>{replayStatus.targetLabel ?? selectedTargetLabel ?? "Not selected"}</strong></span>
-            <span>Encoder <strong>{replayStatus.actualEncoder ?? "—"}</strong></span>
-            <span>Window <strong>{formatDuration(replayStatus.replayDurationSeconds || replayDuration)}</strong></span>
-            <span>Retained <strong>{replayStatus.retainedDurationSeconds.toFixed(1)} s</strong></span>
-            <span>Segments <strong>{replayStatus.completedSegmentCount}</strong></span>
-            <span>Buffer <strong>{formatBytes(replayStatus.retainedBytes)}</strong></span>
-          </div>
-          {(replayCommandError || replayStatus.errorMessage) && (
-            <p className="replay-buffer-error" role="alert">
-              {replayCommandError ?? replayStatus.errorMessage}
-            </p>
-          )}
-        </div>
-        <button
-          className={`primary-button buffer-button${replayActive ? " stop-button" : ""}`}
-          type="button"
-          aria-pressed={replayActive}
-          disabled={
-            replayCommandActive ||
-            baselineActive ||
-            replayStatus.state === "stopping" ||
-            (!replayActive && (!selectedTarget || encodersLoading || !replayEncoderAvailable || !audioConfigurationValid))
-          }
-          onClick={replayActive ? stopReplayBuffer : startReplayBuffer}
-        >
-          {replayStatus.state === "starting"
-            ? "Starting..."
-            : replayStatus.state === "stopping"
-              ? "Stopping..."
-              : replayActive
-                ? "Stop Replay Buffer"
-                : "Start Replay Buffer"}
-        </button>
-      </section>
-
       <div className="replay-grid">
         <div className="replay-config-stack">
           <section className="panel" aria-labelledby="capture-heading">
@@ -1078,9 +1050,13 @@ export function ReplayPage() {
               <option value={60}>60 FPS</option>
             </select>
           </label>
-          <label className="setting-row">
-            <span className="setting-label">Encoder</span>
+          <div className="setting-row">
+            <span className="setting-label setting-label-with-help">
+              <label htmlFor="replay-encoder">Encoder</label>
+              <InfoTip label="About video encoders">Controls how SlickClip compresses video. Automatic is recommended.</InfoTip>
+            </span>
             <select
+              id="replay-encoder"
               value={replayEncoder}
               disabled={replayActive || encodersLoading}
               onChange={(event) => setReplayEncoder(event.target.value as Exclude<EncoderId, "av1">)}
@@ -1089,7 +1065,7 @@ export function ReplayPage() {
               <option value="hevc" disabled={!isEncoderAvailable(encoderCapabilities, "hevc")}>HEVC</option>
               <option value="h264" disabled={!isEncoderAvailable(encoderCapabilities, "h264")}>H.264</option>
             </select>
-          </label>
+          </div>
           <p className="capture-config-note">
             Video remains at the target's native dimensions. Enabled audio sources are retained as independent rolling WAV tracks.
           </p>
@@ -1103,19 +1079,19 @@ export function ReplayPage() {
             </button>
           </div>
           {audioSourcesError && <p className="replay-buffer-error">{audioSourcesError}</p>}
-          <AudioSourceRow label="Game Audio" enabled={gameEnabled} onEnabled={setGameEnabled} locked={replayActive} status={findAudioTrack(replayStatus, "game")}>
+          <AudioSourceRow label="Game Audio" help="Captures the selected game's audio as a separate adjustable track." enabled={gameEnabled} onEnabled={setGameEnabled} locked={replayActive} status={findAudioTrack(replayStatus, "game")}>
             <select value={gameProcessId} disabled={replayActive || !gameEnabled || audioSourcesLoading} onChange={(event) => setGameProcessId(event.target.value)}>
               <option value="">Select application</option>
               {audioApplications.map((app) => <option value={app.processId} key={app.processId}>{app.displayName} ({app.processName}, PID {app.processId})</option>)}
             </select>
           </AudioSourceRow>
-          <AudioSourceRow label="Voice Chat" enabled={voiceEnabled} onEnabled={setVoiceEnabled} locked={replayActive} status={findAudioTrack(replayStatus, "voiceChat")}>
+          <AudioSourceRow label="Voice Chat" help="Captures Discord or another voice-chat application separately." enabled={voiceEnabled} onEnabled={setVoiceEnabled} locked={replayActive} status={findAudioTrack(replayStatus, "voiceChat")}>
             <select value={voiceProcessId} disabled={replayActive || !voiceEnabled || audioSourcesLoading} onChange={(event) => setVoiceProcessId(event.target.value)}>
               <option value="">Select voice-chat application</option>
               {audioApplications.map((app) => <option value={app.processId} key={app.processId}>{app.displayName} ({app.processName}, PID {app.processId})</option>)}
             </select>
           </AudioSourceRow>
-          <AudioSourceRow label="Microphone" enabled={microphoneEnabled} onEnabled={setMicrophoneEnabled} locked={replayActive} status={findAudioTrack(replayStatus, "microphone")}>
+          <AudioSourceRow label="Microphone" help="Captures your microphone as a separate adjustable track." enabled={microphoneEnabled} onEnabled={setMicrophoneEnabled} locked={replayActive} status={findAudioTrack(replayStatus, "microphone")}>
             <select value={microphoneId} disabled={replayActive || !microphoneEnabled || audioSourcesLoading} onChange={(event) => setMicrophoneId(event.target.value)}>
               <option value="">Select microphone</option>
               {microphones.map((mic) => <option value={mic.id} key={mic.id}>{mic.friendlyName}{mic.isDefaultCommunications ? " (Default communications)" : ""}</option>)}
@@ -1127,6 +1103,77 @@ export function ReplayPage() {
         </div>
 
         <div className="replay-side-stack">
+          <section className="status-card" aria-labelledby="buffer-heading">
+            <div className="status-card-copy">
+              <span className="status-label">Capture status</span>
+              <div className="concept-heading">
+                <h2 id="buffer-heading">Replay Buffer</h2>
+                <InfoTip label="About Replay Buffer">Keeps the most recent part of your gameplay temporarily available. Nothing is permanently saved until you use Save Replay.</InfoTip>
+              </div>
+              <div className={`replay-state replay-state-${replayStatus.state}`}>
+                <span className="status-dot" aria-hidden="true" />
+                {replayStatus.state === "running"
+                  ? saveReplayAvailable ? "Ready" : "Preparing replay history"
+                  : formatReplayState(replayStatus.state)}
+              </div>
+              {replayStatus.state === "running" && (
+                <div className="replay-running-guidance" role="status">
+                  <strong>Keeping the last {formatReplayWindow(replayWindowSeconds)}</strong>
+                  <span>{replayHotkeyGuidance(saveReplayHotkey, replayWindowSeconds)}</span>
+                </div>
+              )}
+              <div className="replay-status-summary">
+                <span>Target <strong>{replayStatus.targetLabel ?? selectedTargetLabel ?? "Not selected"}</strong></span>
+                <span>Encoder <strong>{replayStatus.actualEncoder ?? "—"}</strong></span>
+                <span>Window <strong>{formatDuration(replayWindowSeconds)}</strong></span>
+                <span>Retained <strong>{replayStatus.retainedDurationSeconds.toFixed(1)} s</strong></span>
+                <span>Segments <strong>{replayStatus.completedSegmentCount}</strong></span>
+                <span>Buffer <strong>{formatBytes(replayStatus.retainedBytes)}</strong></span>
+              </div>
+              {(replayCommandError || replayStatus.errorMessage) && (
+                <p className="replay-buffer-error" role="alert">
+                  {replayCommandError ?? replayStatus.errorMessage}
+                </p>
+              )}
+            </div>
+            <div className="replay-buffer-actions">
+              {replayStatus.state === "running" && (
+                <button
+                  className="primary-button buffer-button"
+                  type="button"
+                  disabled={!saveReplayAvailable}
+                  title={saveReplayAvailable ? undefined : saveReplayDisabledReason(replayStatus, saveReplayStatus)}
+                  onClick={saveReplay}
+                >
+                  {saveLastLabel(replayWindowSeconds)}
+                </button>
+              )}
+              <button
+                className={`primary-button buffer-button${replayActive ? " stop-button" : ""}`}
+                type="button"
+                aria-pressed={replayActive}
+                disabled={
+                  replayCommandActive ||
+                  baselineActive ||
+                  replayStatus.state === "stopping" ||
+                  (!replayActive && (!selectedTarget || encodersLoading || !replayEncoderAvailable || !audioConfigurationValid))
+                }
+                onClick={replayActive ? stopReplayBuffer : startReplayBuffer}
+              >
+                {replayStatus.state === "starting"
+                  ? "Starting..."
+                  : replayStatus.state === "stopping"
+                    ? "Stopping..."
+                    : replayActive
+                      ? "Stop Replay Buffer"
+                      : "Start Replay Buffer"}
+              </button>
+              {replayStatus.state === "running" && !saveReplayAvailable && !saveJobActive && (
+                <span className="disabled-reason">{saveReplayDisabledReason(replayStatus, saveReplayStatus)}</span>
+              )}
+            </div>
+          </section>
+
           <details className="panel replay-diagnostics" aria-labelledby="diagnostics-heading">
             <summary>
               <span><strong id="diagnostics-heading">Capture diagnostics</strong></span>
@@ -1270,13 +1317,7 @@ export function ReplayPage() {
             </div>
           </details>
 
-          <section className="panel save-panel" aria-labelledby="save-heading">
-            <div className="section-heading">
-              <div>
-                <h2 id="save-heading">Save Replay</h2>
-                <p className="section-description">Create a permanent clip from the latest retained window.</p>
-              </div>
-            </div>
+          {(saveReplayStatus.state !== "idle" || saveReplayCommandError) && <section className="save-replay-activity" aria-label="Save Replay activity">
             <div
               className={`save-replay-status save-replay-status-${saveReplayStatus.state}`}
               role="status"
@@ -1418,19 +1459,7 @@ export function ReplayPage() {
                   </small>
                 )}
             </div>
-            <button
-              className="save-replay-button"
-              type="button"
-              disabled={!saveReplayAvailable}
-              title={saveReplayAvailable ? undefined : saveReplayDisabledReason(replayStatus, saveReplayStatus)}
-              onClick={saveReplay}
-            >
-              Save Replay
-            </button>
-            {!saveReplayAvailable && !saveJobActive && saveReplayStatus.state !== "completed" && (
-              <span className="disabled-reason">{saveReplayDisabledReason(replayStatus, saveReplayStatus)}</span>
-            )}
-          </section>
+          </section>}
         </div>
       </div>
     </div>
@@ -1618,10 +1647,10 @@ function formatAudioFormat(format: AudioFormat | null) {
   return `${format.sampleRate / 1_000} kHz ${channels} ${format.sampleFormat}`;
 }
 
-function AudioSourceRow({ label, enabled, onEnabled, locked, status, children }: { label: string; enabled: boolean; onEnabled: (value: boolean) => void; locked: boolean; status: AudioTrackStatus | null; children: React.ReactNode }) {
+function AudioSourceRow({ label, help, enabled, onEnabled, locked, status, children }: { label: string; help: string; enabled: boolean; onEnabled: (value: boolean) => void; locked: boolean; status: AudioTrackStatus | null; children: React.ReactNode }) {
   return (
     <div className="replay-audio-source">
-      <div className="replay-audio-source-heading"><div><strong>{label}</strong>{status && <small>{status.state}: {status.sourceLabel ?? "source pending"}</small>}</div><Toggle label={`Enable ${label}`} checked={enabled} onChange={onEnabled} disabled={locked} /></div>
+      <div className="replay-audio-source-heading"><div><span className="concept-heading"><strong>{label}</strong><InfoTip label={`About ${label}`}>{help}</InfoTip></span>{status && <small>{status.state}: {status.sourceLabel ?? "source pending"}</small>}</div><Toggle label={`Enable ${label}`} checked={enabled} onChange={onEnabled} disabled={locked} /></div>
       {children}
       {status?.format && <small>{formatAudioFormat(status.format)} · Retained {status.retainedDurationSeconds.toFixed(1)} s · Drops {status.droppedPackets}</small>}
       {status?.errorMessage && <small className="replay-buffer-error">{status.errorMessage}</small>}

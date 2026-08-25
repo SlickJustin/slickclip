@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { AudioCaptureTest } from "../components/AudioCaptureTest";
+import { InfoTip } from "../components/InfoTip";
 import { Toggle } from "../components/Toggle";
 import { combinationFromKeyboardEvent, isBareAlphanumericShortcut, isModifierCode, shortcutDraftFromKeyboardEvent } from "../lib/hotkeyShortcut";
 import type { StorageCleanupExecutionResponse, StorageCleanupPreviewResponse, UiPreferences, UiPreferencesPatch, UiPreferencesResponse } from "../types/clips";
@@ -462,7 +463,7 @@ export function SettingsPage() {
             <div className="path-value">Videos\SlickClip\Clips</div>
           </div>
           <div className="settings-row storage-quota-row">
-            <div><span>Library quota</span><small>Automatic cleanup removes the oldest clips not protected from cleanup first. Favorites do not receive cleanup protection automatically.</small></div>
+            <div><span className="concept-heading">Library quota <InfoTip label="About Library quota">Sets how much storage SlickClip may use before removing the oldest clips that are not protected from cleanup.</InfoTip></span><small>Automatic cleanup removes the oldest clips not protected from cleanup first. Favorites do not receive cleanup protection automatically.</small></div>
             <label className="storage-quota-input"><span className="visually-hidden">Library quota in gigabytes</span><input type="number" min="1" max="10240" step="1" value={storageQuotaInput} onChange={(event) => { setStorageQuotaInput(event.target.value); setStoragePreview(null); }} /><span>GB</span></label>
           </div>
           <div className="storage-cleanup-actions">
@@ -482,7 +483,7 @@ export function SettingsPage() {
 
         <SettingsCategory title="Game Detection" description="Conservative process approval and auto-arm controls.">
           <SettingsToggle label="Detect likely games" description="Uses install, launcher, and window evidence to suggest games. Detection alone never starts capture." checked={preferences.gameDetectionEnabled} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ gameDetectionEnabled: value, gameAutoArm: value ? preferences.gameAutoArm : false })} />
-          <SettingsToggle label="Auto-arm approved games" description="Starts only when exactly one explicitly approved game window is live; suggestions are never auto-armed." checked={preferences.gameAutoArm} disabled={desktopSettingsPending || !preferences.gameDetectionEnabled} onChange={(value) => void updateDesktopPreference({ gameAutoArm: value })} />
+          <SettingsToggle label="Auto-arm approved games" help="Automatically starts Replay when an approved game launches." description="Starts only when exactly one explicitly approved game window is live; suggestions are never auto-armed." checked={preferences.gameAutoArm} disabled={desktopSettingsPending || !preferences.gameDetectionEnabled} onChange={(value) => void updateDesktopPreference({ gameAutoArm: value })} />
           <div className="game-detection-rules">
             <div className="game-detection-heading"><div><span>Process rules</span><small>Exclusions override approvals. Executable names are matched without case or .exe.</small></div><button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={addApprovedProcess}>+ Approve Process</button></div>
             <ProcessRuleList label="Approved for auto-arm" values={preferences.gameDetectionApprovedProcesses} onRemove={(value) => removeProcessRule(value, "approved")} />
@@ -548,16 +549,17 @@ function SettingSelect({ label, value, options, onChange }: SettingSelectProps) 
 
 type SettingsToggleProps = {
   label: string;
+  help?: string;
   description?: string;
   checked: boolean;
   onChange: (checked: boolean) => void;
   disabled?: boolean;
 };
 
-function SettingsToggle({ label, description, checked, onChange, disabled = false }: SettingsToggleProps) {
+function SettingsToggle({ label, help, description, checked, onChange, disabled = false }: SettingsToggleProps) {
   return (
     <div className="settings-row">
-      <div><span>{label}</span>{description && <small>{description}</small>}</div>
+      <div><span className={help ? "concept-heading" : undefined}>{label}{help && <InfoTip label={`About ${label}`}>{help}</InfoTip>}</span>{description && <small>{description}</small>}</div>
       <Toggle label={label} checked={checked} onChange={onChange} disabled={disabled} />
     </div>
   );

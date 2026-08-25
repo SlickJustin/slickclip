@@ -2,7 +2,7 @@ import slickClipLogo from "../assets/branding/slickclip-logo.svg";
 import { featureVisibility } from "../config/features";
 import { Icon, type IconName } from "./Icon";
 
-export type PageId = "replay" | "watchParty" | "clips" | "roulette" | "editor" | "settings";
+export type PageId = "replay" | "watchParty" | "clips" | "roulette" | "editor" | "help" | "settings";
 
 type SidebarProps = {
   activePage: PageId;
@@ -60,6 +60,7 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
       </div>
 
       <div className="sidebar-utility">
+        <NavigationButton item={{ id: "help", label: "Help", icon: "help" }} activePage={activePage} onNavigate={onNavigate} />
         <NavigationButton item={{ id: "settings", label: "Settings", icon: "settings" }} activePage={activePage} onNavigate={onNavigate} />
         <div className="sidebar-footer">
           <span className="sidebar-footer-status"><i aria-hidden="true" />Local workspace</span>

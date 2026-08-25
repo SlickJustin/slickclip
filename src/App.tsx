@@ -6,6 +6,7 @@ import { TitleBar } from "./components/TitleBar";
 import { featureVisibility } from "./config/features";
 import { ClipsPage } from "./pages/ClipsPage";
 import { EditorPage } from "./pages/EditorPage";
+import { HelpPage } from "./pages/HelpPage";
 import { ReplayPage } from "./pages/ReplayPage";
 import { ReplayRoulettePage } from "./pages/ReplayRoulettePage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -85,6 +86,7 @@ function App() {
     clips: <ClipsPage onEditClip={openEditor} playClip={exportPlaybackClip} onPlayClipConsumed={() => setExportPlaybackClip(null)} onToast={showToast} />,
     roulette: <ReplayRoulettePage onToast={showToast} />,
     editor: <EditorPage clip={editorClip} onBackToClips={closeEditor} onPlayExport={playExport} onDirtyChange={setEditorDirty} onToast={showToast} />,
+    help: <HelpPage />,
     settings: <SettingsPage />,
   };
 

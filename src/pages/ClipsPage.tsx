@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ClipPlayer } from "../components/ClipPlayer";
 import { ClipThumbnail } from "../components/ClipThumbnail";
+import { InfoTip } from "../components/InfoTip";
 import type {
   BatchDeleteClipsResponse, ClipActionResponse, ClipListItem, ClipListResponse, ClipMutationResponse, ClipSortOrder,
   ClipsGridSize, ClipsView, CollectionMutationResponse, CollectionsResponse, CollectionSummary,
@@ -588,7 +589,7 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
             <span>{formatBytes(clip.fileSizeBytes)}</span>
           </div>
           {(clip.pinned || clip.playCount > 0 || clip.captureTargetLabel) && <div className="clip-card-context">
-            {clip.pinned && <span className="clip-protected-badge" title="Excluded from automatic storage cleanup; manual deletion is still allowed">Protected from Cleanup</span>}
+            {clip.pinned && <span className="clip-protected-badge">Protected from Cleanup <InfoTip label="About cleanup protection">Prevents automatic storage cleanup from deleting this clip. Manual deletion is still allowed.</InfoTip></span>}
             {clip.playCount > 0 && <span>{clip.playCount} {clip.playCount === 1 ? "play" : "plays"}</span>}
             {clip.captureTargetLabel && <span title={clip.captureTargetLabel}>{clip.captureTargetLabel}</span>}
           </div>}
