@@ -1,6 +1,6 @@
 <div align="center">
 
-# SlickClip
+![SlickClip](slickclip-hex-github-banner-v2.png)
 
 ### Built to capture all the DAWGs’ worst moments.
 
