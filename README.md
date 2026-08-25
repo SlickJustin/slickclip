@@ -4,8 +4,6 @@
   <img src="./SlickClip%20GitHub%20Banner%20v2.png" alt="SlickClip" width="100%">
 </p>
 
-### Built to capture all the DAWGs’ worst moments.
-
 SlickClip is a Windows replay and clip management app built around one simple workflow: keep Replay running, hit your hotkey when something happens, and save the moments worth keeping.
 
 **Replay Buffer · Instant Clips · Clip Library · Quick Editor · Replay Roulette**
