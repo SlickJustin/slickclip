@@ -5,17 +5,18 @@ Complete stages sequentially. Preserve completed behavior, finish each automated
 ## Current checkpoint
 
 - Stages 0–18: complete and committed.
-- Stage 19: provisional checkpoint `c62c81f`; implementation and automated validation complete, with manual visual/regression validation still pending.
-- Stage 20: provisional checkpoint `6b40cc6`; implementation and automated validation complete, with manual UI validation still pending.
-- Stage 21: provisional checkpoint `f5c14f2`; implementation and automated validation complete, with manual startup/focus/reduced-motion validation still pending.
-- Stage 22: provisional checkpoint `db7328c`; implementation and automated validation complete, with manual Windows tray/startup/focus/background-capture validation still pending.
-- Stage 23: provisional checkpoint `4c8e3ec`; implementation and automated validation complete, with manual real-game/launcher/fullscreen/false-positive validation still pending.
-- Stage 24: provisional checkpoint `bdfc167`; implementation and automated validation complete, with manual destructive-safety validation still pending.
+- Stages 19–23: implementation, automated validation, and manual product gates passed.
+- Stage 24: implementation, automated validation, and disposable-data destructive cleanup gate passed.
+- Stage 25: packaged executable, migration, installer, and end-to-end manual validation passed for private friends distribution.
+- Stage 26: updater A-to-B validation passed with preserved user data and working Update & Restart behavior. Authenticode/SmartScreen remains unresolved for private friends distribution.
+- Clips multi-select and batch actions: implemented at `9371391` and manually passed. Manual deletion intentionally overrides `Protect from Cleanup` after explicit confirmation.
+- Friends release: SlickClip 1.0.2 is the current target. Watch Party is hidden from normal navigation until its real-Windows gate passes.
+- SlickEdit: deferred/on the back burner and outside SlickClip 1.0.2.
 - Waveform: explicitly deferred; not part of this roadmap.
 
 ## Stage 19 — Professional UI/UX Polish
 
-Status: provisional automated checkpoint `c62c81f`; manual gate pending.
+Status: checkpoint `c62c81f`; automated and manual gates passed.
 
 Goals:
 
@@ -28,11 +29,11 @@ Goals:
 - Preserve all application behavior and architecture.
 - No waveform work.
 
-Required gate: manual visual and regression validation across the full application, including reduced motion and responsive layouts. Do not commit the current working-tree implementation until that gate is approved.
+Gate result: passed manual visual and regression validation across the full application, including reduced motion and responsive layouts.
 
 ## Stage 20 — Replay Roulette
 
-Status: provisional automated checkpoint `6b40cc6`; manual gate pending.
+Status: checkpoint `6b40cc6`; automated and manual gates passed.
 
 Goals:
 
@@ -42,11 +43,11 @@ Goals:
 - Open the selected clip in the existing ClipPlayer.
 - Polished, restrained roulette interaction.
 
-Required gate: automated coverage for selection logic and manual UI validation.
+Gate result: automated selection coverage and manual UI validation passed.
 
 ## Stage 21 — Animated Launch Experience
 
-Status: provisional automated checkpoint `f5c14f2`; manual gate pending.
+Status: checkpoint `f5c14f2`; automated and manual gates passed.
 
 Goals:
 
@@ -55,11 +56,11 @@ Goals:
 - Keep the main window hidden until ready and close the splash cleanly.
 - Respect reduced motion.
 
-Required gate: manual visual, focus, startup, and reduced-motion validation.
+Gate result: manual visual, focus, startup, and reduced-motion validation passed.
 
 ## Stage 22 — Tray, Background, Startup, and Save Overlay
 
-Status: provisional automated checkpoint `db7328c`; manual gate pending.
+Status: checkpoint `db7328c`; automated and manual gates passed.
 
 Goals:
 
@@ -69,11 +70,11 @@ Goals:
 - Optional start with Windows.
 - Non-focus-stealing `Replay Saved` overlay.
 
-Required gate: manual Windows tray, startup, focus, overlay, and background-capture validation.
+Gate result: manual Windows tray, startup, focus, overlay, and background-capture validation passed.
 
 ## Stage 23 — Game Detection and Auto-Arm
 
-Status: provisional automated checkpoint `4c8e3ec`; manual gate pending.
+Status: checkpoint `4c8e3ec`; automated and manual gates passed.
 
 Goals:
 
@@ -82,11 +83,11 @@ Goals:
 - Optional Replay Buffer auto-arm and ready notification.
 - Never silently capture an unintended target.
 
-Required gate: manual testing with representative real games, launchers, fullscreen modes, and false-positive scenarios.
+Gate result: manual testing with representative real games, launchers, fullscreen modes, and false-positive scenarios passed.
 
 ## Stage 24 — Storage Safety
 
-Status: provisional automated checkpoint `bdfc167`; manual gate pending.
+Status: checkpoint `bdfc167`; automated and disposable-data manual gates passed.
 
 Goals:
 
@@ -96,11 +97,11 @@ Goals:
 - Strong owned-path and regular-file safeguards.
 - Clear preview/dry-run information before destructive cleanup where practical.
 
-Required gate: automated cleanup-order/path-safety coverage and manual destructive-safety validation using disposable data.
+Gate result: automated cleanup-order/path-safety coverage and manual destructive-safety validation using disposable data passed. `Protect from Cleanup` affects automatic cleanup only; explicit manual deletion remains available.
 
 ## Stage 25 — Final SlickClip Migration and Distribution
 
-Status: provisional implementation checkpoint `cc79345`; automated validation and an unsigned NSIS 1.0.0 bundle pass, while clean-machine migration/install/regression/uninstall validation remains pending in `docs/MANUAL_VALIDATION_PENDING.md`.
+Status: checkpoint `cc79345`; automated, migration, packaged executable, installer, clean-machine regression, and uninstall-preservation validation passed for private friends distribution. Version 1.0.2 supersedes the historical 1.0.0 candidate.
 
 Goals:
 
@@ -108,13 +109,13 @@ Goals:
 - Preserve existing clips, Library database, preferences, previews, and caches.
 - Final taskbar, tray, executable, and installer branding.
 - Bundle FFmpeg so users do not install it separately.
-- Produce a standalone Windows installer for version 1.0.0.
+- Produce a standalone Windows installer for the current product version.
 
-Required gate: migration tests plus clean-machine install, launch, capture, save, playback, edit, export, and uninstall validation.
+Gate result: migration plus clean-machine install, launch, capture, save, playback, edit, export, and uninstall validation passed.
 
 ## Stage 26 — Updater and Release Candidate
 
-Status: provisional implementation checkpoint `3322c46`; signed updater plumbing and the fail-closed release workflow are implemented and automatically clean. A signed release candidate remains blocked on the user-controlled updater key, Windows code-signing identity/command, HTTPS artifact URL/feed, publishing access, and required clean-PC/manual validation. SlickClip v1.0.0 is not release-approved.
+Status: checkpoint `3322c46`; updater A-to-B behavior, install/restart, and user-data preservation passed manual validation. The 1.0.1 updater candidate is historical and must not be reused. Authenticode publisher signing and SmartScreen reputation remain unresolved, and no GitHub Release is approved by this friends-build pass.
 
 Goals:
 
@@ -124,13 +125,13 @@ Goals:
 - Clean install, upgrade, rollback/failure handling, and uninstall safety.
 - Final regression suite and release candidate.
 
-Required gate: signed clean-PC install/upgrade testing and every requirement in `RELEASE_GATE.md`.
+Gate result: functional clean-PC A-to-B upgrade validation passed. Public release still requires the Authenticode/publisher conditions in `RELEASE_GATE.md`.
 
-After Stage 26 passes, SlickClip v1.0.0 may be released.
+SlickClip 1.0.2 may be distributed privately to friends with the unsigned-publisher limitation disclosed. Public release remains separately gated.
 
 ## Stage 27 — Watch Party / Reaction Capture
 
-Status: provisional implementation checkpoint `cf82ba8`; automated validation passes, while the required real-Windows multi-hour, dynamic-participant, synchronization, source-loss, disk-pressure, recovery, playback, and Editor gate remains pending. The overnight instruction explicitly authorized this post-v1 roadmap work. Stage 27.1 has not been folded into the base implementation.
+Status: deferred and hidden from normal SlickClip 1.0.2 friends-build navigation. Checkpoint `cf82ba8` passes automated validation, but the required real-Windows multi-hour, dynamic-participant, synchronization, source-loss, disk-pressure, recovery, playback, and Editor gate remains pending. The implementation and backend architecture remain intact.
 
 Purpose: replace the user's OBS-based workflow for recording a long-form event/PPV together with Discord camera reactions.
 
@@ -176,7 +177,7 @@ Required gate:
 
 ## Stage 27.1 — Advanced Participant-Aware Reaction Layouts
 
-Status: provisional optional implementation checkpoint `f38be14`; automated detector/tracker/reflow and fallback tests pass, while real Discord UI variants and participant behavior remain manually unverified. The feature is explicitly opt-in and cannot weaken Stage 27's default whole-window path.
+Status: deferred and hidden with Watch Party for SlickClip 1.0.2. Optional checkpoint `f38be14` passes automated detector/tracker/reflow and fallback tests, while real Discord UI variants and participant behavior remain manually unverified.
 
 Potential scope:
 

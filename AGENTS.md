@@ -121,4 +121,4 @@ At the end of each stage, report:
 7. Git status.
 8. Confirmation that the next stage was not started.
 
-The public release target is SlickClip v1.0.0. It must satisfy `docs/RELEASE_GATE.md` and should be treated as a finished release, not a rough beta.
+The current private friends-release target is SlickClip v1.0.2. It must satisfy the applicable requirements in `docs/RELEASE_GATE.md` and should be treated as a finished release, not a rough beta. Public distribution remains subject to the signing requirements recorded there.

@@ -215,7 +215,7 @@ export function SettingsPage() {
 
   async function executeStorageCleanup() {
     if (storagePending || !storagePreview?.planId || storagePreview.candidates.length === 0) return;
-    const confirmed = window.confirm(`Permanently delete ${storagePreview.candidates.length} unprotected clip${storagePreview.candidates.length === 1 ? "" : "s"} and reclaim about ${formatBytes(storagePreview.plannedReclaimBytes)}?\n\nOnly the clips listed in the preview will be deleted. This cannot be undone.`);
+    const confirmed = window.confirm(`Permanently delete ${storagePreview.candidates.length} clip${storagePreview.candidates.length === 1 ? "" : "s"} not protected from cleanup and reclaim about ${formatBytes(storagePreview.plannedReclaimBytes)}?\n\nOnly the clips listed in the preview will be deleted. This cannot be undone.`);
     if (!confirmed) return;
     setStoragePending(true);
     setStorageMessage(null);
@@ -462,7 +462,7 @@ export function SettingsPage() {
             <div className="path-value">Videos\SlickClip\Clips</div>
           </div>
           <div className="settings-row storage-quota-row">
-            <div><span>Library quota</span><small>Cleanup removes oldest unprotected clips first. Favorites are not protected automatically.</small></div>
+            <div><span>Library quota</span><small>Automatic cleanup removes the oldest clips not protected from cleanup first. Favorites do not receive cleanup protection automatically.</small></div>
             <label className="storage-quota-input"><span className="visually-hidden">Library quota in gigabytes</span><input type="number" min="1" max="10240" step="1" value={storageQuotaInput} onChange={(event) => { setStorageQuotaInput(event.target.value); setStoragePreview(null); }} /><span>GB</span></label>
           </div>
           <div className="storage-cleanup-actions">
@@ -470,12 +470,12 @@ export function SettingsPage() {
             <small>No files are deleted until you review a preview and confirm.</small>
           </div>
           {storagePreview && <div className="storage-cleanup-preview" role="status">
-            <div className="storage-cleanup-summary"><strong>{storagePreview.bytesOverQuota === 0 ? "Library is within quota" : `${formatBytes(storagePreview.bytesOverQuota)} over quota`}</strong><span>{formatBytes(storagePreview.totalSizeBytes)} used · {formatBytes(storagePreview.protectedSizeBytes)} protected across {storagePreview.protectedCount} clip{storagePreview.protectedCount === 1 ? "" : "s"}</span></div>
+            <div className="storage-cleanup-summary"><strong>{storagePreview.bytesOverQuota === 0 ? "Library is within quota" : `${formatBytes(storagePreview.bytesOverQuota)} over quota`}</strong><span>{formatBytes(storagePreview.totalSizeBytes)} used · {formatBytes(storagePreview.protectedSizeBytes)} protected from cleanup across {storagePreview.protectedCount} clip{storagePreview.protectedCount === 1 ? "" : "s"}</span></div>
             {storagePreview.candidates.length > 0 ? <>
-              <p>{storagePreview.canMeetQuota ? `Deleting these ${storagePreview.candidates.length} oldest unprotected clips would leave about ${formatBytes(storagePreview.remainingSizeBytes)}.` : `All unprotected clips are listed, but protected clips keep the Library above quota. The remaining size would be about ${formatBytes(storagePreview.remainingSizeBytes)}.`}</p>
+              <p>{storagePreview.canMeetQuota ? `Deleting these ${storagePreview.candidates.length} oldest clips not protected from cleanup would leave about ${formatBytes(storagePreview.remainingSizeBytes)}.` : `All clips not protected from cleanup are listed, but cleanup-protected clips keep the Library above quota. The remaining size would be about ${formatBytes(storagePreview.remainingSizeBytes)}.`}</p>
               <ol>{storagePreview.candidates.map((candidate) => <li key={candidate.clipId}><span>{candidate.displayName}</span><small>{new Date(candidate.createdAtMs).toLocaleString()} · {formatBytes(candidate.fileSizeBytes)}</small></li>)}</ol>
               <button className="danger" type="button" disabled={storagePending} onClick={() => void executeStorageCleanup()}>Delete Listed Clips…</button>
-            </> : <p>No cleanup is needed. Protected clips are always excluded from automatic quota planning.</p>}
+            </> : <p>No cleanup is needed. Clips protected from cleanup are always excluded from automatic quota planning, but can still be deleted manually.</p>}
           </div>}
           {storageMessage && <span className={storageMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{storageMessage.text}</span>}
         </SettingsCategory>

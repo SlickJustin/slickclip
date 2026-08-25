@@ -1,12 +1,12 @@
-# SlickClip v1.0 Release Gate
+# SlickClip 1.0.2 Friends Release Gate
 
-SlickClip is ready for v1.0.0 only when every applicable requirement below passes on the release build. Automated checks support these gates but do not replace real Windows and clean-machine validation.
+The applicable product, Windows, installer, and updater gates below have passed for the private SlickClip 1.0.2 friends build. Automated checks support these results but do not replace the completed real-Windows and clean-machine validation. Authenticode publisher signing and SmartScreen reputation remain unresolved, so this approval does not extend to a public GitHub Release.
 
 ## Build and packaging
 
 - Version, visible branding, executable metadata, taskbar/tray icons, installer, and updater all identify SlickClip consistently.
 - A normal user can install and run SlickClip without Node.js, Rust, OBS, developer tools, or a separately installed FFmpeg.
-- Release binaries and updater artifacts are signed as intended.
+- Updater integrity/signature behavior has passed A-to-B validation. Authenticode publisher signing is still unavailable, so friends must be told to expect Windows/SmartScreen warnings.
 - Clean install, upgrade from the supported previous state, Update & Restart, and uninstall are tested.
 - Upgrade and uninstall behavior do not unexpectedly delete user clips or settings.
 
@@ -29,8 +29,9 @@ SlickClip is ready for v1.0.0 only when every applicable requirement below passe
 - Search, sorting, grid preferences, Favorites, Collections, Recently Watched, Last Watched, Play Count, storage summary, Copy Clip, rename, open, and delete behave correctly.
 - Collections remain metadata-only.
 - Thumbnail/preview cache failures do not damage source clips.
-- Pin/Protect remains distinct from Favorite.
-- Storage quota cleanup removes only eligible oldest-unprotected owned clips.
+- `Protect from Cleanup` remains distinct from Favorite and applies only to automatic storage cleanup.
+- Storage quota cleanup removes only eligible oldest owned clips not protected from cleanup.
+- Explicit manual deletion remains available for protected-from-cleanup clips, with confirmation copy that states manual deletion overrides cleanup protection.
 - Cleanup, clip deletion, and cache cleanup reject paths outside SlickClip-owned roots and handle failures without cascading data loss.
 
 ## Player
@@ -98,18 +99,23 @@ SlickClip is ready for v1.0.0 only when every applicable requirement below passe
 - Representative long capture, repeated Save Replay, Editor/export, disk-pressure, restart, and clean-PC sessions pass.
 - The release candidate commit is identified, reproducible, and the intended tree is clean.
 
-## Stage 19 manual gate still outstanding
+## Verified manual delivery state
 
-Stage 19 now has a provisional automated checkpoint, but its manual UI gate remains outstanding. Validate Sidebar, Replay, Save Replay, Clips, ClipPlayer, Editor, Settings, responsive sizing, and reduced motion; confirm capture/save/playback/edit/export behavior did not regress. Provisional later-stage work does not clear this release gate.
+- Premium UI, Replay Roulette, splash, tray/background behavior, Replay Saved overlay, arbitrary hotkeys and Settings, game detection/auto-arm, storage destructive cleanup, packaged executable, installer, updater A-to-B, and Clips multi-select/batch actions passed manual validation.
+- Stage 24 confirmed that protection excludes clips from automatic cleanup without blocking explicit manual deletion.
+- Stage 25 passed packaged executable, migration, installer, clean-machine workflow, and uninstall preservation checks.
+- Stage 26 passed the sequential updater A-to-B workflow. The historical 1.0.1 test candidate must not be reused.
+- The final 1.0.2 polish still requires the short smoke test in `MANUAL_VALIDATION_PENDING.md` after building the intended friends artifact.
 
 ## Explicitly deferred or post-v1 scope
 
 - The waveform experiment is deferred and is not a v1.0 release requirement.
-- Stage 27 Watch Party / Reaction Capture has a provisional post-v1 implementation checkpoint but remains manually unverified; Stage 27.1 participant-aware crop/reflow has a separate opt-in provisional implementation and also remains manually unverified. Neither changes the still-failed Stage 0–26 v1.0 release decision.
+- Stage 27 Watch Party / Reaction Capture and Stage 27.1 participant-aware crop/reflow remain manually unverified. They are hidden from normal 1.0.2 friends-build navigation behind a release visibility flag; their implementation and backend architecture remain intact.
 - Stage 27 v1 will use whole-window Discord reaction capture so participants can join or leave mid-recording; individual camera extraction is not required for that first Watch Party version.
+- SlickEdit remains deferred/on the back burner and is not part of SlickClip 1.0.2.
 
 ## Release decision
 
-Current status: **not approved for release**. Stage 26 implementation checkpoint `3322c46` has no production updater/signing credentials or hosted feed, and no signed clean-PC install/upgrade candidate has been validated. Stages 19–26 also retain the exact human gates listed in `MANUAL_VALIDATION_PENDING.md`.
+Current status: **approved for private friends distribution as SlickClip 1.0.2 after the final smoke test, with the unsigned-publisher/SmartScreen limitation disclosed**. The product gates through Stage 26 and Clips multi-select have passed. No public GitHub Release is approved by this decision.
 
-Release only after all Stage 0–26 requirements, this checklist, clean-machine validation, and outstanding manual gates pass. Record known limitations explicitly; do not label an unvalidated build as SlickClip v1.0.0.
+Public release remains blocked until an approved Authenticode identity/sign command and the intended production publishing inputs are available and verified. Record known limitations explicitly; do not represent the friends build as Authenticode-signed.

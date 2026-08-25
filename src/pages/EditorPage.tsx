@@ -1011,7 +1011,7 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
         </div>
         <div className="editor-header-status">
           {editorDirty && <span className="editor-dirty-state">Unsaved edits</span>}
-          <span className="editor-source-safety">Original protected</span>
+          <span className="editor-source-safety">Original preserved</span>
           <button
             className="primary-button editor-export-button"
             type="button"
@@ -1142,7 +1142,7 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
         <aside className="editor-source-panel" aria-labelledby="editor-source-heading">
           <div className="editor-inspector-heading">
             <div><h2 id="editor-source-heading">Source inspector</h2><span>Clip details</span></div>
-            <span className="editor-inspector-state">Protected</span>
+            <span className="editor-inspector-state">Non-destructive</span>
           </div>
           <dl className="editor-source-details">
             <div><dt>Name</dt><dd>{session.source.displayName}</dd></div>

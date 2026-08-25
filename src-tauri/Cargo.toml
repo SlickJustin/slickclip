@@ -1,6 +1,6 @@
 [package]
 name = "slickclip"
-version = "1.0.0"
+version = "1.0.2"
 description = "Standalone Windows game capture, replay, and clip editing"
 authors = ["SlickClip"]
 edition = "2021"

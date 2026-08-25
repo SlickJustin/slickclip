@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import "./App.css";
 import { Sidebar, type PageId } from "./components/Sidebar";
 import { TitleBar } from "./components/TitleBar";
+import { featureVisibility } from "./config/features";
 import { ClipsPage } from "./pages/ClipsPage";
 import { EditorPage } from "./pages/EditorPage";
 import { ReplayPage } from "./pages/ReplayPage";
@@ -80,7 +81,7 @@ function App() {
 
   const pages: Record<PageId, React.ReactNode> = {
     replay: <ReplayPage />,
-    watchParty: <WatchPartyPage />,
+    watchParty: featureVisibility.watchParty ? <WatchPartyPage /> : <ReplayPage />,
     clips: <ClipsPage onEditClip={openEditor} playClip={exportPlaybackClip} onPlayClipConsumed={() => setExportPlaybackClip(null)} onToast={showToast} />,
     roulette: <ReplayRoulettePage onToast={showToast} />,
     editor: <EditorPage clip={editorClip} onBackToClips={closeEditor} onPlayExport={playExport} onDirtyChange={setEditorDirty} onToast={showToast} />,

@@ -6,6 +6,7 @@ import {
   batchDeleteTargets,
   confirmBatchDelete,
   emptyClipSelection,
+  manualDeleteProtectionWarning,
   reconcileClipSelection,
   selectAllVisible,
   selectClip,
@@ -79,10 +80,19 @@ test("batch collection membership adds mixed groups and removes all-member group
 
 test("batch delete confirmation includes the exact count and honors cancellation", () => {
   let message = "";
-  assert.equal(confirmBatchDelete(3, (value) => { message = value; return false; }), false);
+  assert.equal(confirmBatchDelete(3, 0, (value) => { message = value; return false; }), false);
   assert.match(message, /3 selected clips/);
   assert.match(message, /cannot be undone/);
-  assert.equal(confirmBatchDelete(0, () => { throw new Error("must not confirm an empty selection"); }), false);
+  assert.equal(confirmBatchDelete(0, 0, () => { throw new Error("must not confirm an empty selection"); }), false);
+});
+
+test("manual delete confirmation explains cleanup-protection override", () => {
+  let message = "";
+  assert.equal(confirmBatchDelete(4, 2, (value) => { message = value; return true; }), true);
+  assert.match(message, /2 of the selected clips are protected from automatic cleanup/);
+  assert.match(message, /Manual deletion overrides that protection/);
+  assert.match(manualDeleteProtectionWarning(1, 1), /This clip is protected from automatic cleanup/);
+  assert.equal(manualDeleteProtectionWarning(0, 3), "");
 });
 
 test("destructive targets are derived from selected visible items only", () => {

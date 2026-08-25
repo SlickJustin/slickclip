@@ -17,7 +17,7 @@ import {
 import { resolvedCollectionSelection } from "../utils/libraryPreferences";
 import {
   batchBooleanTarget, batchDeleteTargets, confirmBatchDelete,
-  emptyClipSelection, reconcileClipSelection, selectAllVisible, selectClip, selectedVisibleItems,
+  emptyClipSelection, manualDeleteProtectionWarning, reconcileClipSelection, selectAllVisible, selectClip, selectedVisibleItems,
 } from "../utils/clipSelection";
 
 type Toast = (title: string, message: string, success: boolean) => void;
@@ -271,9 +271,9 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
 
   async function setPinned(clip: ClipListItem) {
     const response = await invoke<ClipMutationResponse>("set_clip_pinned", { request: { clipId: clip.id, pinned: !clip.pinned } });
-    if (!response.success || !response.clip) return setError(response.errorMessage ?? "Protection update failed.");
+    if (!response.success || !response.clip) return setError(response.errorMessage ?? "Cleanup protection update failed.");
     replaceClip(response.clip);
-    onToast(response.clip.pinned ? "Clip protected" : "Protection removed", response.clip.pinned ? "Storage cleanup will skip this clip." : "This clip may be included in a future storage cleanup.", true);
+    onToast(response.clip.pinned ? "Protected from Cleanup" : "Cleanup protection removed", response.clip.pinned ? "Automatic storage cleanup will skip this clip. You can still delete it manually." : "This clip may be included in a future automatic storage cleanup.", true);
   }
 
   async function renameClip(clip: ClipListItem) {
@@ -298,7 +298,8 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
   }
 
   async function deleteClip(clip: ClipListItem) {
-    if (!window.confirm(`Permanently delete “${clip.displayName}”?\n\nThis deletes the MP4 from disk and cannot be undone.`)) return;
+    const protectionWarning = manualDeleteProtectionWarning(clip.pinned ? 1 : 0, 1);
+    if (!window.confirm(`Permanently delete “${clip.displayName}”?\n\n${protectionWarning ? `${protectionWarning}\n\n` : ""}This deletes the MP4 from disk and cannot be undone.`)) return;
     const response = await invoke<ClipActionResponse>("delete_clip", { request: { clipId: clip.id } });
     if (!response.success) return setError(response.errorMessage ?? "Clip deletion failed.");
     await Promise.all([loadClips(), loadCollections()]);
@@ -397,7 +398,7 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
     return mutateSelectedClips(
       "set_clip_pinned",
       (clip) => ({ clipId: clip.id, pinned }),
-      pinned ? "Clips protected" : "Protection removed",
+      pinned ? "Protected from Cleanup" : "Cleanup protection removed",
     );
   }
 
@@ -412,7 +413,8 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
   async function deleteSelectedClips() {
     if (batchPending) return;
     const targets = batchDeleteTargets(selectedClips);
-    if (!confirmBatchDelete(targets.length, window.confirm)) return;
+    const protectedCount = selectedClips.filter((clip) => clip.pinned).length;
+    if (!confirmBatchDelete(targets.length, protectedCount, window.confirm)) return;
     setBatchPending(true);
     setError(null);
     try {
@@ -529,15 +531,15 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
             {batchBooleanTarget(selectedClips, (clip) => clip.favorite) ? "Favorite" : "Unfavorite"}
           </button>
           <button type="button" disabled={batchPending} onClick={() => void setSelectedPinned(batchBooleanTarget(selectedClips, (clip) => clip.pinned))}>
-            {batchBooleanTarget(selectedClips, (clip) => clip.pinned) ? "Protect" : "Unprotect"}
+            {batchBooleanTarget(selectedClips, (clip) => clip.pinned) ? "Protect from Cleanup" : "Remove Cleanup Protection"}
           </button>
           <details className="clips-batch-menu">
             <summary aria-disabled={batchPending}>More</summary>
             <div>
               <button type="button" disabled={batchPending} onClick={() => void setSelectedFavorite(true)}>Favorite selected</button>
               <button type="button" disabled={batchPending} onClick={() => void setSelectedFavorite(false)}>Unfavorite selected</button>
-              <button type="button" disabled={batchPending} onClick={() => void setSelectedPinned(true)}>Protect selected</button>
-              <button type="button" disabled={batchPending} onClick={() => void setSelectedPinned(false)}>Remove protection</button>
+              <button type="button" disabled={batchPending} onClick={() => void setSelectedPinned(true)}>Protect from Cleanup</button>
+              <button type="button" disabled={batchPending} onClick={() => void setSelectedPinned(false)}>Remove Cleanup Protection</button>
               <button className="danger" type="button" disabled={batchPending} onClick={() => void deleteSelectedClips()}>Delete selected</button>
             </div>
           </details>
@@ -553,7 +555,7 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
             className={`clip-card${selected ? " selected" : ""}`}
             key={clip.id}
             tabIndex={0}
-            aria-label={`${clip.displayName}${selected ? ", selected" : ""}`}
+            aria-label={`${clip.displayName}${clip.pinned ? ", protected from cleanup" : ""}${selected ? ", selected" : ""}`}
             onClick={(event) => handleCardSelection(event, clip.id)}
             onKeyDown={(event) => handleCardSelectionKey(event, clip.id)}
           >
@@ -586,7 +588,7 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
             <span>{formatBytes(clip.fileSizeBytes)}</span>
           </div>
           {(clip.pinned || clip.playCount > 0 || clip.captureTargetLabel) && <div className="clip-card-context">
-            {clip.pinned && <span className="clip-protected-badge" title="Excluded from storage cleanup">Protected</span>}
+            {clip.pinned && <span className="clip-protected-badge" title="Excluded from automatic storage cleanup; manual deletion is still allowed">Protected from Cleanup</span>}
             {clip.playCount > 0 && <span>{clip.playCount} {clip.playCount === 1 ? "play" : "plays"}</span>}
             {clip.captureTargetLabel && <span title={clip.captureTargetLabel}>{clip.captureTargetLabel}</span>}
           </div>}
@@ -639,7 +641,7 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
           <button type="button" role="menuitem" onClick={() => { closeMoreMenu(); void clipAction("open_clip_file", moreMenuClip); }}>Open Externally</button>
           <button type="button" role="menuitem" onClick={() => { closeMoreMenu(); void clipAction("open_clip_folder", moreMenuClip); }}>Open Folder</button>
           <button type="button" role="menuitem" onClick={() => { closeMoreMenu(); void renameClip(moreMenuClip); }}>Rename</button>
-          <button type="button" role="menuitem" onClick={() => { closeMoreMenu(); void setPinned(moreMenuClip); }}>{moreMenuClip.pinned ? "Remove Protection" : "Protect from Cleanup"}</button>
+          <button type="button" role="menuitem" onClick={() => { closeMoreMenu(); void setPinned(moreMenuClip); }}>{moreMenuClip.pinned ? "Remove Cleanup Protection" : "Protect from Cleanup"}</button>
           <button className="danger" type="button" role="menuitem" onClick={() => { closeMoreMenu(); void deleteClip(moreMenuClip); }}>Delete Clip</button>
         </div>
       </div>,

@@ -1,6 +1,6 @@
 # SlickClip Master Project State
 
-Last restored: 2026-08-23. Always inspect the repository for the exact live state.
+Last updated: 2026-08-25. Always inspect the repository for the exact live state.
 
 ## Product
 
@@ -27,19 +27,19 @@ Repository: `C:\Users\Jakea\source\replay-app`
 
 ## Verified delivery state
 
-- Stages 0–18 are committed on `master`.
-- Stage 19 Professional UI/UX Polish has provisional checkpoint `c62c81f`. Its automated checks pass, but manual visual/regression validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
-- Stage 20 Replay Roulette has provisional checkpoint `6b40cc6`. Its automated checks pass, but manual UI validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
-- Stage 21 Animated Launch Experience has provisional checkpoint `f5c14f2`. Its automated checks pass, but manual native startup/focus/reduced-motion validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
-- Stage 22 Tray, Background, Startup, and Save Overlay has provisional checkpoint `db7328c`. Its automated checks pass, but manual native tray/startup/focus/background-capture validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
-- Stage 23 Game Detection and Auto-Arm has provisional checkpoint `4c8e3ec`. Its automated checks pass, but manual representative-game/launcher/fullscreen/false-positive validation remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
-- Stage 24 Storage Safety has provisional checkpoint `bdfc167`. Its automated checks pass, but manual destructive-safety validation with disposable data remains pending and is tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
-- Stage 25 Final SlickClip Migration and Distribution has provisional checkpoint `cc79345`. Its automated checks and unsigned NSIS bundle pass, but disposable-data migration and clean-machine install/capture/save/playback/edit/export/uninstall validation remain pending and are tracked in `docs/MANUAL_VALIDATION_PENDING.md`.
-- Stage 26 Updater and Release Candidate has provisional implementation checkpoint `3322c46`. Its updater/release code and unsigned packaging checks pass, but signing credentials, hosted release infrastructure, a signed candidate, clean-PC upgrade/failure tests, and the complete release gate remain pending. SlickClip v1.0.0 is not approved for release.
-- Stage 27 Watch Party / Reaction Capture has provisional checkpoint `cf82ba8` and is automatically clean. Its real Windows multi-hour/dynamic-participant/synchronization/failure/recovery/playback/Editor validation is pending in `docs/MANUAL_VALIDATION_PENDING.md`.
-- Stage 27.1 Advanced Participant-Aware Reaction Layouts has provisional checkpoint `f38be14` as an opt-in, confidence-gated layer with automatic whole-window fallback. Real Discord layout-variant validation remains pending.
+- Stages 0–18 remain complete and committed on `master`.
+- Stages 19–23 have passed their automated and manual gates: premium UI, Replay Roulette, splash, tray/background/Replay Saved overlay, arbitrary hotkeys and Settings, and game detection/auto-arm are verified.
+- Stage 24 Storage Safety has passed its disposable-data destructive cleanup gate. `Protect from Cleanup` excludes clips only from automatic quota cleanup; explicit confirmed manual deletion remains allowed.
+- Stage 25 migration/distribution has passed packaged executable, installer, migration, and end-to-end release validation for the private friends build.
+- Stage 26 updater has passed the sequential A-to-B install/update/restart preservation test. The 1.0.1 candidate used for that test is historical and must not be reused.
+- Clips multi-select and batch actions are committed at `9371391` and manually verified, including intentional manual deletion of clips protected from cleanup.
+- The current private friends-release target is SlickClip 1.0.2. Authenticode publisher signing and resulting SmartScreen reputation remain unresolved, so this state is not approval for a public GitHub Release.
+- Stage 27 Watch Party (`cf82ba8`) and Stage 27.1 participant-aware layouts (`f38be14`) remain manually unverified and are hidden from normal friends-build navigation by a frontend release visibility flag. Their backend implementation is retained unchanged for later validation.
+- SlickEdit remains deferred/on the back burner and is not part of SlickClip 1.0.2.
 - The waveform experiment was deliberately deferred and remains in Git stash as `Stage 19 waveform experiment - deferred`.
 - The four project-control documents were accidentally committed as empty files in commit `07b3216`; this document set restores their intended content.
+
+The detailed Stage 19–27.1 sections below preserve implementation history and the automated results recorded at each checkpoint. Their original provisional wording is superseded by the current verified-delivery summary above and by `docs/MANUAL_VALIDATION_PENDING.md`.
 
 Never rely on this file for the current commit hash or stash index. Use Git to inspect both.
 
@@ -97,7 +97,7 @@ Never rely on this file for the current commit hash or stash index. Use Git to i
 - Flattened H.264/AAC export from EDL plus mixer decisions.
 - Progress, cancellation, hardware/software encoder fallback, and Library indexing.
 
-## Stage 19 provisional checkpoint
+## Stage 19 historical checkpoint
 
 The Stage 19 UI-polish checkpoint modified:
 
@@ -120,9 +120,9 @@ Automated results reported for this Stage 19 diff:
 - `git diff --check`: passed.
 - No lint script exists.
 
-These results do not replace the outstanding manual visual/regression gate. Stage 19 remains provisionally complete rather than manually verified.
+The later manual visual/regression gate passed; see the verified delivery state above.
 
-## Stage 20 provisional checkpoint
+## Stage 20 historical checkpoint
 
 Stage 20 adds a dedicated Replay Roulette page backed only by the existing Library query and ClipPlayer interfaces. It provides Favorites and Collection filters, weighted selection that favors less-played and less-recent clips, a bounded in-session recent-pick exclusion, responsive loading/empty/error/result presentation, and direct playback/copy actions through existing trusted clip identifiers. No capture, database, Editor, export, or waveform implementation changed.
 
@@ -136,9 +136,9 @@ Automated results reported for this Stage 20 diff:
 - `git diff --check`: passed.
 - No lint script exists.
 
-These results do not replace the outstanding manual UI gate. Stage 20 remains provisionally complete rather than manually verified.
+The later manual Replay Roulette UI gate passed; see the verified delivery state above.
 
-## Stage 21 provisional checkpoint
+## Stage 21 historical checkpoint
 
 Stage 21 adds a dedicated Vite splash entry point and Tauri splash window while preserving the existing single backend initialization path. The main window starts hidden; after setup is complete, the splash invokes an idempotent native coordinator that reveals/focuses the main window and closes the splash. A bounded native fallback prevents a failed splash asset or script from leaving SlickClip permanently hidden. CSS supplies restrained purple hex/progress motion and a static reduced-motion state.
 
@@ -152,9 +152,9 @@ Automated results reported for this Stage 21 diff:
 - `git diff --check`: passed.
 - No lint script exists.
 
-These results do not replace the outstanding native startup/focus/appearance gate. Stage 21 remains provisionally complete rather than manually verified.
+The later native startup/focus/appearance gate passed; see the verified delivery state above.
 
-## Stage 22 provisional checkpoint
+## Stage 22 historical checkpoint
 
 Stage 22 adds one Tauri desktop-integration layer over the existing replay, save, preference, and window managers. It provides a live tray status item plus Open/Save Replay/Quit actions, persisted close-or-minimize-to-tray behavior, background launch through a quoted per-user Windows Run entry, and a hidden non-focusable save-overlay WebView shown only after the existing save worker successfully completes. The tray polls existing manager status; it does not create another capture or save path. Preference schema v2 adds only `startWithWindows`, `closeToTray`, and `saveOverlayEnabled`. Automatic Replay Buffer startup remains intentionally disabled until Stage 23 can select and verify an intended target.
 
@@ -168,9 +168,9 @@ Automated results reported for this Stage 22 diff:
 - `git diff --check`: passed.
 - No lint script exists.
 
-These results do not replace the outstanding Windows tray/startup/focus/background-capture gate. Stage 22 remains provisionally complete rather than manually verified.
+The later Windows tray/startup/focus/background-capture gate passed; see the verified delivery state above.
 
-## Stage 23 provisional checkpoint
+## Stage 23 historical checkpoint
 
 Stage 23 adds a two-second background detector that reuses existing capturable-window enumeration and the existing Replay Buffer manager. Dimension/title/process heuristics produce review-only suggestions. Auto-arm is opt-in and additionally requires exactly one live window whose process the user explicitly approved; explicit exclusions win, and the native target is resolved again by the normal replay start path. A successful auto-arm uses Automatic encoding, a 120-second/60 FPS buffer, and a Game process-audio track for the detected PID. The Ready toast/overlay waits for the real replay state to become `running`. Only buffers tracked as auto-armed are stopped when their game closes, detection is disabled, or approval is removed. Preference schema v3 persists the feature toggle, auto-arm toggle, approvals, and exclusions with normalization and bounded lists.
 
@@ -184,9 +184,9 @@ Automated results reported for this Stage 23 diff:
 - `git diff --check`: passed.
 - No lint script exists.
 
-These results do not replace the outstanding representative real-game/launcher/fullscreen/false-positive gate. Stage 23 remains provisionally complete rather than manually verified.
+The later representative real-game/launcher/fullscreen/false-positive gate passed; see the verified delivery state above.
 
-## Stage 24 provisional checkpoint
+## Stage 24 historical checkpoint
 
 Stage 24 adds a persisted 1 GB–10 TB Library quota and a schema-v3 `pinned` flag exposed as Protected, deliberately separate from Favorite. Settings performs a backend-owned dry run that lists the exact oldest unprotected clips required by the quota, protected totals, projected reclaim, and whether protected capacity prevents reaching the quota. Execution accepts only an opaque one-use preview token, re-plans from current database metadata, rejects any changed scope, pre-validates every selected clip, and routes deletion through the existing trusted-ID, canonical owned-path, direct-child regular-MP4, database-row, and cache cleanup path. Quota enforcement is explicit rather than silently destructive in the background. Preference schema v4 persists the quota.
 
@@ -200,9 +200,9 @@ Automated results reported for this Stage 24 diff:
 - `git diff --check`: passed.
 - No lint script exists.
 
-These results do not replace the outstanding destructive-safety test using disposable real clips. Stage 24 remains provisionally complete rather than manually verified.
+The later destructive-safety test using disposable real clips passed. The verified semantics are `Protect from Cleanup`, not protection from explicit manual deletion.
 
-## Stage 25 provisional checkpoint
+## Stage 25 historical checkpoint
 
 Stage 25 completes the product-facing SlickClip 1.0.0 migration and creates a standalone current-user NSIS installer. Startup first performs a no-overwrite migration from the legacy application-data and Videos roots, rejects Windows reparse points throughout the source tree, transactionally rewrites only direct-child legacy MP4 Library paths, atomically rewrites cached JSON path metadata, and remains safe to retry. Automated coverage verifies clip bytes, favorites, protection, play count, collections, preferences, cache paths, idempotence, collision refusal, and the current-install/no-legacy no-op. The existing internal crate name, legacy environment-variable fallback, legacy process exclusion, and migration-source names remain intentionally compatible.
 
@@ -223,9 +223,9 @@ Automated results reported for this Stage 25 diff:
 - Generated NSIS source inspection confirms current-user install mode, `com.slickclip.desktop`, both media sidecars, the FFmpeg license/source notice, and no uninstall rule targeting the Videos clip root.
 - No lint script exists.
 
-These results do not replace the clean-machine and disposable-data migration gate. The installer is unsigned, and code signing, updater/feed configuration, release legal review, and signed upgrade/rollback testing belong to Stage 26. Stage 25 remains provisionally complete rather than manually verified.
+The later clean-machine, disposable-data migration, installer, and end-to-end media gates passed for private friends distribution. Authenticode remains unresolved.
 
-## Stage 26 provisional implementation checkpoint
+## Stage 26 historical implementation checkpoint
 
 Stage 26 adds the official Tauri signed-updater backend and a Settings experience for Check for Updates and Update & Restart. Release trust inputs are embedded only at compile time; ordinary local builds clearly disable update checks instead of accepting runtime-supplied keys. Checks are single-operation, HTTPS-only, use the updater's SemVer comparison, and re-check the expected version immediately before download. The complete installer is verified against the embedded updater public key before SlickClip shuts down replay, audio tests, hotkeys, exports, saves, and rolling capture through the normal exit cleanup routine and launches the passive installer.
 
@@ -245,7 +245,7 @@ Automated results reported for this Stage 26 diff:
 - Local installer: 88,195,355 bytes; SHA-256 `8C556C4727E97AA4A9B2C1FB1227E476D86CD640432057152F6A341225522840`; Authenticode `NotSigned`; no updater `.sig` or `latest.json`, all expected for the non-release command.
 - No lint script exists.
 
-The remaining blocker is external and exact: provide the production updater key pair/public key custody decision, approved Windows code-signing identity and `signCommand` credentials, HTTPS feed/artifact URLs and publishing access. Then produce and manually validate signed sequential-version candidates on clean/disposable Windows machines. Until that occurs, Stage 26 is implementation-complete but not release-candidate-complete, and the release gate remains failed.
+The later sequential updater A-to-B install/restart and data-preservation gate passed; the 1.0.1 test candidate is historical and must not be reused. Public distribution remains blocked on an approved Windows code-signing identity/`signCommand` and the intended production publishing inputs. Private friends distribution must disclose the unsigned-publisher/SmartScreen limitation.
 
 ## Architecture invariants
 

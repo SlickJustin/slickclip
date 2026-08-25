@@ -96,10 +96,20 @@ export function batchDeleteTargets(items: readonly DeleteFingerprint[]): BatchDe
   }));
 }
 
-export function confirmBatchDelete(count: number, confirm: (message: string) => boolean): boolean {
+export function manualDeleteProtectionWarning(protectedCount: number, totalCount: number): string {
+  if (protectedCount < 1 || totalCount < 1) return "";
+  if (totalCount === 1) {
+    return "This clip is protected from automatic cleanup. Manual deletion overrides that protection and will still permanently remove it.";
+  }
+  return `${protectedCount} of the selected clips ${protectedCount === 1 ? "is" : "are"} protected from automatic cleanup. Manual deletion overrides that protection and will still permanently remove ${protectedCount === 1 ? "it" : "them"}.`;
+}
+
+export function confirmBatchDelete(count: number, protectedCount: number, confirm: (message: string) => boolean): boolean {
   if (count < 1) return false;
+  const protectionWarning = manualDeleteProtectionWarning(protectedCount, count);
   return confirm(
     `Permanently delete ${count} selected clip${count === 1 ? "" : "s"}?\n\n`
+    + (protectionWarning ? `${protectionWarning}\n\n` : "")
     + "This deletes the MP4 files from disk and cannot be undone.",
   );
 }
