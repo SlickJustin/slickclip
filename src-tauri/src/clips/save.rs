@@ -131,6 +131,26 @@ pub struct SaveReplayCommandResult {
     pub error_message: Option<String>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveReplayCompletionFeedback {
+    success: bool,
+    message: String,
+    save_state: SaveJobState,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveAndNameRequest {
+    clip_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SaveIntent {
+    SaveOnly,
+    SaveAndName,
+}
+
 impl SaveReplayCommandResult {
     fn success(status: SaveReplayStatus) -> Self {
         Self {
@@ -342,6 +362,14 @@ impl ClipSaveManager {
     }
 
     pub fn start(&self) -> SaveReplayCommandResult {
+        self.start_with_intent(SaveIntent::SaveOnly)
+    }
+
+    pub fn start_and_name(&self) -> SaveReplayCommandResult {
+        self.start_with_intent(SaveIntent::SaveAndName)
+    }
+
+    fn start_with_intent(&self, intent: SaveIntent) -> SaveReplayCommandResult {
         let replay_status = self.replay.status();
         if replay_status.state != ReplayLifecycleState::Running {
             return SaveReplayCommandResult::failure(
@@ -385,6 +413,7 @@ impl ClipSaveManager {
                     shared,
                     library,
                     app_handle,
+                    intent,
                 )
             }) {
             Ok(thread) => thread,
@@ -463,67 +492,147 @@ fn run_save_job(
     shared: Arc<SharedSaveJob>,
     library: ClipLibraryManager,
     app_handle: AppHandle,
+    intent: SaveIntent,
 ) {
     let save_started = Instant::now();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        shared.set_state(SaveJobState::FinalizingCurrentSegment);
-        let snapshot = replay
-            .snapshot_for_save()
-            .map_err(ClipAssemblyFailure::without_artifacts)?;
-        shared.set_snapshot(&snapshot);
-        let timestamp = utc_file_timestamp().map_err(ClipAssemblyFailure::without_artifacts)?;
-        let assembly =
-            FfmpegClipAssembler.assemble(&snapshot, output_directory, &timestamp, &|phase| {
-                shared.set_state(save_state_for_phase(phase))
-            })?;
-        let index_started = Instant::now();
-        let metadata = saved_clip_metadata(&snapshot, &assembly);
-        let (index_result, index_warning, failed_index_latency_ms) = match library
-            .index_saved_clip(metadata)
-        {
-            Ok(indexed) => {
-                let _ = app_handle.emit("clip-library-changed", indexed.clip_id.clone());
-                (Some(indexed), None, None)
-            }
-            Err(error) => {
-                let elapsed = index_started.elapsed().as_secs_f64() * 1_000.0;
-                library.record_saved_clip_index_failure(elapsed);
-                (
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<SaveJobOutcome, ClipAssemblyFailure> {
+            shared.set_state(SaveJobState::FinalizingCurrentSegment);
+            let snapshot = replay
+                .snapshot_for_save()
+                .map_err(ClipAssemblyFailure::without_artifacts)?;
+            shared.set_snapshot(&snapshot);
+            let timestamp = utc_file_timestamp().map_err(ClipAssemblyFailure::without_artifacts)?;
+            let assembly = FfmpegClipAssembler.assemble(
+                &snapshot,
+                output_directory,
+                &timestamp,
+                &|phase| shared.set_state(save_state_for_phase(phase)),
+            )?;
+            let index_started = Instant::now();
+            let metadata = saved_clip_metadata(&snapshot, &assembly);
+            let (index_result, index_warning, failed_index_latency_ms) = match library
+                .index_saved_clip(metadata)
+            {
+                Ok(indexed) => {
+                    let _ = app_handle.emit("clip-library-changed", indexed.clip_id.clone());
+                    (Some(indexed), None, None)
+                }
+                Err(error) => {
+                    let elapsed = index_started.elapsed().as_secs_f64() * 1_000.0;
+                    library.record_saved_clip_index_failure(elapsed);
+                    (
                         None,
                         Some(format!(
                             "Replay saved successfully, but library indexing failed: {error}. Refresh Clips to retry discovery."
                         )),
                         Some(elapsed),
                     )
-            }
-        };
-        Ok(SaveJobOutcome {
-            assembly,
-            index_result,
-            index_warning,
-            failed_index_latency_ms,
-        })
-    }));
+                }
+            };
+            Ok(SaveJobOutcome {
+                assembly,
+                index_result,
+                index_warning,
+                failed_index_latency_ms,
+                overlay_monitor_origin: snapshot.overlay_monitor_origin,
+            })
+        },
+    ));
 
     let total_save_latency_ms = save_started.elapsed().as_secs_f64() * 1_000.0;
     match result {
         Ok(Ok(result)) => {
             let duration_seconds = result.assembly.actual_duration_seconds;
+            let library_indexed = result.index_result.is_some();
+            let indexing_warning = result.index_warning.clone();
+            let overlay_monitor_origin = result.overlay_monitor_origin;
+            let naming_clip_id = should_request_name(intent, library_indexed)
+                .then(|| {
+                    result
+                        .index_result
+                        .as_ref()
+                        .map(|value| value.clip_id.clone())
+                })
+                .flatten();
             shared.complete(result, total_save_latency_ms);
-            crate::desktop::show_save_overlay(&app_handle, duration_seconds);
-            crate::desktop::refresh_tray_status(&app_handle);
+            if should_show_success_overlay(true, library_indexed) {
+                emit_save_completion_feedback(
+                    &app_handle,
+                    true,
+                    "Replay Saved".to_string(),
+                    SaveJobState::Completed,
+                );
+                crate::desktop::show_save_overlay(
+                    &app_handle,
+                    duration_seconds,
+                    overlay_monitor_origin,
+                );
+                if let Some(clip_id) = naming_clip_id {
+                    let _ = app_handle
+                        .emit("save-replay-name-requested", SaveAndNameRequest { clip_id });
+                    let _ = crate::desktop::show_main_window(&app_handle);
+                }
+            } else {
+                let message = indexing_warning.unwrap_or_else(|| {
+                    "The replay file was created, but SlickClip could not index it in the Library."
+                        .to_string()
+                });
+                emit_save_completion_feedback(
+                    &app_handle,
+                    false,
+                    message.clone(),
+                    SaveJobState::Completed,
+                );
+                crate::desktop::show_save_failure_overlay(&app_handle, &message);
+            }
         }
-        Ok(Err(failure)) => shared.fail_with_audio_barriers(
-            failure,
-            replay.status().audio.save_barriers,
-            total_save_latency_ms,
-        ),
-        Err(_) => shared.fail_with_audio_barriers(
-            ClipAssemblyFailure::without_artifacts("The Save Replay worker panicked."),
-            replay.status().audio.save_barriers,
-            total_save_latency_ms,
-        ),
+        Ok(Err(failure)) => {
+            let message = failure.message.clone();
+            shared.fail_with_audio_barriers(
+                failure,
+                replay.status().audio.save_barriers,
+                total_save_latency_ms,
+            );
+            emit_save_completion_feedback(&app_handle, false, message.clone(), SaveJobState::Error);
+            crate::desktop::show_save_failure_overlay(&app_handle, &message);
+        }
+        Err(_) => {
+            let message = "The Save Replay worker panicked.".to_string();
+            shared.fail_with_audio_barriers(
+                ClipAssemblyFailure::without_artifacts(&message),
+                replay.status().audio.save_barriers,
+                total_save_latency_ms,
+            );
+            emit_save_completion_feedback(&app_handle, false, message.clone(), SaveJobState::Error);
+            crate::desktop::show_save_failure_overlay(&app_handle, &message);
+        }
     }
+    crate::desktop::refresh_tray_status(&app_handle);
+}
+
+fn emit_save_completion_feedback(
+    app: &AppHandle,
+    success: bool,
+    message: String,
+    save_state: SaveJobState,
+) {
+    let _ = app.emit(
+        "save-replay-completed",
+        SaveReplayCompletionFeedback {
+            success,
+            message,
+            save_state,
+        },
+    );
+}
+
+fn should_show_success_overlay(assembly_succeeded: bool, library_indexed: bool) -> bool {
+    assembly_succeeded && library_indexed
+}
+
+fn should_request_name(intent: SaveIntent, library_indexed: bool) -> bool {
+    intent == SaveIntent::SaveAndName && library_indexed
 }
 
 struct SaveJobOutcome {
@@ -531,6 +640,7 @@ struct SaveJobOutcome {
     index_result: Option<SavedClipIndexResult>,
     index_warning: Option<String>,
     failed_index_latency_ms: Option<f64>,
+    overlay_monitor_origin: Option<(i32, i32)>,
 }
 
 fn saved_clip_metadata(
@@ -641,7 +751,10 @@ fn utc_file_timestamp() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{duplicate_job_error, SaveJobState};
+    use super::{
+        duplicate_job_error, should_request_name, should_show_success_overlay, SaveIntent,
+        SaveJobState,
+    };
 
     #[test]
     fn duplicate_active_save_jobs_are_rejected() {
@@ -658,5 +771,20 @@ mod tests {
         }
         assert!(duplicate_job_error(SaveJobState::Completed, false).is_none());
         assert!(duplicate_job_error(SaveJobState::Error, false).is_none());
+    }
+
+    #[test]
+    fn replay_saved_overlay_requires_successful_assembly_and_indexing() {
+        assert!(should_show_success_overlay(true, true));
+        assert!(!should_show_success_overlay(false, true));
+        assert!(!should_show_success_overlay(true, false));
+        assert!(!should_show_success_overlay(false, false));
+    }
+
+    #[test]
+    fn naming_prompt_requires_the_explicit_intent_and_successful_indexing() {
+        assert!(should_request_name(SaveIntent::SaveAndName, true));
+        assert!(!should_request_name(SaveIntent::SaveOnly, true));
+        assert!(!should_request_name(SaveIntent::SaveAndName, false));
     }
 }

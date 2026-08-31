@@ -2,7 +2,7 @@ import slickClipLogo from "../assets/branding/slickclip-logo.svg";
 import { featureVisibility } from "../config/features";
 import { Icon, type IconName } from "./Icon";
 
-export type PageId = "replay" | "watchParty" | "clips" | "roulette" | "editor" | "help" | "settings";
+export type PageId = "home" | "replay" | "watchParty" | "clips" | "roulette" | "editor" | "help" | "settings";
 
 type SidebarProps = {
   activePage: PageId;
@@ -12,7 +12,8 @@ type SidebarProps = {
 type NavigationItem = { id: PageId; label: string; icon: IconName };
 
 const navigationGroups: { label: string; items: NavigationItem[] }[] = [
-  { label: "Capture", items: [
+  { label: "Workspace", items: [
+    { id: "home", label: "Home", icon: "home" },
     { id: "replay", label: "Replay", icon: "replay" },
     ...(featureVisibility.watchParty
       ? [{ id: "watchParty", label: "Watch Party", icon: "watchParty" } satisfies NavigationItem]
@@ -64,7 +65,7 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
         <NavigationButton item={{ id: "settings", label: "Settings", icon: "settings" }} activePage={activePage} onNavigate={onNavigate} />
         <div className="sidebar-footer">
           <span className="sidebar-footer-status"><i aria-hidden="true" />Local workspace</span>
-          <span className="sidebar-version">v1.0.2</span>
+          <span className="sidebar-version">v1.0.3</span>
         </div>
       </div>
     </aside>

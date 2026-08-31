@@ -48,6 +48,7 @@ struct HotkeyTestFeedback {
 enum ShortcutAction {
     Ignore,
     SaveReplay,
+    SaveAndName,
     TestSucceeded,
 }
 
@@ -72,6 +73,275 @@ struct HotkeyInner {
 pub struct SaveReplayHotkeyManager {
     inner: Mutex<HotkeyInner>,
     repair_persisted_combination: bool,
+}
+
+struct OptionalHotkeyInner {
+    state: HotkeyState,
+    shortcut: Option<Shortcut>,
+    recorder_active: bool,
+}
+
+pub struct SaveAndNameHotkeyManager {
+    inner: Mutex<OptionalHotkeyInner>,
+    repair_persisted_combination: bool,
+}
+
+impl SaveAndNameHotkeyManager {
+    pub fn new(initial_combination: Option<&str>) -> Self {
+        let (shortcut, combination, error, repair_persisted_combination) = match initial_combination
+        {
+            Some(combination) => match parse_hotkey(combination) {
+                Ok(parsed) => (Some(parsed.shortcut), parsed.normalized, None, false),
+                Err(error) => (
+                    None,
+                    String::new(),
+                    Some(format!(
+                        "The saved Save & Name hotkey was invalid ({error}). It was disabled."
+                    )),
+                    true,
+                ),
+            },
+            None => (None, String::new(), None, false),
+        };
+        Self {
+            inner: Mutex::new(OptionalHotkeyInner {
+                state: HotkeyState {
+                    registered: false,
+                    current_combination: combination,
+                    last_registration_error: error,
+                    testing: false,
+                },
+                shortcut,
+                recorder_active: false,
+            }),
+            repair_persisted_combination,
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, OptionalHotkeyInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn register_initial(&self, app: &AppHandle, preferences: &UiPreferencesManager) {
+        let mut inner = self.lock();
+        if self.repair_persisted_combination {
+            if let Err(error) = preferences.save_and_name_hotkey(None) {
+                inner.state.last_registration_error = Some(format!(
+                    "The invalid Save & Name hotkey was disabled, but the repaired preference could not be saved: {error}"
+                ));
+            }
+            return;
+        }
+        let Some(shortcut) = inner.shortcut else {
+            return;
+        };
+        match app.global_shortcut().register(shortcut) {
+            Ok(()) => {
+                inner.state.registered = true;
+                inner.state.last_registration_error = None;
+            }
+            Err(error) => {
+                inner.state.last_registration_error = Some(format_registration_error(
+                    &inner.state.current_combination,
+                    error,
+                ));
+            }
+        }
+    }
+
+    pub fn state(&self) -> HotkeyState {
+        self.lock().state.clone()
+    }
+
+    pub fn set_recorder_active(&self, active: bool) -> HotkeyState {
+        let mut inner = self.lock();
+        inner.recorder_active = active;
+        inner.state.clone()
+    }
+
+    pub fn rebind(
+        &self,
+        app: &AppHandle,
+        preferences: &UiPreferencesManager,
+        combination: &str,
+    ) -> HotkeyCommandResult {
+        self.rebind_with_operations(
+            combination,
+            |shortcut| {
+                app.global_shortcut()
+                    .register(shortcut)
+                    .map_err(|error| error.to_string())
+            },
+            |shortcut| {
+                app.global_shortcut()
+                    .unregister(shortcut)
+                    .map_err(|error| error.to_string())
+            },
+            |value| preferences.save_and_name_hotkey(value.map(str::to_string)),
+        )
+    }
+
+    fn rebind_with_operations<Register, Unregister, Persist>(
+        &self,
+        combination: &str,
+        mut register: Register,
+        mut unregister: Unregister,
+        mut persist: Persist,
+    ) -> HotkeyCommandResult
+    where
+        Register: FnMut(Shortcut) -> Result<(), String>,
+        Unregister: FnMut(Shortcut) -> Result<(), String>,
+        Persist: FnMut(Option<&str>) -> Result<(), String>,
+    {
+        let parsed = match parse_hotkey(combination) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                let mut inner = self.lock();
+                inner.recorder_active = false;
+                return HotkeyCommandResult {
+                    success: false,
+                    state: inner.state.clone(),
+                    error_message: Some(error),
+                };
+            }
+        };
+        let mut inner = self.lock();
+        if inner.shortcut == Some(parsed.shortcut) && inner.state.registered {
+            inner.recorder_active = false;
+            return HotkeyCommandResult {
+                success: true,
+                state: inner.state.clone(),
+                error_message: None,
+            };
+        }
+        if let Err(error) = register(parsed.shortcut) {
+            let message = format_registration_error(&parsed.normalized, error);
+            inner.recorder_active = false;
+            inner.state.last_registration_error = Some(message.clone());
+            return HotkeyCommandResult {
+                success: false,
+                state: inner.state.clone(),
+                error_message: Some(message),
+            };
+        }
+        if let Err(error) = persist(Some(&parsed.normalized)) {
+            let _ = unregister(parsed.shortcut);
+            let message = format!(
+                "{} was available, but SlickClip could not save the preference: {error}",
+                parsed.normalized
+            );
+            inner.recorder_active = false;
+            inner.state.last_registration_error = Some(message.clone());
+            return HotkeyCommandResult {
+                success: false,
+                state: inner.state.clone(),
+                error_message: Some(message),
+            };
+        }
+        if let Some(previous) = inner.shortcut.filter(|_| inner.state.registered) {
+            if let Err(error) = unregister(previous) {
+                let _ = persist(
+                    (!inner.state.current_combination.is_empty())
+                        .then_some(inner.state.current_combination.as_str()),
+                );
+                let _ = unregister(parsed.shortcut);
+                let message = format!(
+                    "The new Save & Name hotkey was registered, but the previous one could not be released: {error}. The previous binding remains active."
+                );
+                inner.recorder_active = false;
+                inner.state.last_registration_error = Some(message.clone());
+                return HotkeyCommandResult {
+                    success: false,
+                    state: inner.state.clone(),
+                    error_message: Some(message),
+                };
+            }
+        }
+        inner.shortcut = Some(parsed.shortcut);
+        inner.recorder_active = false;
+        inner.state = HotkeyState {
+            registered: true,
+            current_combination: parsed.normalized,
+            last_registration_error: None,
+            testing: false,
+        };
+        HotkeyCommandResult {
+            success: true,
+            state: inner.state.clone(),
+            error_message: None,
+        }
+    }
+
+    pub fn clear(
+        &self,
+        app: &AppHandle,
+        preferences: &UiPreferencesManager,
+    ) -> HotkeyCommandResult {
+        let mut inner = self.lock();
+        let previous = inner.shortcut.filter(|_| inner.state.registered);
+        if let Err(error) = preferences.save_and_name_hotkey(None) {
+            return HotkeyCommandResult {
+                success: false,
+                state: inner.state.clone(),
+                error_message: Some(error),
+            };
+        }
+        if let Some(shortcut) = previous {
+            if let Err(error) = app.global_shortcut().unregister(shortcut) {
+                let _ =
+                    preferences.save_and_name_hotkey(Some(inner.state.current_combination.clone()));
+                let message = format!(
+                    "The Save & Name hotkey preference was cleared, but Windows could not unregister the active binding: {error}. The binding remains enabled."
+                );
+                inner.state.last_registration_error = Some(message.clone());
+                return HotkeyCommandResult {
+                    success: false,
+                    state: inner.state.clone(),
+                    error_message: Some(message),
+                };
+            }
+        }
+        inner.shortcut = None;
+        inner.recorder_active = false;
+        inner.state = HotkeyState {
+            registered: false,
+            current_combination: String::new(),
+            last_registration_error: None,
+            testing: false,
+        };
+        HotkeyCommandResult {
+            success: true,
+            state: inner.state.clone(),
+            error_message: None,
+        }
+    }
+
+    fn shortcut_action(&self, shortcut: &Shortcut) -> ShortcutAction {
+        let inner = self.lock();
+        if inner.state.registered
+            && !inner.recorder_active
+            && inner.shortcut.as_ref() == Some(shortcut)
+        {
+            ShortcutAction::SaveAndName
+        } else {
+            ShortcutAction::Ignore
+        }
+    }
+
+    pub fn unregister(&self, app: &AppHandle) {
+        let mut inner = self.lock();
+        if let Some(shortcut) = inner.shortcut.filter(|_| inner.state.registered) {
+            if let Err(error) = app.global_shortcut().unregister(shortcut) {
+                inner.state.last_registration_error = Some(format!(
+                    "The Save & Name hotkey could not be unregistered during shutdown: {error}"
+                ));
+                return;
+            }
+        }
+        inner.state.registered = false;
+    }
 }
 
 impl SaveReplayHotkeyManager {
@@ -422,8 +692,21 @@ pub fn handle_global_shortcut(app: &AppHandle, shortcut: &Shortcut, state: Short
             return;
         }
         ShortcutAction::SaveReplay => {}
+        ShortcutAction::SaveAndName => unreachable!(),
     }
     request_save_with_feedback(app);
+}
+
+pub fn handle_save_and_name_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
+    if state != ShortcutState::Pressed {
+        return;
+    }
+    let Some(hotkey) = app.try_state::<SaveAndNameHotkeyManager>() else {
+        return;
+    };
+    if hotkey.shortcut_action(shortcut) == ShortcutAction::SaveAndName {
+        request_save_and_name_with_feedback(app);
+    }
 }
 
 pub fn request_save_with_feedback(app: &AppHandle) {
@@ -438,6 +721,30 @@ pub fn request_save_with_feedback(app: &AppHandle) {
             .error_message
             .clone()
             .unwrap_or_else(|| "Save Replay could not start.".to_string())
+    };
+    let _ = app.emit(
+        "save-replay-hotkey-feedback",
+        HotkeySaveFeedback {
+            success: result.success,
+            message,
+            save_state: result.status.state,
+        },
+    );
+    crate::desktop::refresh_tray_status(app);
+}
+
+pub fn request_save_and_name_with_feedback(app: &AppHandle) {
+    let Some(save_manager) = app.try_state::<ClipSaveManager>() else {
+        return;
+    };
+    let result = save_manager.start_and_name();
+    let message = if result.success {
+        "Save & Name started.".to_string()
+    } else {
+        result
+            .error_message
+            .clone()
+            .unwrap_or_else(|| "Save & Name could not start.".to_string())
     };
     let _ = app.emit(
         "save-replay-hotkey-feedback",
@@ -466,11 +773,49 @@ pub fn set_save_replay_hotkey(
 }
 
 #[tauri::command]
+pub fn get_save_and_name_hotkey(
+    manager: tauri::State<'_, SaveAndNameHotkeyManager>,
+) -> HotkeyState {
+    manager.state()
+}
+
+#[tauri::command]
+pub fn set_save_and_name_hotkey(
+    app: AppHandle,
+    manager: tauri::State<'_, SaveAndNameHotkeyManager>,
+    preferences: tauri::State<'_, UiPreferencesManager>,
+    combination: String,
+) -> HotkeyCommandResult {
+    manager.rebind(&app, &preferences, &combination)
+}
+
+#[tauri::command]
+pub fn clear_save_and_name_hotkey(
+    app: AppHandle,
+    manager: tauri::State<'_, SaveAndNameHotkeyManager>,
+    preferences: tauri::State<'_, UiPreferencesManager>,
+) -> HotkeyCommandResult {
+    manager.clear(&app, &preferences)
+}
+
+#[tauri::command]
 pub fn set_hotkey_recorder_active(
     manager: tauri::State<'_, SaveReplayHotkeyManager>,
+    save_and_name: tauri::State<'_, SaveAndNameHotkeyManager>,
     active: bool,
 ) -> HotkeyState {
+    save_and_name.set_recorder_active(active);
     manager.set_recorder_active(active)
+}
+
+#[tauri::command]
+pub fn set_save_and_name_hotkey_recorder_active(
+    manager: tauri::State<'_, SaveReplayHotkeyManager>,
+    save_and_name: tauri::State<'_, SaveAndNameHotkeyManager>,
+    active: bool,
+) -> HotkeyState {
+    manager.set_recorder_active(active);
+    save_and_name.set_recorder_active(active)
 }
 
 #[tauri::command]
@@ -634,7 +979,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        parse_hotkey, SaveReplayHotkeyManager, ShortcutAction, DEFAULT_SAVE_REPLAY_HOTKEY,
+        parse_hotkey, SaveAndNameHotkeyManager, SaveReplayHotkeyManager, ShortcutAction,
+        DEFAULT_SAVE_REPLAY_HOTKEY,
     };
 
     #[test]
@@ -838,5 +1184,46 @@ mod tests {
             DEFAULT_SAVE_REPLAY_HOTKEY
         );
         assert!(repaired.state().last_registration_error.is_some());
+    }
+
+    #[test]
+    fn save_and_name_hotkey_is_optional_and_dispatches_its_distinct_action() {
+        let manager = SaveAndNameHotkeyManager::new(None);
+        assert!(!manager.state().registered);
+        assert!(manager.state().current_combination.is_empty());
+
+        let result = manager.rebind_with_operations(
+            "Ctrl + Shift + F11",
+            |_| Ok(()),
+            |_| Ok(()),
+            |combination| {
+                assert_eq!(combination, Some("Ctrl + Shift + F11"));
+                Ok(())
+            },
+        );
+        assert!(result.success);
+        let parsed = parse_hotkey("Ctrl + Shift + F11").unwrap();
+        assert_eq!(
+            manager.shortcut_action(&parsed.shortcut),
+            ShortcutAction::SaveAndName
+        );
+    }
+
+    #[test]
+    fn save_and_name_persistence_failure_rolls_back_new_registration() {
+        let manager = SaveAndNameHotkeyManager::new(None);
+        let unregister_count = std::cell::Cell::new(0);
+        let result = manager.rebind_with_operations(
+            "F11",
+            |_| Ok(()),
+            |_| {
+                unregister_count.set(unregister_count.get() + 1);
+                Ok(())
+            },
+            |_| Err("disk full".to_string()),
+        );
+        assert!(!result.success);
+        assert_eq!(unregister_count.get(), 1);
+        assert!(!result.state.registered);
     }
 }

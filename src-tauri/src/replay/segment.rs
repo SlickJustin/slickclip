@@ -236,6 +236,18 @@ mod tests {
     }
 
     #[test]
+    fn retention_is_bounded_for_every_supported_replay_duration() {
+        for seconds in [30u32, 60, 120, 180, 300] {
+            let mut ring = SegmentRing::new(seconds);
+            for sequence in 1..=u64::from(seconds / 2 + 4) {
+                ring.push(segment(sequence, 2_000));
+            }
+            assert_eq!(ring.total_duration_ms(), u64::from(seconds) * 1_000);
+            assert_eq!(ring.len(), seconds as usize / 2);
+        }
+    }
+
+    #[test]
     fn selection_is_chronological_and_includes_the_boundary_segment() {
         let mut ring = SegmentRing::new(30);
         for sequence in 1..=8 {

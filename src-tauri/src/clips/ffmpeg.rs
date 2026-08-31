@@ -14,6 +14,7 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
 
+#[derive(Clone)]
 pub struct FfmpegExecutable {
     program: OsString,
 }
@@ -202,6 +203,16 @@ impl FfmpegExecutable {
         hide_console_window(&mut command);
         lower_cache_priority(&mut command);
         command
+    }
+
+    pub(crate) fn capture_command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        hide_console_window(&mut command);
+        command
+    }
+
+    pub(crate) fn program_display(&self) -> String {
+        PathBuf::from(&self.program).display().to_string()
     }
 
     pub fn inspect_media(&self, output_path: &Path) -> Result<MediaProbeReport, String> {

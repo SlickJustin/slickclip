@@ -13,7 +13,9 @@ use windows_capture::encoder::{
 };
 
 pub use types::{EncoderChoice, EncoderCodec, EncoderFrameTelemetry, VideoEncoderBackend};
-pub use windows_capture_backend::WindowsCaptureFileBackend;
+pub use windows_capture_backend::{
+    active_media_foundation_encoder_count, WindowsCaptureFileBackend,
+};
 
 const PROBE_WIDTH: u32 = 1920;
 const PROBE_HEIGHT: u32 = 1080;

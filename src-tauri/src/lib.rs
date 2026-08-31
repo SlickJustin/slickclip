@@ -79,12 +79,20 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
                     hotkey::handle_global_shortcut(app, shortcut, event.state());
+                    hotkey::handle_save_and_name_shortcut(app, shortcut, event.state());
                 })
                 .build(),
         )
         .setup(|app| {
             let background_launch = std::env::args().any(|argument| argument == "--background");
-            let app_data = app.path().app_local_data_dir()?;
+            let resolved_app_data = app.path().app_local_data_dir()?;
+            #[cfg(debug_assertions)]
+            let app_data = std::env::var_os("SLICKCLIP_DEV_APP_DATA_DIR")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+                .unwrap_or(resolved_app_data);
+            #[cfg(not(debug_assertions))]
+            let app_data = resolved_app_data;
             let videos_directory = app.path().video_dir()?;
             let legacy_app_data = app_data
                 .parent()
@@ -133,11 +141,21 @@ pub fn run() {
             let preferences = preferences::UiPreferencesManager::initialize(
                 app_data.join("Preferences").join("ui-preferences.json"),
             );
-            let save_replay_hotkey = preferences.get().preferences.save_replay_hotkey;
+            let preference_snapshot = preferences.get().preferences;
+            let save_replay_hotkey = preference_snapshot.save_replay_hotkey;
+            let save_and_name_hotkey = preference_snapshot.save_and_name_hotkey;
             app.manage(preferences);
             app.manage(updater::UpdateManager::default());
             app.manage(hotkey::SaveReplayHotkeyManager::new(&save_replay_hotkey));
             app.state::<hotkey::SaveReplayHotkeyManager>()
+                .register_initial(
+                    app.handle(),
+                    &app.state::<preferences::UiPreferencesManager>(),
+                );
+            app.manage(hotkey::SaveAndNameHotkeyManager::new(
+                save_and_name_hotkey.as_deref(),
+            ));
+            app.state::<hotkey::SaveAndNameHotkeyManager>()
                 .register_initial(
                     app.handle(),
                     &app.state::<preferences::UiPreferencesManager>(),
@@ -167,6 +185,7 @@ pub fn run() {
             complete_startup,
             desktop::set_start_with_windows,
             game_detection::get_game_detection_status,
+            game_detection::set_game_detection_manual_override,
             capture::capture_test::run_capture_test,
             capture::continuous_baseline::run_continuous_baseline,
             capture::encoder::get_encoder_capabilities,
@@ -176,6 +195,7 @@ pub fn run() {
             replay::stop_replay_buffer,
             replay::get_replay_buffer_status,
             clips::save_replay,
+            clips::save_replay_and_name,
             clips::get_save_replay_status,
             library::list_clips,
             library::refresh_clip_library,
@@ -205,7 +225,11 @@ pub fn run() {
             library::record_clip_watch_command,
             hotkey::get_save_replay_hotkey,
             hotkey::set_save_replay_hotkey,
+            hotkey::get_save_and_name_hotkey,
+            hotkey::set_save_and_name_hotkey,
+            hotkey::clear_save_and_name_hotkey,
             hotkey::set_hotkey_recorder_active,
+            hotkey::set_save_and_name_hotkey_recorder_active,
             hotkey::begin_hotkey_test,
             hotkey::cancel_hotkey_test,
             preferences::get_ui_preferences,
@@ -279,6 +303,11 @@ fn assert_required_managed_state(app: &tauri::AppHandle) -> Result<(), String> {
         "SaveReplayHotkeyManager",
         &mut missing,
     );
+    require_managed::<hotkey::SaveAndNameHotkeyManager>(
+        app,
+        "SaveAndNameHotkeyManager",
+        &mut missing,
+    );
     require_managed::<game_detection::GameDetectionManager>(
         app,
         "GameDetectionManager",
@@ -339,6 +368,9 @@ pub(crate) fn prepare_for_exit(app_handle: &tauri::AppHandle) {
         .shutdown_and_wait();
     app_handle
         .state::<hotkey::SaveReplayHotkeyManager>()
+        .unregister(app_handle);
+    app_handle
+        .state::<hotkey::SaveAndNameHotkeyManager>()
         .unregister(app_handle);
     app_handle
         .state::<library::EditorExportManager>()

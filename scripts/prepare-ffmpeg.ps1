@@ -23,9 +23,25 @@ $ffprobeTarget = Join-Path $binaryRoot "ffprobe-x86_64-pc-windows-msvc.exe"
 $licenseTarget = Join-Path $binaryRoot "FFmpeg-LICENSE.txt"
 $sourceTarget = Join-Path $binaryRoot "FFmpeg-SOURCE.txt"
 
+function Get-Sha256([string]$FilePath) {
+  $stream = [IO.File]::OpenRead($FilePath)
+  try {
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+      return -join ($sha256.ComputeHash($stream) | ForEach-Object { $_.ToString("X2") })
+    }
+    finally {
+      $sha256.Dispose()
+    }
+  }
+  finally {
+    $stream.Dispose()
+  }
+}
+
 function Test-ExpectedHash([string]$Path, [string]$Expected) {
   return (Test-Path -LiteralPath $Path -PathType Leaf) -and
-    ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -eq $Expected)
+    ((Get-Sha256 $Path) -eq $Expected)
 }
 
 if ((Test-ExpectedHash $ffmpegTarget $ffmpegSha256) -and

@@ -16,14 +16,16 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use crate::audio::OwnedHandle;
 use crate::capture::encoder::EncoderChoice;
 use crate::capture::targets::{self, CaptureTargetRequest, CaptureTargetType, WindowTarget};
-use crate::preferences::{UiPreferences, UiPreferencesManager};
+use crate::preferences::{GameDetectionMode, UiPreferences, UiPreferencesManager};
 use crate::replay::{
     AudioReplayConfiguration, AudioSourceKind, AudioTrackConfiguration, AudioTrackRole,
-    ReplayBufferManager, ReplayBufferStartRequest, ReplayLifecycleState,
+    ReplayBufferManager, ReplayBufferStartRequest, ReplayBufferStatus, ReplayLifecycleState,
+    ReplayQuality,
 };
 
 const DETECTION_INTERVAL: Duration = Duration::from_secs(2);
 const FAILED_START_COOLDOWN: Duration = Duration::from_secs(15);
+const REQUIRED_STABLE_POLLS: u8 = 2;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +36,7 @@ pub struct GameCandidate {
     process_id: u32,
     width: u32,
     height: u32,
+    foreground: bool,
     approved: bool,
     reason: String,
     #[serde(skip)]
@@ -46,10 +49,27 @@ pub struct GameDetectionStatus {
     success: bool,
     enabled: bool,
     auto_arm_enabled: bool,
+    detection_mode: GameDetectionMode,
+    stop_replay_on_close: bool,
+    ready_notification_enabled: bool,
     candidates: Vec<GameCandidate>,
     auto_armed_target_id: Option<String>,
+    replay_ready: bool,
+    replay_state: DetectedReplayState,
+    pending_target_id: Option<String>,
+    manual_override_active: bool,
     last_scan_at_ms: Option<u64>,
     error_message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum DetectedReplayState {
+    Detected,
+    Starting,
+    ReplayReady,
+    CaptureFailed,
+    ReplayStopped,
 }
 
 impl Default for GameDetectionStatus {
@@ -58,8 +78,15 @@ impl Default for GameDetectionStatus {
             success: true,
             enabled: false,
             auto_arm_enabled: false,
+            detection_mode: GameDetectionMode::AnyDetectedGame,
+            stop_replay_on_close: true,
+            ready_notification_enabled: true,
             candidates: Vec::new(),
             auto_armed_target_id: None,
+            replay_ready: false,
+            replay_state: DetectedReplayState::ReplayStopped,
+            pending_target_id: None,
+            manual_override_active: false,
             last_scan_at_ms: None,
             error_message: None,
         }
@@ -78,6 +105,9 @@ struct DetectionRuntime {
     status: GameDetectionStatus,
     last_failed_target: Option<(String, Instant)>,
     ready_notified_target: Option<String>,
+    pending_target: Option<String>,
+    pending_polls: u8,
+    manual_override_target: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -163,6 +193,9 @@ impl Default for DetectionRuntime {
             status: GameDetectionStatus::default(),
             last_failed_target: None,
             ready_notified_target: None,
+            pending_target: None,
+            pending_polls: 0,
+            manual_override_target: None,
         }
     }
 }
@@ -195,6 +228,37 @@ impl GameDetectionManager {
 
     pub fn status(&self) -> GameDetectionStatus {
         self.lock_runtime().status.clone()
+    }
+
+    pub fn status_with_replay(&self, replay: &ReplayBufferStatus) -> GameDetectionStatus {
+        let state = self.lock_runtime();
+        let mut status = state.status.clone();
+        status.replay_ready = status
+            .auto_armed_target_id
+            .as_ref()
+            .is_some_and(|_| is_authoritative_replay_ready(replay));
+        status.replay_state = detected_replay_state(
+            &status,
+            replay,
+            state
+                .last_failed_target
+                .as_ref()
+                .map(|(target, _)| target.as_str()),
+        );
+        status
+    }
+
+    pub fn set_manual_override(&self, target_id: Option<String>) {
+        let mut runtime = self.lock_runtime();
+        runtime.manual_override_target = target_id;
+        runtime.pending_target = None;
+        runtime.pending_polls = 0;
+        runtime.status.manual_override_active = runtime.manual_override_target.is_some();
+        runtime.status.pending_target_id = None;
+    }
+
+    pub fn note_manual_session_stopped(&self) {
+        self.set_manual_override(None);
     }
 
     pub fn shutdown_and_wait(&self) {
@@ -242,7 +306,15 @@ fn scan_and_auto_arm(app: &AppHandle, runtime: &Arc<Mutex<DetectionRuntime>>) {
     if !preferences.game_detection_enabled {
         stop_tracked_buffer_if_needed(&replay, runtime, "Game detection was disabled.");
         let mut state = lock_runtime(runtime);
-        state.status = GameDetectionStatus::default();
+        state.pending_target = None;
+        state.pending_polls = 0;
+        state.status = GameDetectionStatus {
+            detection_mode: preferences.game_detection_mode,
+            stop_replay_on_close: preferences.game_stop_replay_on_close,
+            ready_notification_enabled: preferences.game_ready_notification_enabled,
+            manual_override_active: state.manual_override_target.is_some(),
+            ..GameDetectionStatus::default()
+        };
         return;
     }
 
@@ -253,6 +325,9 @@ fn scan_and_auto_arm(app: &AppHandle, runtime: &Arc<Mutex<DetectionRuntime>>) {
             state.status.success = false;
             state.status.enabled = true;
             state.status.auto_arm_enabled = preferences.game_auto_arm;
+            state.status.detection_mode = preferences.game_detection_mode;
+            state.status.stop_replay_on_close = preferences.game_stop_replay_on_close;
+            state.status.ready_notification_enabled = preferences.game_ready_notification_enabled;
             state.status.last_scan_at_ms = Some(now_ms());
             state.status.error_message = Some(error);
             return;
@@ -263,62 +338,48 @@ fn scan_and_auto_arm(app: &AppHandle, runtime: &Arc<Mutex<DetectionRuntime>>) {
         .iter()
         .map(|window| window.id.as_str())
         .collect::<BTreeSet<_>>();
-    let tracked_target = lock_runtime(runtime).status.auto_armed_target_id.clone();
-    let replay_status = replay.status();
+    let mut replay_status = replay.status();
+    let mut tracked_target = lock_runtime(runtime).status.auto_armed_target_id.clone();
 
-    if let Some(target_id) = tracked_target.as_ref() {
-        let should_notify = replay_status.state == ReplayLifecycleState::Running
-            && lock_runtime(runtime).ready_notified_target.as_ref() != Some(target_id)
-            && candidates
-                .iter()
-                .any(|candidate| candidate.approved && &candidate.target_id == target_id);
-        if should_notify {
-            let target_label = replay_status.target_label.clone().or_else(|| {
-                candidates
-                    .iter()
-                    .find(|candidate| &candidate.target_id == target_id)
-                    .map(|candidate| format!("{} — {}", candidate.process_name, candidate.title))
-            });
-            lock_runtime(runtime).ready_notified_target = Some(target_id.clone());
-            let message = target_label
-                .as_ref()
-                .map(|label| format!("Replay Buffer ready for {label}."))
-                .unwrap_or_else(|| "Replay Buffer ready for the approved game.".to_string());
-            let _ = app.emit(
-                "game-auto-arm-feedback",
-                AutoArmFeedback {
-                    success: true,
-                    message,
-                    target_label: target_label.clone(),
-                },
-            );
-            crate::desktop::show_notification_overlay(
-                app,
-                "Replay Buffer Ready",
-                target_label
-                    .as_deref()
-                    .unwrap_or("Approved game capture is active"),
-            );
-            crate::desktop::refresh_tray_status(app);
+    {
+        let mut state = lock_runtime(runtime);
+        let manual_window_disappeared =
+            state
+                .manual_override_target
+                .as_deref()
+                .is_some_and(|target| {
+                    target.starts_with("window:") && !live_target_ids.contains(target)
+                });
+        if manual_window_disappeared && !replay_status.state.is_active() {
+            state.manual_override_target = None;
         }
     }
 
-    let tracked_still_approved = tracked_target.as_ref().is_none_or(|target| {
-        candidates
-            .iter()
-            .any(|candidate| candidate.approved && &candidate.target_id == target)
-    });
-    if !tracked_still_approved {
+    if !preferences.game_auto_arm && tracked_target.is_some() {
+        stop_tracked_buffer_if_needed(&replay, runtime, "Game auto-start was disabled.");
+        tracked_target = None;
+        replay_status = replay.status();
+    }
+
+    if tracked_target.as_ref().is_some_and(|target| {
+        live_target_ids.contains(target.as_str())
+            && !candidate_is_eligible(&preferences, &candidates, target)
+    }) {
         stop_tracked_buffer_if_needed(
             &replay,
             runtime,
-            "The process approval was removed or excluded.",
+            "The game was excluded or is no longer eligible in the selected detection mode.",
         );
+        tracked_target = None;
+        replay_status = replay.status();
     } else if tracked_target
         .as_ref()
-        .is_some_and(|target| !live_target_ids.contains(target.as_str()))
+        .is_some_and(|target| closed_target_requires_stop(&preferences, target, &live_target_ids))
+        && replay_status.capture_health != "Recovering"
     {
-        stop_tracked_buffer_if_needed(&replay, runtime, "The approved game window closed.");
+        stop_tracked_buffer_if_needed(&replay, runtime, "The detected game window closed.");
+        tracked_target = None;
+        replay_status = replay.status();
     } else if tracked_target.is_some()
         && matches!(
             replay_status.state,
@@ -329,10 +390,9 @@ fn scan_and_auto_arm(app: &AppHandle, runtime: &Arc<Mutex<DetectionRuntime>>) {
         if replay_status.state == ReplayLifecycleState::Error {
             let target = tracked_target.clone().unwrap_or_default();
             state.last_failed_target = Some((target, Instant::now()));
-            let message = replay_status
-                .error_message
-                .clone()
-                .unwrap_or_else(|| "The approved game capture stopped with an error.".to_string());
+            let message = replay_status.error_message.clone().unwrap_or_else(|| {
+                "The automatically detected game capture stopped with an error.".to_string()
+            });
             let _ = app.emit(
                 "game-auto-arm-feedback",
                 AutoArmFeedback {
@@ -344,92 +404,375 @@ fn scan_and_auto_arm(app: &AppHandle, runtime: &Arc<Mutex<DetectionRuntime>>) {
         }
         state.ready_notified_target = None;
         state.status.auto_armed_target_id = None;
+        tracked_target = None;
     }
+
+    if let Some(target_id) = tracked_target.as_ref() {
+        let should_mark_ready = mark_ready_transition(
+            runtime,
+            target_id,
+            is_authoritative_replay_ready(&replay_status),
+            candidate_is_eligible(&preferences, &candidates, target_id),
+        );
+        if should_mark_ready {
+            if preferences.game_ready_notification_enabled {
+                let target_label = candidates
+                    .iter()
+                    .find(|candidate| &candidate.target_id == target_id)
+                    .map(|candidate| candidate.title.clone())
+                    .or_else(|| replay_status.target_label.clone());
+                let message = target_label
+                    .as_ref()
+                    .map(|label| format!("Replay Ready for {label}."))
+                    .unwrap_or_else(|| "Replay Ready for your game.".to_string());
+                let _ = app.emit(
+                    "game-auto-arm-feedback",
+                    AutoArmFeedback {
+                        success: true,
+                        message,
+                        target_label: target_label.clone(),
+                    },
+                );
+                crate::desktop::show_notification_overlay(
+                    app,
+                    "Replay Ready",
+                    target_label.as_deref().unwrap_or("Game capture is active"),
+                    None,
+                );
+                crate::desktop::refresh_tray_status(app);
+            }
+        }
+    }
+
+    let manual_override_active = lock_runtime(runtime).manual_override_target.is_some();
+    let preferred_pending_target = lock_runtime(runtime).pending_target.clone();
+    let selected = if tracked_target.is_none()
+        && !manual_override_active
+        && matches!(
+            replay_status.state,
+            ReplayLifecycleState::Stopped | ReplayLifecycleState::Error
+        ) {
+        select_automatic_candidate(
+            &preferences,
+            &candidates,
+            preferred_pending_target.as_deref(),
+        )
+    } else {
+        None
+    };
+    let stabilized_target = observe_pending_candidate(
+        runtime,
+        selected.map(|candidate| candidate.target_id.as_str()),
+    );
 
     {
         let mut state = lock_runtime(runtime);
         let auto_armed_target_id = state.status.auto_armed_target_id.clone();
-        state.status = GameDetectionStatus {
+        let replay_ready = auto_armed_target_id
+            .as_ref()
+            .is_some_and(|_| is_authoritative_replay_ready(&replay_status));
+        let mut status = GameDetectionStatus {
             success: true,
             enabled: true,
             auto_arm_enabled: preferences.game_auto_arm,
+            detection_mode: preferences.game_detection_mode,
+            stop_replay_on_close: preferences.game_stop_replay_on_close,
+            ready_notification_enabled: preferences.game_ready_notification_enabled,
             candidates: candidates.clone(),
             auto_armed_target_id,
+            replay_ready,
+            replay_state: DetectedReplayState::ReplayStopped,
+            pending_target_id: state.pending_target.clone(),
+            manual_override_active: state.manual_override_target.is_some(),
             last_scan_at_ms: Some(now_ms()),
             error_message: None,
         };
+        status.replay_state = detected_replay_state(
+            &status,
+            &replay_status,
+            state
+                .last_failed_target
+                .as_ref()
+                .map(|(target, _)| target.as_str()),
+        );
+        state.status = status;
     }
 
-    if !preferences.game_auto_arm
-        || !matches!(
+    let Some(stabilized_target) = stabilized_target else {
+        return;
+    };
+
+    // This is the one authoritative automatic-start gate. The preference lock remains held
+    // through ReplayBufferManager::start so an update that completes with auto-start OFF can
+    // never be followed by a start based on an older detector snapshot.
+    let automatic_start = preference_manager.with_current(|current| {
+        let candidate = automatic_start_candidate_for_target(
+            current,
             replay.status().state,
-            ReplayLifecycleState::Stopped | ReplayLifecycleState::Error
-        )
-    {
-        return;
-    }
-    let Some(candidate) = single_approved_candidate(&candidates) else {
-        return;
-    };
-    let retry_blocked = lock_runtime(runtime)
-        .last_failed_target
-        .as_ref()
-        .is_some_and(|(target, attempted)| {
-            target == &candidate.target_id && attempted.elapsed() < FAILED_START_COOLDOWN
-        });
-    if retry_blocked {
-        return;
-    }
-
-    let request = ReplayBufferStartRequest {
-        target: CaptureTargetRequest {
-            target_type: CaptureTargetType::Window,
-            id: candidate.target_id.clone(),
-        },
-        encoder: EncoderChoice::Automatic,
-        replay_duration_seconds: 120,
-        frame_rate: 60,
-        audio: AudioReplayConfiguration {
-            tracks: vec![AudioTrackConfiguration {
-                role: AudioTrackRole::Game,
-                enabled: true,
-                source_kind: AudioSourceKind::Process,
-                process_id: Some(candidate.process_id),
-                endpoint_id: None,
-                source_label: Some(candidate.process_name.clone()),
-            }],
-        },
-    };
-    let result = replay.start(request);
-    if result.success {
-        {
-            let mut state = lock_runtime(runtime);
-            state.status.auto_armed_target_id = Some(candidate.target_id.clone());
-            state.last_failed_target = None;
-            state.ready_notified_target = None;
+            &candidates,
+            &stabilized_target,
+            lock_runtime(runtime).manual_override_target.is_some(),
+        )?;
+        let retry_blocked = lock_runtime(runtime)
+            .last_failed_target
+            .as_ref()
+            .is_some_and(|(target, attempted)| {
+                target == &candidate.target_id && attempted.elapsed() < FAILED_START_COOLDOWN
+            });
+        if retry_blocked {
+            return None;
         }
+
+        let request = ReplayBufferStartRequest {
+            target: CaptureTargetRequest {
+                target_type: CaptureTargetType::Window,
+                id: candidate.target_id.clone(),
+            },
+            capture_mode: current.capture_mode,
+            encoder: match current.replay_encoder.as_str() {
+                "hevc" => EncoderChoice::Hevc,
+                "h264" => EncoderChoice::H264,
+                _ => EncoderChoice::Automatic,
+            },
+            replay_duration_seconds: current.replay_duration_seconds,
+            frame_rate: current.replay_frame_rate,
+            quality: match current.replay_quality.as_str() {
+                "high" => ReplayQuality::High,
+                "smallerFiles" => ReplayQuality::SmallerFiles,
+                _ => ReplayQuality::Balanced,
+            },
+            audio: AudioReplayConfiguration {
+                tracks: vec![AudioTrackConfiguration {
+                    role: AudioTrackRole::Game,
+                    enabled: true,
+                    source_kind: AudioSourceKind::Process,
+                    process_id: Some(candidate.process_id),
+                    endpoint_id: None,
+                    source_label: Some(candidate.process_name.clone()),
+                }],
+            },
+        };
+        Some((candidate.clone(), replay.start(request)))
+    });
+    let Some((candidate, result)) = automatic_start else {
+        return;
+    };
+    if result.started_new_session {
+        let _ = app.emit("replay-buffer-status-changed", result.status.clone());
+        let mut state = lock_runtime(runtime);
+        state.status.auto_armed_target_id = Some(candidate.target_id.clone());
+        state.status.replay_ready = false;
+        state.status.pending_target_id = None;
+        state.last_failed_target = None;
+        state.ready_notified_target = None;
+        state.pending_target = None;
+        state.pending_polls = 0;
+        drop(state);
         crate::desktop::refresh_tray_status(app);
-    } else {
+    } else if !result.success {
         let message = result
             .error_message
-            .unwrap_or_else(|| "The approved game could not be auto-armed.".to_string());
-        lock_runtime(runtime).last_failed_target =
-            Some((candidate.target_id.clone(), Instant::now()));
+            .unwrap_or_else(|| "The detected game could not start Replay.".to_string());
+        let mut state = lock_runtime(runtime);
+        state.last_failed_target = Some((candidate.target_id.clone(), Instant::now()));
+        state.pending_target = None;
+        state.pending_polls = 0;
+        drop(state);
         let _ = app.emit(
             "game-auto-arm-feedback",
             AutoArmFeedback {
                 success: false,
                 message,
-                target_label: Some(candidate.process_name.clone()),
+                target_label: Some(candidate.title.clone()),
             },
         );
     }
 }
 
-fn single_approved_candidate(candidates: &[GameCandidate]) -> Option<&GameCandidate> {
-    let mut approved = candidates.iter().filter(|candidate| candidate.approved);
-    let candidate = approved.next()?;
-    approved.next().is_none().then_some(candidate)
+fn candidate_is_eligible(
+    preferences: &UiPreferences,
+    candidates: &[GameCandidate],
+    target_id: &str,
+) -> bool {
+    let excluded = normalized_set(&preferences.game_detection_excluded_processes);
+    candidates.iter().any(|candidate| {
+        candidate.target_id == target_id
+            && !excluded.contains(&normalize_process(&candidate.process_name))
+            && (preferences.game_detection_mode == GameDetectionMode::AnyDetectedGame
+                || candidate.approved)
+    })
+}
+
+fn closed_target_requires_stop(
+    preferences: &UiPreferences,
+    target_id: &str,
+    live_target_ids: &BTreeSet<&str>,
+) -> bool {
+    preferences.game_stop_replay_on_close && !live_target_ids.contains(target_id)
+}
+
+fn select_automatic_candidate<'a>(
+    preferences: &UiPreferences,
+    candidates: &'a [GameCandidate],
+    stable_target_id: Option<&str>,
+) -> Option<&'a GameCandidate> {
+    if !preferences.game_detection_enabled || !preferences.game_auto_arm {
+        return None;
+    }
+    let excluded = normalized_set(&preferences.game_detection_excluded_processes);
+    candidates
+        .iter()
+        .filter(|candidate| {
+            !excluded.contains(&normalize_process(&candidate.process_name))
+                && (preferences.game_detection_mode == GameDetectionMode::AnyDetectedGame
+                    || candidate.approved)
+        })
+        .max_by(|left, right| {
+            left.foreground
+                .cmp(&right.foreground)
+                .then_with(|| {
+                    (u64::from(left.width) * u64::from(left.height))
+                        .cmp(&(u64::from(right.width) * u64::from(right.height)))
+                })
+                .then_with(|| left.confidence_score.cmp(&right.confidence_score))
+                .then_with(|| {
+                    (stable_target_id == Some(left.target_id.as_str()))
+                        .cmp(&(stable_target_id == Some(right.target_id.as_str())))
+                })
+                .then_with(|| right.process_name.cmp(&left.process_name))
+                .then_with(|| right.target_id.cmp(&left.target_id))
+        })
+}
+
+fn observe_pending_candidate(
+    runtime: &Arc<Mutex<DetectionRuntime>>,
+    target_id: Option<&str>,
+) -> Option<String> {
+    let mut state = lock_runtime(runtime);
+    let Some(target_id) = target_id else {
+        state.pending_target = None;
+        state.pending_polls = 0;
+        return None;
+    };
+    if state.pending_target.as_deref() == Some(target_id) {
+        state.pending_polls = state.pending_polls.saturating_add(1);
+    } else {
+        state.pending_target = Some(target_id.to_string());
+        state.pending_polls = 1;
+    }
+    (state.pending_polls >= REQUIRED_STABLE_POLLS).then(|| target_id.to_string())
+}
+
+fn mark_ready_transition(
+    runtime: &Arc<Mutex<DetectionRuntime>>,
+    target_id: &str,
+    running: bool,
+    eligible: bool,
+) -> bool {
+    if !running || !eligible {
+        return false;
+    }
+    let mut state = lock_runtime(runtime);
+    if state.ready_notified_target.as_deref() == Some(target_id) {
+        return false;
+    }
+    state.ready_notified_target = Some(target_id.to_string());
+    true
+}
+
+fn is_authoritative_replay_ready(status: &ReplayBufferStatus) -> bool {
+    replay_ready_from_signals(
+        status.state,
+        &status.capture_health,
+        status.frames_observed,
+        status.source_frames_detached,
+    )
+}
+
+fn replay_ready_from_signals(
+    state: ReplayLifecycleState,
+    capture_health: &str,
+    frames_observed: u64,
+    source_frames_detached: u64,
+) -> bool {
+    state == ReplayLifecycleState::Running
+        && capture_health == "Healthy"
+        && frames_observed > 0
+        && source_frames_detached > 0
+}
+
+fn detected_replay_state(
+    detection: &GameDetectionStatus,
+    replay: &ReplayBufferStatus,
+    last_failed_target: Option<&str>,
+) -> DetectedReplayState {
+    let has_tracked_session = detection.auto_armed_target_id.is_some();
+    let current_candidate_failed = last_failed_target.is_some_and(|failed| {
+        detection
+            .candidates
+            .iter()
+            .any(|candidate| candidate.target_id == failed)
+    });
+    detected_replay_state_from_signals(
+        has_tracked_session,
+        current_candidate_failed,
+        !detection.candidates.is_empty(),
+        replay.state,
+        &replay.capture_health,
+        is_authoritative_replay_ready(replay),
+    )
+}
+
+fn detected_replay_state_from_signals(
+    has_tracked_session: bool,
+    current_candidate_failed: bool,
+    has_candidates: bool,
+    replay_state: ReplayLifecycleState,
+    capture_health: &str,
+    replay_ready: bool,
+) -> DetectedReplayState {
+    if (has_tracked_session || current_candidate_failed)
+        && (replay_state == ReplayLifecycleState::Error || capture_health == "Failed")
+    {
+        DetectedReplayState::CaptureFailed
+    } else if has_tracked_session {
+        if replay_ready {
+            DetectedReplayState::ReplayReady
+        } else {
+            match replay_state {
+                ReplayLifecycleState::Starting | ReplayLifecycleState::Running => {
+                    DetectedReplayState::Starting
+                }
+                ReplayLifecycleState::Error => DetectedReplayState::CaptureFailed,
+                ReplayLifecycleState::Stopped | ReplayLifecycleState::Stopping => {
+                    DetectedReplayState::ReplayStopped
+                }
+            }
+        }
+    } else if !has_candidates {
+        DetectedReplayState::ReplayStopped
+    } else {
+        DetectedReplayState::Detected
+    }
+}
+
+fn automatic_start_candidate_for_target<'a>(
+    preferences: &UiPreferences,
+    replay_state: ReplayLifecycleState,
+    candidates: &'a [GameCandidate],
+    stabilized_target_id: &str,
+    manual_override_active: bool,
+) -> Option<&'a GameCandidate> {
+    if manual_override_active
+        || !matches!(
+            replay_state,
+            ReplayLifecycleState::Stopped | ReplayLifecycleState::Error
+        )
+    {
+        return None;
+    }
+    let selected = select_automatic_candidate(preferences, candidates, Some(stabilized_target_id))?;
+    (selected.target_id == stabilized_target_id).then_some(selected)
 }
 
 fn stop_tracked_buffer_if_needed(
@@ -440,6 +783,8 @@ fn stop_tracked_buffer_if_needed(
     let tracked = {
         let mut state = lock_runtime(runtime);
         state.ready_notified_target = None;
+        state.pending_target = None;
+        state.pending_polls = 0;
         state.status.auto_armed_target_id.take()
     };
     if tracked.is_some() && replay.status().state.is_active() {
@@ -465,14 +810,15 @@ fn classify_windows_with_process_tree(
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
         right
-            .approved
-            .cmp(&left.approved)
-            .then_with(|| right.confidence_score.cmp(&left.confidence_score))
+            .foreground
+            .cmp(&left.foreground)
             .then_with(|| {
                 (u64::from(right.width) * u64::from(right.height))
                     .cmp(&(u64::from(left.width) * u64::from(left.height)))
             })
+            .then_with(|| right.confidence_score.cmp(&left.confidence_score))
             .then_with(|| left.process_name.cmp(&right.process_name))
+            .then_with(|| left.target_id.cmp(&right.target_id))
     });
     candidates
 }
@@ -575,6 +921,7 @@ fn classify_window(
         process_id: window.process_id,
         width: window.width,
         height: window.height,
+        foreground: window.foreground,
         approved: explicitly_approved,
         reason,
         confidence_score,
@@ -763,8 +1110,28 @@ fn now_ms() -> u64 {
 }
 
 #[tauri::command]
-pub fn get_game_detection_status(manager: State<'_, GameDetectionManager>) -> GameDetectionStatus {
-    manager.status()
+pub fn get_game_detection_status(
+    manager: State<'_, GameDetectionManager>,
+    replay: State<'_, ReplayBufferManager>,
+) -> GameDetectionStatus {
+    manager.status_with_replay(&replay.status())
+}
+
+#[tauri::command]
+pub fn set_game_detection_manual_override(
+    manager: State<'_, GameDetectionManager>,
+    target_id: Option<String>,
+) -> Result<GameDetectionStatus, String> {
+    let target_id = target_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if target_id.as_ref().is_some_and(|value| {
+        value.len() > 256 || !(value.starts_with("window:") || value.starts_with("monitor:"))
+    }) {
+        return Err("The manual capture target identifier is invalid.".to_string());
+    }
+    manager.set_manual_override(target_id);
+    Ok(manager.status())
 }
 
 #[cfg(test)]
@@ -779,6 +1146,7 @@ mod tests {
             process_id: 42,
             width,
             height,
+            foreground: false,
             executable_path: None,
             monitor_width: Some(1920),
             monitor_height: Some(1080),
@@ -793,6 +1161,11 @@ mod tests {
 
     fn borderless(mut window: WindowTarget) -> WindowTarget {
         window.title_bar_height = Some(0);
+        window
+    }
+
+    fn foreground(mut window: WindowTarget) -> WindowTarget {
+        window.foreground = true;
         window
     }
 
@@ -987,7 +1360,59 @@ mod tests {
         );
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].approved);
-        assert!(single_approved_candidate(&candidates).is_some());
+        assert!(select_automatic_candidate(&preferences, &candidates, None).is_some());
+    }
+
+    #[test]
+    fn auto_arm_off_detects_approved_game_but_keeps_replay_stopped() {
+        let preferences = UiPreferences {
+            game_detection_enabled: true,
+            game_auto_arm: false,
+            game_detection_approved_processes: vec!["approved_game".into()],
+            ..UiPreferences::default()
+        };
+        let candidates = classify(
+            &[window("approved_game.exe", "Approved Game", 1920, 1080)],
+            &preferences,
+        );
+
+        assert_eq!(candidates.len(), 1, "detection may still observe the game");
+        assert!(candidates[0].approved);
+        assert!(select_automatic_candidate(&preferences, &candidates, None).is_none());
+    }
+
+    #[test]
+    fn auto_arm_on_starts_exactly_once_across_repeated_detection_polls() {
+        let preferences = UiPreferences {
+            game_detection_enabled: true,
+            game_auto_arm: true,
+            game_detection_approved_processes: vec!["approved_game".into()],
+            ..UiPreferences::default()
+        };
+        let candidates = classify(
+            &[window("approved_game.exe", "Approved Game", 1920, 1080)],
+            &preferences,
+        );
+        let mut replay_state = ReplayLifecycleState::Stopped;
+        let mut start_count = 0;
+        let target_id = candidates[0].target_id.clone();
+
+        for _ in 0..5 {
+            if automatic_start_candidate_for_target(
+                &preferences,
+                replay_state,
+                &candidates,
+                &target_id,
+                false,
+            )
+            .is_some()
+            {
+                start_count += 1;
+                replay_state = ReplayLifecycleState::Running;
+            }
+        }
+
+        assert_eq!(start_count, 1);
     }
 
     #[test]
@@ -1021,15 +1446,15 @@ mod tests {
             1080,
         )];
         let first = classify(&live, &preferences);
-        assert!(single_approved_candidate(&first).is_some());
+        assert!(select_automatic_candidate(&preferences, &first, None).is_some());
         let disappeared = classify(&[], &preferences);
-        assert!(single_approved_candidate(&disappeared).is_none());
+        assert!(select_automatic_candidate(&preferences, &disappeared, None).is_none());
         let reappeared = classify(&live, &preferences);
-        assert!(single_approved_candidate(&reappeared).is_some());
+        assert!(select_automatic_candidate(&preferences, &reappeared, None).is_some());
     }
 
     #[test]
-    fn more_than_one_approved_live_target_never_auto_arms() {
+    fn multiple_approved_live_targets_choose_one_deterministically() {
         let preferences = UiPreferences {
             game_detection_enabled: true,
             game_auto_arm: true,
@@ -1044,6 +1469,308 @@ mod tests {
             &preferences,
         );
         assert_eq!(candidates.len(), 2);
-        assert!(single_approved_candidate(&candidates).is_none());
+        let first = select_automatic_candidate(&preferences, &candidates, None)
+            .unwrap()
+            .target_id
+            .clone();
+        let second = select_automatic_candidate(&preferences, &candidates, None)
+            .unwrap()
+            .target_id
+            .clone();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn any_detected_mode_selects_a_confident_unapproved_game() {
+        let preferences = UiPreferences {
+            game_detection_enabled: true,
+            game_auto_arm: true,
+            game_detection_mode: GameDetectionMode::AnyDetectedGame,
+            ..UiPreferences::default()
+        };
+        let candidates = classify(
+            &[with_path(
+                window("new_game.exe", "New Game", 1920, 1080),
+                r"D:\SteamLibrary\steamapps\common\New Game\new_game.exe",
+            )],
+            &preferences,
+        );
+        let selected = select_automatic_candidate(&preferences, &candidates, None).unwrap();
+        assert_eq!(selected.process_name, "new_game.exe");
+        assert!(!selected.approved);
+    }
+
+    #[test]
+    fn approved_only_mode_ignores_unapproved_games_and_accepts_an_approval() {
+        let mut preferences = UiPreferences {
+            game_detection_mode: GameDetectionMode::ApprovedGamesOnly,
+            ..UiPreferences::default()
+        };
+        let running = [with_path(
+            window("strict_game.exe", "Strict Game", 1920, 1080),
+            r"D:\SteamLibrary\steamapps\common\Strict Game\strict_game.exe",
+        )];
+        let candidates = classify(&running, &preferences);
+        assert!(select_automatic_candidate(&preferences, &candidates, None).is_none());
+
+        preferences.game_detection_approved_processes = vec!["strict_game".into()];
+        let approved = classify(&running, &preferences);
+        assert_eq!(
+            select_automatic_candidate(&preferences, &approved, None)
+                .unwrap()
+                .process_name,
+            "strict_game.exe"
+        );
+    }
+
+    #[test]
+    fn foreground_game_wins_deterministically_over_a_larger_candidate() {
+        let preferences = UiPreferences::default();
+        let candidates = classify(
+            &[
+                with_path(
+                    foreground(window("foreground.exe", "Foreground Game", 1280, 720)),
+                    r"D:\SteamLibrary\steamapps\common\Foreground\foreground.exe",
+                ),
+                with_path(
+                    window("larger.exe", "Larger Game", 2560, 1440),
+                    r"D:\SteamLibrary\steamapps\common\Larger\larger.exe",
+                ),
+            ],
+            &preferences,
+        );
+        assert_eq!(
+            select_automatic_candidate(&preferences, &candidates, None)
+                .unwrap()
+                .process_name,
+            "foreground.exe"
+        );
+    }
+
+    #[test]
+    fn candidate_must_survive_two_polls_and_repeated_polls_start_only_once() {
+        let preferences = UiPreferences::default();
+        let candidates = classify(
+            &[with_path(
+                window("stable.exe", "Stable Game", 1920, 1080),
+                r"D:\SteamLibrary\steamapps\common\Stable\stable.exe",
+            )],
+            &preferences,
+        );
+        let runtime = Arc::new(Mutex::new(DetectionRuntime::default()));
+        let target = candidates[0].target_id.as_str();
+        let mut replay_state = ReplayLifecycleState::Stopped;
+        let mut starts = 0;
+        for _ in 0..5 {
+            if let Some(stable) = observe_pending_candidate(&runtime, Some(target)) {
+                if automatic_start_candidate_for_target(
+                    &preferences,
+                    replay_state,
+                    &candidates,
+                    &stable,
+                    false,
+                )
+                .is_some()
+                {
+                    starts += 1;
+                    replay_state = ReplayLifecycleState::Running;
+                }
+            }
+        }
+        assert_eq!(starts, 1);
+    }
+
+    #[test]
+    fn changing_candidates_resets_stabilization() {
+        let runtime = Arc::new(Mutex::new(DetectionRuntime::default()));
+        assert!(observe_pending_candidate(&runtime, Some("game-a")).is_none());
+        assert!(observe_pending_candidate(&runtime, Some("game-b")).is_none());
+        assert_eq!(
+            observe_pending_candidate(&runtime, Some("game-b")),
+            Some("game-b".into())
+        );
+    }
+
+    #[test]
+    fn manual_override_blocks_the_automatic_start_gate_until_cleared() {
+        let manager = GameDetectionManager::new();
+        let preferences = UiPreferences::default();
+        let candidates = classify(
+            &[with_path(
+                window("manual_game.exe", "Manual Game", 1920, 1080),
+                r"D:\SteamLibrary\steamapps\common\Manual Game\manual_game.exe",
+            )],
+            &preferences,
+        );
+        manager.set_manual_override(Some("window:manual".into()));
+        assert!(manager.status().manual_override_active);
+        assert!(manager.lock_runtime().manual_override_target.is_some());
+        assert!(automatic_start_candidate_for_target(
+            &preferences,
+            ReplayLifecycleState::Stopped,
+            &candidates,
+            &candidates[0].target_id,
+            true,
+        )
+        .is_none());
+        manager.note_manual_session_stopped();
+        assert!(!manager.status().manual_override_active);
+        assert!(manager.lock_runtime().manual_override_target.is_none());
+    }
+
+    #[test]
+    fn replay_ready_transition_is_emitted_once_per_session() {
+        let runtime = Arc::new(Mutex::new(DetectionRuntime::default()));
+        assert!(mark_ready_transition(&runtime, "game", true, true));
+        assert!(!mark_ready_transition(&runtime, "game", true, true));
+        lock_runtime(&runtime).ready_notified_target = None;
+        assert!(mark_ready_transition(&runtime, "game", true, true));
+        assert!(!mark_ready_transition(&runtime, "other", false, true));
+    }
+
+    #[test]
+    fn detected_game_does_not_report_ready_while_starting_or_after_capture_failure() {
+        assert!(!replay_ready_from_signals(
+            ReplayLifecycleState::Starting,
+            "Probing",
+            0,
+            0,
+        ));
+        assert_eq!(
+            detected_replay_state_from_signals(
+                true,
+                false,
+                true,
+                ReplayLifecycleState::Starting,
+                "Probing",
+                false,
+            ),
+            DetectedReplayState::Starting,
+        );
+        assert_eq!(
+            detected_replay_state_from_signals(
+                false,
+                true,
+                true,
+                ReplayLifecycleState::Error,
+                "Failed",
+                false,
+            ),
+            DetectedReplayState::CaptureFailed,
+        );
+    }
+
+    #[test]
+    fn detected_game_reports_ready_only_after_healthy_production_frames() {
+        assert!(!replay_ready_from_signals(
+            ReplayLifecycleState::Running,
+            "Healthy",
+            1,
+            0,
+        ));
+        assert!(replay_ready_from_signals(
+            ReplayLifecycleState::Running,
+            "Healthy",
+            1,
+            1,
+        ));
+        assert_eq!(
+            detected_replay_state_from_signals(
+                true,
+                false,
+                true,
+                ReplayLifecycleState::Running,
+                "Healthy",
+                true,
+            ),
+            DetectedReplayState::ReplayReady,
+        );
+    }
+
+    #[test]
+    fn active_target_stays_stable_when_another_game_becomes_foreground() {
+        let preferences = UiPreferences::default();
+        let initial = classify(
+            &[with_path(
+                window("game_one.exe", "Game One", 1920, 1080),
+                r"D:\SteamLibrary\steamapps\common\Game One\game_one.exe",
+            )],
+            &preferences,
+        );
+        let active_target = initial[0].target_id.clone();
+        let later = classify(
+            &[
+                with_path(
+                    window("game_one.exe", "Game One", 1920, 1080),
+                    r"D:\SteamLibrary\steamapps\common\Game One\game_one.exe",
+                ),
+                with_path(
+                    foreground(window("game_two.exe", "Game Two", 1920, 1080)),
+                    r"D:\SteamLibrary\steamapps\common\Game Two\game_two.exe",
+                ),
+            ],
+            &preferences,
+        );
+        assert!(candidate_is_eligible(&preferences, &later, &active_target));
+        assert_ne!(
+            select_automatic_candidate(&preferences, &later, None)
+                .unwrap()
+                .target_id,
+            active_target
+        );
+        // The runtime does not call selection while auto_armed_target_id is populated.
+        assert_eq!(active_target, initial[0].target_id);
+    }
+
+    #[test]
+    fn closed_game_stops_once_and_a_later_game_can_stabilize() {
+        let preferences = UiPreferences::default();
+        let first = classify(
+            &[with_path(
+                window("first.exe", "First", 1920, 1080),
+                r"D:\SteamLibrary\steamapps\common\First\first.exe",
+            )],
+            &preferences,
+        );
+        let mut tracked = Some(first[0].target_id.clone());
+        let mut stop_count = 0;
+        let no_live_targets = BTreeSet::new();
+        for _ in 0..3 {
+            if tracked.as_ref().is_some_and(|target| {
+                closed_target_requires_stop(&preferences, target, &no_live_targets)
+            }) {
+                stop_count += 1;
+                tracked = None;
+            }
+        }
+        assert_eq!(stop_count, 1);
+
+        let next = classify(
+            &[with_path(
+                window("next.exe", "Next", 1920, 1080),
+                r"D:\SteamLibrary\steamapps\common\Next\next.exe",
+            )],
+            &preferences,
+        );
+        let runtime = Arc::new(Mutex::new(DetectionRuntime::default()));
+        let selected = select_automatic_candidate(&preferences, &next, None).unwrap();
+        assert!(observe_pending_candidate(&runtime, Some(&selected.target_id)).is_none());
+        assert_eq!(
+            observe_pending_candidate(&runtime, Some(&selected.target_id)),
+            Some(selected.target_id.clone())
+        );
+    }
+
+    #[test]
+    fn close_stop_preference_can_leave_detection_from_proactively_stopping() {
+        let preferences = UiPreferences {
+            game_stop_replay_on_close: false,
+            ..UiPreferences::default()
+        };
+        assert!(!closed_target_requires_stop(
+            &preferences,
+            "closed-game",
+            &BTreeSet::new()
+        ));
     }
 }

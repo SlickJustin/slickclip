@@ -25,6 +25,22 @@ function Assert-HttpsUrl([string]$Name, [string]$Value) {
   }
 }
 
+function Get-Sha256([string]$FilePath) {
+  $stream = [IO.File]::OpenRead($FilePath)
+  try {
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+      return -join ($sha256.ComputeHash($stream) | ForEach-Object { $_.ToString("X2") })
+    }
+    finally {
+      $sha256.Dispose()
+    }
+  }
+  finally {
+    $stream.Dispose()
+  }
+}
+
 $updaterEndpoint = Get-RequiredEnvironmentValue "SLICKCLIP_UPDATER_ENDPOINT"
 $updaterPublicKey = Get-RequiredEnvironmentValue "SLICKCLIP_UPDATER_PUBLIC_KEY"
 $artifactUrl = Get-RequiredEnvironmentValue "SLICKCLIP_UPDATER_ARTIFACT_URL"
@@ -122,8 +138,8 @@ try {
     [Text.UTF8Encoding]::new($false)
   )
 
-  $applicationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $application.FullName).Hash
-  $installerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer.FullName).Hash
+  $applicationHash = Get-Sha256 $application.FullName
+  $installerHash = Get-Sha256 $installer.FullName
   Write-Host "Signed SlickClip release artifacts verified."
   Write-Host "Application: $($application.FullName) SHA-256 $applicationHash"
   Write-Host "Installer: $($installer.FullName) SHA-256 $installerHash"

@@ -122,6 +122,44 @@ pub struct DxgiDuplicationApi {
     is_holding_frame: bool,
 }
 
+/// D3D11 resources retained while an invalid Desktop Duplication interface is released.
+///
+/// Presentation transitions can invalidate duplication for several seconds. Keeping only the
+/// device resources lets callers wait for a stable output without retaining the invalid
+/// duplication or unnecessarily rebuilding the D3D11 device on every observation.
+pub struct DxgiDuplicationRecreationContext {
+    d3d_device: ID3D11Device,
+    d3d_device_context: ID3D11DeviceContext,
+    dxgi_device: IDXGIDevice4,
+}
+
+impl DxgiDuplicationRecreationContext {
+    /// Re-resolves `monitor` and creates a new duplication using the retained D3D11 device.
+    /// The context remains reusable when Windows is still transitioning and creation fails.
+    pub fn recreate_for_monitor_options(
+        &self,
+        monitor: Monitor,
+        supported_formats: &[DxgiDuplicationFormat],
+    ) -> Result<DxgiDuplicationApi, Error> {
+        let output = find_output_for_monitor(&self.dxgi_device, monitor)?;
+        let supported_formats = map_supported_formats(supported_formats);
+        let duplication = unsafe {
+            output.DuplicateOutput1(&self.d3d_device, 0, &supported_formats)?
+        };
+        let duplication_desc = unsafe { duplication.GetDesc() };
+
+        Ok(DxgiDuplicationApi {
+            d3d_device: self.d3d_device.clone(),
+            d3d_device_context: self.d3d_device_context.clone(),
+            duplication,
+            duplication_desc,
+            dxgi_device: self.dxgi_device.clone(),
+            output,
+            is_holding_frame: false,
+        })
+    }
+}
+
 fn enable_per_monitor_dpi_awareness() -> Result<(), Error> {
     match unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) } {
         Ok(()) => Ok(()),
@@ -208,6 +246,19 @@ impl DxgiDuplicationApi {
         })
     }
 
+    /// Releases the current duplication/output while retaining the D3D11 device resources needed
+    /// for a later state-aware recreation attempt.
+    pub fn into_recreation_context(mut self) -> DxgiDuplicationRecreationContext {
+        let _ = self.release_frame_if_needed();
+        let context = DxgiDuplicationRecreationContext {
+            d3d_device: self.d3d_device.clone(),
+            d3d_device_context: self.d3d_device_context.clone(),
+            dxgi_device: self.dxgi_device.clone(),
+        };
+        drop(self);
+        context
+    }
+
     /// Constructs a new duplication session for the specified monitor.
     ///
     /// Internally creates a Direct3D 11 device and immediate context using the crate's d3d11
@@ -280,6 +331,37 @@ impl DxgiDuplicationApi {
     pub fn recreate_options(self, supported_formats: &[DxgiDuplicationFormat]) -> Result<Self, Error> {
         let supported_formats = map_supported_formats(supported_formats);
         self.recreate_with_formats(&supported_formats)
+    }
+
+    /// Re-resolves the output for `monitor` and recreates Desktop Duplication while retaining the
+    /// existing D3D11 device/context. This is useful after a presentation transition where the
+    /// target window may have moved outputs. If the monitor is no longer reachable through the
+    /// current device's adapter, callers can fall back to [`Self::new_options`].
+    pub fn recreate_for_monitor_options(
+        mut self,
+        monitor: Monitor,
+        supported_formats: &[DxgiDuplicationFormat],
+    ) -> Result<Self, Error> {
+        let _ = self.release_frame_if_needed();
+        let d3d_device = self.d3d_device.clone();
+        let d3d_device_context = self.d3d_device_context.clone();
+        let dxgi_device = self.dxgi_device.clone();
+        drop(self);
+
+        let output = find_output_for_monitor(&dxgi_device, monitor)?;
+        let supported_formats = map_supported_formats(supported_formats);
+        let duplication = unsafe { output.DuplicateOutput1(&d3d_device, 0, &supported_formats)? };
+        let duplication_desc = unsafe { duplication.GetDesc() };
+
+        Ok(Self {
+            d3d_device,
+            d3d_device_context,
+            duplication,
+            duplication_desc,
+            dxgi_device,
+            output,
+            is_holding_frame: false,
+        })
     }
 
     /// Gets the underlying [`windows::Win32::Graphics::Direct3D11::ID3D11Device`] associated with

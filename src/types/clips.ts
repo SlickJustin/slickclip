@@ -252,6 +252,7 @@ export type EditorExportCommandResponse = {
 export type ClipSortOrder = "newestFirst" | "oldestFirst" | "nameAscending" | "nameDescending" | "longestFirst" | "shortestFirst" | "largestFirst" | "smallestFirst" | "mostPlayed" | "recentlyWatched";
 export type ClipsView = "all" | "favorites" | "recentlyWatched";
 export type ClipsGridSize = "compact" | "comfortable" | "large";
+export type CaptureMode = "auto" | "gameCapture" | "screenCapture";
 
 export type UiPreferences = {
   schemaVersion: number;
@@ -268,9 +269,18 @@ export type UiPreferences = {
   closeToTray: boolean;
   saveOverlayEnabled: boolean;
   saveReplayHotkey: string;
+  saveAndNameHotkey: string | null;
   storageQuotaGib: number;
+  captureMode: CaptureMode;
+  replayDurationSeconds: 30 | 60 | 120 | 180 | 300;
+  replayFrameRate: 30 | 60;
+  replayQuality: "high" | "balanced" | "smallerFiles";
+  replayEncoder: "automatic" | "hevc" | "h264";
   gameDetectionEnabled: boolean;
   gameAutoArm: boolean;
+  gameDetectionMode: "anyDetectedGame" | "approvedGamesOnly";
+  gameStopReplayOnClose: boolean;
+  gameReadyNotificationEnabled: boolean;
   gameDetectionApprovedProcesses: string[];
   gameDetectionExcludedProcesses: string[];
 };
@@ -281,10 +291,10 @@ export type UiPreferencesResponse = {
   errorMessage: string | null;
 };
 
-export type UiPreferencesPatch = Partial<Omit<UiPreferences, "schemaVersion" | "saveReplayHotkey">>;
+export type UiPreferencesPatch = Partial<Omit<UiPreferences, "schemaVersion" | "saveReplayHotkey" | "saveAndNameHotkey">>;
 
 export const defaultUiPreferences: UiPreferences = {
-  schemaVersion: 5,
+  schemaVersion: 9,
   playerVolume: 1,
   playerMuted: false,
   playerLastAudibleVolume: 1,
@@ -298,9 +308,18 @@ export const defaultUiPreferences: UiPreferences = {
   closeToTray: true,
   saveOverlayEnabled: true,
   saveReplayHotkey: "Ctrl + Shift + F10",
+  saveAndNameHotkey: null,
   storageQuotaGib: 50,
-  gameDetectionEnabled: false,
-  gameAutoArm: false,
+  captureMode: "auto",
+  replayDurationSeconds: 120,
+  replayFrameRate: 60,
+  replayQuality: "balanced",
+  replayEncoder: "automatic",
+  gameDetectionEnabled: true,
+  gameAutoArm: true,
+  gameDetectionMode: "anyDetectedGame",
+  gameStopReplayOnClose: true,
+  gameReadyNotificationEnabled: true,
   gameDetectionApprovedProcesses: [],
   gameDetectionExcludedProcesses: [],
 };

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows::Foundation::TimeSpan;
 use windows_capture::encoder::{
@@ -14,6 +15,27 @@ use super::types::{
 
 pub const ENCODER_FRAME_QUEUE_CAPACITY: usize = 8;
 
+static ACTIVE_MEDIA_FOUNDATION_ENCODERS: AtomicU64 = AtomicU64::new(0);
+
+pub fn active_media_foundation_encoder_count() -> u64 {
+    ACTIVE_MEDIA_FOUNDATION_ENCODERS.load(Ordering::Relaxed)
+}
+
+struct ActiveEncoderGuard;
+
+impl ActiveEncoderGuard {
+    fn new() -> Self {
+        ACTIVE_MEDIA_FOUNDATION_ENCODERS.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for ActiveEncoderGuard {
+    fn drop(&mut self) {
+        ACTIVE_MEDIA_FOUNDATION_ENCODERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Existing file-oriented encoder, isolated behind the common backend boundary.
 ///
 /// windows-capture owns the MediaTranscoder and MP4 stream, so this backend intentionally returns
@@ -21,6 +43,7 @@ pub const ENCODER_FRAME_QUEUE_CAPACITY: usize = 8;
 /// `EncodedVideoSample` values from the same trait methods.
 pub struct WindowsCaptureFileBackend {
     encoder: Option<VideoEncoder>,
+    _active_encoder: ActiveEncoderGuard,
 }
 
 impl WindowsCaptureFileBackend {
@@ -54,6 +77,7 @@ impl WindowsCaptureFileBackend {
 
         Ok(Box::new(Self {
             encoder: Some(encoder),
+            _active_encoder: ActiveEncoderGuard::new(),
         }))
     }
 }

@@ -37,6 +37,7 @@ export function buildHelpSections(saveReplayHotkey: string): HelpSection[] {
       title: "Saving a Replay",
       paragraphs: [
         `The primary way to save is ${hotkey}. You can change and test this shortcut in Settings.`,
+        "You can also configure an optional Save & Name hotkey. It saves the same Replay exactly once, then brings SlickClip forward to name it after Library indexing succeeds.",
         "While Replay Buffer is running, Save Last on the Replay card provides the same manual fallback. Save progress and completion appear on that card.",
       ],
     },
@@ -44,8 +45,10 @@ export function buildHelpSections(saveReplayHotkey: string): HelpSection[] {
       id: "game-detection",
       title: "Game Detection",
       paragraphs: [
-        "Settings can suggest likely games. Detection alone never starts capture. Review a process before approving it.",
-        "Auto-arm starts Replay only when exactly one approved game window is available. Exclusions always take priority.",
+        "For the normal automatic workflow, leave Game Detection and Automatically start Replay enabled, then launch a game. SlickClip waits for a stable, high-confidence game window, starts one Replay Buffer, and shows Replay Ready when capture is running.",
+        `Play normally and press ${hotkey} after a moment you want to keep. When the game closes, SlickClip safely stops its automatically started buffer without saving anything on its own.`,
+        "Any detected game is the recommended mode. Approved games only is an optional strict allowlist for advanced setups. Exclusions always take priority in either mode.",
+        "Choosing a source manually on Replay temporarily overrides automatic detection, so SlickClip will not replace your selection.",
       ],
     },
     {
@@ -93,6 +96,7 @@ export function buildHelpSections(saveReplayHotkey: string): HelpSection[] {
       bullets: [
         "If a source is missing, use Refresh Sources and make sure its window or audio application is open.",
         "If Replay will not start, confirm a capture source is selected and every enabled audio row has a source.",
+        "Why wasn’t my game detected? Keep its main game window visible for a few seconds, check that Game Detection and automatic start are enabled, confirm the app is not excluded, and use Any detected game mode. Launchers, helpers, tiny windows, and ordinary desktop apps are intentionally filtered out.",
         "If the save shortcut does not respond, use Test Hotkey in Settings and choose a shortcut that is not already reserved by another app.",
         "For capture or save errors, expand Capture diagnostics on Replay after reproducing the problem.",
       ],

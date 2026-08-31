@@ -4,14 +4,16 @@ Complete stages sequentially. Preserve completed behavior, finish each automated
 
 ## Current checkpoint
 
+- SlickClip 1.0.3 game-detection UX and the persistent-display Replay simplification are combined in the current validated checkpoint. Automated validation, the real-game ten-minute gate, 30-minute soak, 1.0.3 installer, 1.0.2-to-1.0.3 upgrade preservation, and full-product installed-app regression were reported passed on 2026-08-30. The later explicitly authorized Home, Clips, Replay, Editor, Settings, Replay Roulette, and Help redesign passed user review and the final automated/source-audit gate on 2026-08-31. The visual-only branded installer also passed its cursor/install/data gate. A local checkpoint commit was authorized; push and GitHub tag alignment remain pending explicit authorization.
+
 - Stages 0–18: complete and committed.
 - Stages 19–23: implementation, automated validation, and manual product gates passed.
 - Stage 24: implementation, automated validation, and disposable-data destructive cleanup gate passed.
 - Stage 25: packaged executable, migration, installer, and end-to-end manual validation passed for private friends distribution.
 - Stage 26: updater A-to-B validation passed with preserved user data and working Update & Restart behavior. Authenticode/SmartScreen remains unresolved for private friends distribution.
 - Clips multi-select and batch actions: implemented at `9371391` and manually passed. Manual deletion intentionally overrides `Protect from Cleanup` after explicit confirmation.
-- Friends release: SlickClip 1.0.2 is the current target. Watch Party is hidden from normal navigation until its real-Windows gate passes.
-- SlickEdit: deferred/on the back burner and outside SlickClip 1.0.2.
+- Friends release: SlickClip 1.0.2 is the last historical release; SlickClip 1.0.3 is the current validated friends build. Watch Party is hidden from normal navigation until its real-Windows gate passes.
+- SlickEdit: deferred/on the back burner and outside SlickClip 1.0.3.
 - Waveform: explicitly deferred; not part of this roadmap.
 
 ## Stage 19 — Professional UI/UX Polish
@@ -84,6 +86,8 @@ Goals:
 - Never silently capture an unintended target.
 
 Gate result: manual testing with representative real games, launchers, fullscreen modes, and false-positive scenarios passed.
+
+1.0.3 FFmpeg Replay backend (validated friends checkpoint): automatic game detection and manual fallback both resolve one physical display, then launch one hidden bundled FFmpeg `ddagrab` child. FFmpeg owns frame acquisition, D3D11 handling, CFR encoding, timestamps, and two-second rolling MP4 segments. Alt-Tab and presentation changes never retarget or restart Replay. Unexpected child exit has a bounded three-restart same-display policy while the logical session, retained segments, shared monotonic QPC clock, and independent native audio tracks survive. There is no OBS dependency and no custom Replay DXGI fallback. Legacy mode values remain wire-compatible only. This does not reopen Stage 23 detection rules, Watch Party, Editor, or Library.
 
 ## Stage 24 — Storage Safety
 

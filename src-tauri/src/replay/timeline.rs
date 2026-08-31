@@ -51,6 +51,36 @@ pub struct SavedReplayTimeline {
 }
 
 impl SavedReplayTimeline {
+    #[cfg(test)]
+    pub(crate) fn test_interval(start_qpc_100ns: i64, duration_100ns: i64) -> Self {
+        Self {
+            raw_capture_start_qpc_100ns: start_qpc_100ns,
+            raw_capture_end_qpc_100ns: start_qpc_100ns.saturating_add(duration_100ns),
+            raw_capture_span_100ns: duration_100ns,
+            clip_capture_start_qpc_100ns: start_qpc_100ns,
+            clip_capture_end_qpc_100ns: start_qpc_100ns.saturating_add(duration_100ns),
+            clip_playback_start_100ns: 0,
+            clip_playback_end_100ns: duration_100ns,
+            clip_playback_duration_100ns: duration_100ns,
+            encoded_time_base_numerator: 1,
+            encoded_time_base_denominator: MEDIA_TIME_BASE_DENOMINATOR as u32,
+            timestamp_strategy: "test interval".to_string(),
+            segment_maps: vec![VideoSegmentPlaybackMap {
+                sequence_number: 1,
+                session_start_qpc_100ns: start_qpc_100ns,
+                session_end_qpc_100ns: start_qpc_100ns.saturating_add(duration_100ns),
+                source_start_qpc_100ns: start_qpc_100ns,
+                source_last_frame_qpc_100ns: start_qpc_100ns.saturating_add(duration_100ns),
+                encoded_start_pts_100ns: 0,
+                encoded_end_pts_100ns: duration_100ns,
+                encoded_duration_100ns: duration_100ns,
+                clip_start_100ns: 0,
+                clip_end_100ns: duration_100ns,
+                frame_timing_points: Vec::new(),
+            }],
+        }
+    }
+
     pub fn from_segments(segments: &[CompletedSegment]) -> Result<Self, String> {
         let first = segments.first().ok_or_else(|| {
             "Cannot build a saved-replay timeline without video segments.".to_string()
@@ -111,13 +141,9 @@ impl SavedReplayTimeline {
             }
             if let Some(previous) = segment_maps.last() {
                 let previous: &VideoSegmentPlaybackMap = previous;
-                if segment
-                    .segment_session_start_qpc_100ns
-                    .abs_diff(previous.session_end_qpc_100ns)
-                    > 1
-                {
+                if segment.segment_session_start_qpc_100ns < previous.session_end_qpc_100ns {
                     return Err(format!(
-                        "Video segments {} and {} are not contiguous on the realtime QPC timeline.",
+                        "Video segments {} and {} overlap on the monotonic Replay timeline.",
                         previous.sequence_number, segment.sequence_number
                     ));
                 }
@@ -149,31 +175,54 @@ impl SavedReplayTimeline {
             raw_capture_end_qpc_100ns: raw_capture_end,
             raw_capture_span_100ns: raw_capture_end.saturating_sub(raw_capture_start),
             clip_capture_start_qpc_100ns: first.segment_session_start_qpc_100ns,
-            clip_capture_end_qpc_100ns: first
-                .segment_session_start_qpc_100ns
-                .saturating_add(clip_cursor),
+            clip_capture_end_qpc_100ns: segment_maps
+                .last()
+                .map_or(first.segment_session_end_qpc_100ns, |segment| segment.session_end_qpc_100ns),
             clip_playback_start_100ns: 0,
             clip_playback_end_100ns: clip_cursor,
             clip_playback_duration_100ns: clip_cursor,
             encoded_time_base_numerator: 1,
             encoded_time_base_denominator: MEDIA_TIME_BASE_DENOMINATOR as u32,
-            timestamp_strategy: "Realtime QPC-paced CFR. Output frame N represents video_start_qpc + N/frame_rate; unchanged WGC visuals are held, segment-local PTS restarts at zero, and FFmpeg concat abuts cumulative encoded durations".to_string(),
+            timestamp_strategy: "One monotonic Replay QPC timeline. FFmpeg segment-local PTS restarts at zero and stream-copy concat abuts encoded durations. Each segment retains its source QPC interval; bounded child-restart gaps are removed from every native WASAPI stem with the same piecewise mapping.".to_string(),
             segment_maps,
         })
     }
 
     pub fn map_capture_qpc(&self, qpc_100ns: i64) -> MappedCaptureTime {
-        let clip_time = qpc_100ns.saturating_sub(self.clip_capture_start_qpc_100ns);
-        let kind = if qpc_100ns < self.clip_capture_start_qpc_100ns {
-            CaptureMappingKind::BeforeClip
-        } else if qpc_100ns >= self.clip_capture_end_qpc_100ns {
-            CaptureMappingKind::AfterClip
-        } else {
-            CaptureMappingKind::Segment
-        };
+        if qpc_100ns < self.clip_capture_start_qpc_100ns {
+            return MappedCaptureTime {
+                clip_time_100ns: qpc_100ns.saturating_sub(self.clip_capture_start_qpc_100ns),
+                kind: CaptureMappingKind::BeforeClip,
+            };
+        }
+        if qpc_100ns >= self.clip_capture_end_qpc_100ns {
+            return MappedCaptureTime {
+                clip_time_100ns: self
+                    .clip_playback_duration_100ns
+                    .saturating_add(qpc_100ns.saturating_sub(self.clip_capture_end_qpc_100ns)),
+                kind: CaptureMappingKind::AfterClip,
+            };
+        }
+        if let Some(segment) = self.segment_maps.iter().find(|segment| {
+            qpc_100ns >= segment.session_start_qpc_100ns
+                && qpc_100ns < segment.session_end_qpc_100ns
+        }) {
+            return MappedCaptureTime {
+                clip_time_100ns: segment
+                    .clip_start_100ns
+                    .saturating_add(qpc_100ns.saturating_sub(segment.session_start_qpc_100ns)),
+                kind: CaptureMappingKind::Segment,
+            };
+        }
+        let next = self
+            .segment_maps
+            .iter()
+            .find(|segment| segment.session_start_qpc_100ns > qpc_100ns);
         MappedCaptureTime {
-            clip_time_100ns: clip_time,
-            kind,
+            clip_time_100ns: next.map_or(self.clip_playback_duration_100ns, |segment| {
+                segment.clip_start_100ns
+            }),
+            kind: CaptureMappingKind::Segment,
         }
     }
 
@@ -291,6 +340,23 @@ mod tests {
         assert_eq!(gap.kind, CaptureMappingKind::Segment);
         assert_eq!(gap.clip_time_100ns, 22_500_000);
         assert_eq!(timeline.clip_playback_duration_100ns, 40_000_000);
+    }
+
+    #[test]
+    fn ffmpeg_child_restart_gap_stays_monotonic_and_is_removed_from_playback() {
+        let first = segment(1, 100_000_000, 20_000_000);
+        let second = segment(2, 130_000_000, 20_000_000);
+        let timeline = SavedReplayTimeline::from_segments(&[first, second]).unwrap();
+        assert_eq!(timeline.clip_playback_duration_100ns, 40_000_000);
+        assert_eq!(timeline.clip_capture_end_qpc_100ns, 150_000_000);
+        assert_eq!(timeline.raw_capture_span_100ns, 49_833_333);
+        let gap = timeline.map_capture_qpc(125_000_000);
+        assert_eq!(gap.kind, CaptureMappingKind::Segment);
+        assert_eq!(gap.clip_time_100ns, 20_000_000);
+        assert_eq!(
+            timeline.map_capture_qpc(135_000_000).clip_time_100ns,
+            25_000_000
+        );
     }
 
     #[test]

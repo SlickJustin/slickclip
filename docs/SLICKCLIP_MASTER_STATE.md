@@ -1,6 +1,6 @@
 # SlickClip Master Project State
 
-Last updated: 2026-08-25. Always inspect the repository for the exact live state.
+Last updated: 2026-08-31. Always inspect the repository for the exact live state.
 
 ## Product
 
@@ -27,15 +27,25 @@ Repository: `C:\Users\Jakea\source\replay-app`
 
 ## Verified delivery state
 
+- SlickClip 1.0.3 is the current validated friends checkpoint. Replay now resolves the game's physical monitor once and launches one supervised bundled FFmpeg `ddagrab` child for that display. FFmpeg owns Desktop Duplication, D3D11 frames, CFR delivery, encoding, timestamps, and two-second MP4 segments; Rust retains the logical Replay clock, rolling retention, native independent WASAPI stems, save assembly, indexing, and UI. Alt-Tab and presentation changes do not retarget or restart capture. An unexpected owned-child exit has a three-restart same-display budget while audio and the logical session remain alive. There is no OBS dependency and no fallback to the retired custom Replay DXGI loop. Watch Party's separate WGC implementation is intentionally unchanged and remains hidden/deferred. The real-game ten-minute gate, 30-minute soak, 1.0.3 installer, 1.0.2-to-1.0.3 upgrade preservation, and full-product installed-app regression were reported passed on 2026-08-30. The source audit, final automated gate, UI review, larger-type gate, and visual-only branded-installer gate passed on 2026-08-31. The user authorized a local checkpoint commit but not a push; the user also reported publishing a GitHub Release before this checkpoint existed, so its tag/source alignment remains pending.
+
+- The user subsequently and explicitly authorized the consumer UI redesign that had originally been held out of the FFmpeg-backend stage. Home, Clips, Replay, Editor, Settings, Replay Roulette, and Help now use the compact graphite/purple workspace language while preserving the existing product engines and direct-edit controls. Every screen passed user visual/interaction review on 2026-08-31. The final gate reported 99 frontend tests and 275 Rust tests passed, plus successful frontend production build, `cargo check`, Rust formatting, diff checking, and native Tauri release build without bundling.
+
+- The 1.0.3 polish layer routes the non-focus-stealing Replay Saved overlay to the Replay session's immutable captured-monitor desktop origin rather than the primary/current overlay monitor. Settings also provides a separate optional persisted Save & Name global hotkey. It invokes the same exactly-once save/index worker and requests a name only after successful indexing; regular Save Replay remains non-focus-stealing and unchanged. Save & Name intentionally brings SlickClip forward after success, where a cancel-safe dialog renames only Library metadata and never the source file.
+
+- The first 1.0.3 NSIS branding artifact is permanently withdrawn after the user reported that the Windows pointer disappeared immediately upon double-click, before setup displayed or SlickClip launched, and remained absent until restart. The repository contains no cursor-hiding or system-cursor replacement call. Its setup/uninstaller executable-icon overrides remain disabled and that artifact must never be reused. The later separately authorized visual-only isolation candidate enables only Tauri's supported header/sidebar bitmaps, retains normal executable icons, and uses the exact slogan `Made to capture the DAWGs worst moments.` The resulting unsigned installer is 88,439,111 bytes with SHA-256 `3F8FD05716E3A53AB3468A104875428BAA27AE60E0360CC70B7DA501FECFEA4F`; its branded artwork/slogan, staged open/cancel cursor test, installation, launch, larger typography, existing clips, and existing settings passed on the primary Windows PC on 2026-08-31. It is the approved private friends installer. The stock installer with SHA-256 `3EBEE545817F381A7846764D035D800299BC3303C720893414A54D54C9C3ADDC` remains preserved as the known-safe fallback.
+
+- Display Capture access-loss recovery releases only the invalid duplication object, retains reusable D3D11 resources where possible, requires the same display identity and stable geometry across three 250 ms polls, backs off failed recreation by 500 ms, and remains bounded by one interruptible ten-second deadline. The logical Replay, configured audio workers, monotonic QPC clock, encoder/ring ownership, and finalized retained segments survive recovery. Save/Ready remain disabled until a production frame restores `Healthy` and explicitly rebases CFR without historical catch-up.
+
 - Stages 0–18 remain complete and committed on `master`.
 - Stages 19–23 have passed their automated and manual gates: premium UI, Replay Roulette, splash, tray/background/Replay Saved overlay, arbitrary hotkeys and Settings, and game detection/auto-arm are verified.
 - Stage 24 Storage Safety has passed its disposable-data destructive cleanup gate. `Protect from Cleanup` excludes clips only from automatic quota cleanup; explicit confirmed manual deletion remains allowed.
 - Stage 25 migration/distribution has passed packaged executable, installer, migration, and end-to-end release validation for the private friends build.
 - Stage 26 updater has passed the sequential A-to-B install/update/restart preservation test. The 1.0.1 candidate used for that test is historical and must not be reused.
 - Clips multi-select and batch actions are committed at `9371391` and manually verified, including intentional manual deletion of clips protected from cleanup.
-- The current private friends-release target is SlickClip 1.0.2. Authenticode publisher signing and resulting SmartScreen reputation remain unresolved, so this state is not approval for a public GitHub Release.
+- SlickClip 1.0.2 remains the last historical friends release. Do not modify its release artifacts; 1.0.3 is the current validated friends build. Authenticode publisher signing and resulting SmartScreen reputation remain unresolved, so the manually uploaded installer is not a production signed-updater release.
 - Stage 27 Watch Party (`cf82ba8`) and Stage 27.1 participant-aware layouts (`f38be14`) remain manually unverified and are hidden from normal friends-build navigation by a frontend release visibility flag. Their backend implementation is retained unchanged for later validation.
-- SlickEdit remains deferred/on the back burner and is not part of SlickClip 1.0.2.
+- SlickEdit remains deferred/on the back burner and is not part of SlickClip 1.0.3.
 - The waveform experiment was deliberately deferred and remains in Git stash as `Stage 19 waveform experiment - deferred`.
 - The four project-control documents were accidentally committed as empty files in commit `07b3216`; this document set restores their intended content.
 
@@ -47,7 +57,8 @@ Never rely on this file for the current commit hash or stash index. Use Git to i
 
 ### Capture and replay
 
-- Native Windows Graphics Capture for display/window targets.
+- Supervised bundled FFmpeg `ddagrab` capture for Replay's selected physical display.
+- Windows Graphics Capture remains available only to separate low-level capture tests and the deferred Watch Party subsystem; it is not a Replay product policy or fallback.
 - Realtime constant-frame-rate scheduling.
 - Rolling replay video segments and synchronized rolling audio.
 - Replay Buffer start/stop/status lifecycle.
@@ -60,7 +71,7 @@ Never rely on this file for the current commit hash or stash index. Use Git to i
 
 - Native WASAPI microphone capture.
 - Per-process loopback for Game, Voice Chat/Discord, and Other sources.
-- Synchronized multitrack replay masters.
+- Synchronized multitrack replay masters sharing the same monotonic QPC session clock as video.
 - Combined/default playback representation.
 - Audio capture test and diagnostic paths.
 

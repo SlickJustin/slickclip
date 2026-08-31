@@ -23,8 +23,9 @@ use windows::Storage::Streams::{DataReader, IRandomAccessStream, InMemoryRandomA
 use windows::Storage::{FileAccessMode, StorageFile};
 use windows::System::Threading::{ThreadPool, WorkItemHandler, WorkItemOptions, WorkItemPriority};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-    ID3D11Device, ID3D11Texture2D,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX,
+    D3D11_RESOURCE_MISC_GDI_COMPATIBLE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device,
+    ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::IDXGISurface;
@@ -364,7 +365,42 @@ impl DetachedFrame {
         height: u32,
         color_format: ColorFormat,
     ) -> Result<Self, VideoEncoderError> {
-        let surface = VideoEncoder::create_owned_surface(device, width, height, color_format)?;
+        Self::new_render_target_with_misc(device, context, width, height, color_format, 0)
+    }
+
+    /// Creates a BGRA render target that can be borrowed by GDI for captured-cursor composition.
+    pub fn new_gdi_render_target(
+        device: &ID3D11Device,
+        context: &windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+        width: u32,
+        height: u32,
+        color_format: ColorFormat,
+    ) -> Result<Self, VideoEncoderError> {
+        Self::new_render_target_with_misc(
+            device,
+            context,
+            width,
+            height,
+            color_format,
+            D3D11_RESOURCE_MISC_GDI_COMPATIBLE.0 as u32,
+        )
+    }
+
+    fn new_render_target_with_misc(
+        device: &ID3D11Device,
+        context: &windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+        width: u32,
+        height: u32,
+        color_format: ColorFormat,
+        misc_flags: u32,
+    ) -> Result<Self, VideoEncoderError> {
+        let surface = VideoEncoder::create_owned_surface_with_misc(
+            device,
+            width,
+            height,
+            color_format,
+            misc_flags,
+        )?;
         Ok(Self {
             device: SendDirectX::new(device.clone()),
             context: SendDirectX::new(context.clone()),
@@ -860,6 +896,16 @@ impl VideoEncoder {
         height: u32,
         format: ColorFormat,
     ) -> Result<OwnedSurface, VideoEncoderError> {
+        Self::create_owned_surface_with_misc(device, width, height, format, 0)
+    }
+
+    fn create_owned_surface_with_misc(
+        device: &ID3D11Device,
+        width: u32,
+        height: u32,
+        format: ColorFormat,
+        misc_flags: u32,
+    ) -> Result<OwnedSurface, VideoEncoderError> {
         let texture_desc = D3D11_TEXTURE2D_DESC {
             Width: width,
             Height: height,
@@ -870,7 +916,7 @@ impl VideoEncoder {
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
             CPUAccessFlags: 0,
-            MiscFlags: 0,
+            MiscFlags: misc_flags,
         };
 
         let mut texture = None;

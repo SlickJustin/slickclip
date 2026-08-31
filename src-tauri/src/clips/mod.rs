@@ -13,6 +13,11 @@ pub fn save_replay(manager: State<'_, ClipSaveManager>) -> SaveReplayCommandResu
 }
 
 #[tauri::command]
+pub fn save_replay_and_name(manager: State<'_, ClipSaveManager>) -> SaveReplayCommandResult {
+    manager.start_and_name()
+}
+
+#[tauri::command]
 pub fn get_save_replay_status(manager: State<'_, ClipSaveManager>) -> SaveReplayStatus {
     manager.status()
 }

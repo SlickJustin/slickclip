@@ -225,21 +225,40 @@ pub fn refresh_tray_status(app: &AppHandle) {
     let _ = desktop.tray.set_tooltip(Some(tooltip));
 }
 
-pub fn show_save_overlay(app: &AppHandle, duration_seconds: f64) {
-    let enabled = app
-        .try_state::<UiPreferencesManager>()
-        .is_none_or(|manager| manager.get().preferences.save_overlay_enabled);
-    if !enabled {
+pub fn show_save_overlay(
+    app: &AppHandle,
+    duration_seconds: f64,
+    monitor_origin: Option<(i32, i32)>,
+) {
+    if !save_overlay_enabled(app) {
         return;
     }
     show_notification_overlay(
         app,
         "Replay Saved",
         &format!("{duration_seconds:.1}s clip added to your Library"),
+        monitor_origin,
     );
 }
 
-pub fn show_notification_overlay(app: &AppHandle, title: &str, detail: &str) {
+pub fn show_save_failure_overlay(app: &AppHandle, detail: &str) {
+    if !save_overlay_enabled(app) {
+        return;
+    }
+    show_notification_overlay(app, "Replay Save Failed", detail, None);
+}
+
+fn save_overlay_enabled(app: &AppHandle) -> bool {
+    app.try_state::<UiPreferencesManager>()
+        .is_none_or(|manager| manager.get().preferences.save_overlay_enabled)
+}
+
+pub fn show_notification_overlay(
+    app: &AppHandle,
+    title: &str,
+    detail: &str,
+    preferred_monitor_origin: Option<(i32, i32)>,
+) {
     let (Some(desktop), Some(overlay)) = (
         app.try_state::<DesktopIntegration>(),
         app.get_webview_window("save-overlay"),
@@ -248,10 +267,20 @@ pub fn show_notification_overlay(app: &AppHandle, title: &str, detail: &str) {
     };
 
     let generation = desktop.overlay_generation.fetch_add(1, Ordering::SeqCst) + 1;
-    let monitor = overlay
-        .current_monitor()
-        .ok()
-        .flatten()
+    let monitor = preferred_monitor_origin
+        .and_then(|origin| {
+            app.available_monitors().ok().and_then(|monitors| {
+                monitors.into_iter().find(|monitor| {
+                    monitor_matches_origin(
+                        monitor.position().x,
+                        monitor.position().y,
+                        origin.0,
+                        origin.1,
+                    )
+                })
+            })
+        })
+        .or_else(|| overlay.current_monitor().ok().flatten())
         .or_else(|| app.primary_monitor().ok().flatten());
     if let Some(monitor) = monitor {
         if let Ok(size) = overlay.outer_size() {
@@ -429,9 +458,18 @@ fn overlay_position(
     )
 }
 
+fn monitor_matches_origin(
+    monitor_x: i32,
+    monitor_y: i32,
+    preferred_x: i32,
+    preferred_y: i32,
+) -> bool {
+    monitor_x == preferred_x && monitor_y == preferred_y
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{overlay_position, startup_command};
+    use super::{monitor_matches_origin, overlay_position, startup_command};
     use std::path::Path;
 
     #[test]
@@ -448,5 +486,11 @@ mod tests {
             overlay_position(-1920, 0, 1920, 1040, 340, 86, 18),
             (-358, 936)
         );
+    }
+
+    #[test]
+    fn overlay_monitor_match_uses_the_captured_display_desktop_origin() {
+        assert!(monitor_matches_origin(-2560, 0, -2560, 0));
+        assert!(!monitor_matches_origin(0, 0, -2560, 0));
     }
 }

@@ -7,6 +7,7 @@ import { Toggle } from "../components/Toggle";
 import { combinationFromKeyboardEvent, isBareAlphanumericShortcut, isModifierCode, shortcutDraftFromKeyboardEvent } from "../lib/hotkeyShortcut";
 import type { StorageCleanupExecutionResponse, StorageCleanupPreviewResponse, UiPreferences, UiPreferencesPatch, UiPreferencesResponse } from "../types/clips";
 import { defaultUiPreferences, formatBytes } from "../types/clips";
+import { detectedReplayLabel, showCandidateApprovalControls, type DetectedReplayState } from "../utils/gameDetectionStatus";
 
 type HotkeyState = {
   registered: boolean;
@@ -28,6 +29,7 @@ type GameCandidate = {
   processId: number;
   width: number;
   height: number;
+  foreground: boolean;
   approved: boolean;
   reason: string;
 };
@@ -36,8 +38,15 @@ type GameDetectionStatus = {
   success: boolean;
   enabled: boolean;
   autoArmEnabled: boolean;
+  detectionMode: "anyDetectedGame" | "approvedGamesOnly";
+  stopReplayOnClose: boolean;
+  readyNotificationEnabled: boolean;
   candidates: GameCandidate[];
   autoArmedTargetId: string | null;
+  replayReady: boolean;
+  replayState: DetectedReplayState;
+  pendingTargetId: string | null;
+  manualOverrideActive: boolean;
   lastScanAtMs: number | null;
   errorMessage: string | null;
 };
@@ -60,8 +69,15 @@ const initialGameDetectionStatus: GameDetectionStatus = {
   success: true,
   enabled: false,
   autoArmEnabled: false,
+  detectionMode: "anyDetectedGame",
+  stopReplayOnClose: true,
+  readyNotificationEnabled: true,
   candidates: [],
   autoArmedTargetId: null,
+  replayReady: false,
+  replayState: "replayStopped",
+  pendingTargetId: null,
+  manualOverrideActive: false,
   lastScanAtMs: null,
   errorMessage: null,
 };
@@ -73,6 +89,15 @@ const initialHotkeyState: HotkeyState = {
   testing: false,
 };
 
+const initialOptionalHotkeyState: HotkeyState = {
+  registered: false,
+  currentCombination: "",
+  lastRegistrationError: null,
+  testing: false,
+};
+
+type RecordingHotkey = "saveReplay" | "saveAndName";
+
 type SettingSelectProps = {
   label: string;
   value: string;
@@ -81,16 +106,13 @@ type SettingSelectProps = {
 };
 
 export function SettingsPage() {
-  const [captureMode, setCaptureMode] = useState("Game");
-  const [clipLength, setClipLength] = useState("2 Minutes");
-  const [resolution, setResolution] = useState("1440p");
-  const [frameRate, setFrameRate] = useState("60 FPS");
-  const [encoder, setEncoder] = useState("Automatic");
   const [hotkey, setHotkey] = useState<HotkeyState>(initialHotkeyState);
-  const [recordingHotkey, setRecordingHotkey] = useState(false);
+  const [saveAndNameHotkey, setSaveAndNameHotkey] = useState<HotkeyState>(initialOptionalHotkeyState);
+  const [recordingHotkey, setRecordingHotkey] = useState<RecordingHotkey | null>(null);
   const [hotkeyDraft, setHotkeyDraft] = useState("Press a shortcut…");
   const [hotkeyPending, setHotkeyPending] = useState(false);
   const [hotkeyMessage, setHotkeyMessage] = useState<{ text: string; success: boolean } | null>(null);
+  const [saveAndNameHotkeyMessage, setSaveAndNameHotkeyMessage] = useState<{ text: string; success: boolean } | null>(null);
   const [preferences, setPreferences] = useState<UiPreferences>(defaultUiPreferences);
   const [desktopSettingsPending, setDesktopSettingsPending] = useState(false);
   const [desktopSettingsMessage, setDesktopSettingsMessage] = useState<{ text: string; success: boolean } | null>(null);
@@ -136,9 +158,11 @@ export function SettingsPage() {
   useEffect(() => {
     void Promise.all([
       invoke<HotkeyState>("get_save_replay_hotkey"),
+      invoke<HotkeyState>("get_save_and_name_hotkey"),
       invoke<UiPreferencesResponse>("get_ui_preferences"),
-    ]).then(([hotkeyState, preferenceResponse]) => {
+    ]).then(([hotkeyState, saveAndNameState, preferenceResponse]) => {
       setHotkey(hotkeyState);
+      setSaveAndNameHotkey(saveAndNameState);
       setPreferences(preferenceResponse.preferences);
       setStorageQuotaInput(String(preferenceResponse.preferences.storageQuotaGib));
     }).catch((error) => setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false }));
@@ -278,6 +302,11 @@ export function SettingsPage() {
     if (processName?.trim()) approveProcess(processName.trim());
   }
 
+  function addExcludedProcess() {
+    const processName = window.prompt("Application executable to exclude from automatic game capture (for example, Launcher.exe):");
+    if (processName?.trim()) excludeProcess(processName.trim());
+  }
+
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     let disposed = false;
@@ -314,7 +343,7 @@ export function SettingsPage() {
         return;
       }
       setHotkeyDraft(combination);
-      void submitHotkey(combination);
+      void submitHotkey(recordingHotkey, combination);
     };
 
     const handleKeyUp = (event: KeyboardEvent) => {
@@ -332,18 +361,30 @@ export function SettingsPage() {
   }, [recordingHotkey]);
 
   useEffect(() => () => {
-    if (recordingHotkey) void invoke("set_hotkey_recorder_active", { active: false });
+    if (recordingHotkey) {
+      const command = recordingHotkey === "saveReplay"
+        ? "set_hotkey_recorder_active"
+        : "set_save_and_name_hotkey_recorder_active";
+      void invoke(command, { active: false });
+    }
   }, [recordingHotkey]);
 
-  async function startHotkeyRecording() {
-    setHotkeyMessage(null);
+  async function startHotkeyRecording(target: RecordingHotkey) {
+    if (target === "saveReplay") setHotkeyMessage(null);
+    else setSaveAndNameHotkeyMessage(null);
     try {
-      const state = await invoke<HotkeyState>("set_hotkey_recorder_active", { active: true });
-      setHotkey(state);
+      const command = target === "saveReplay"
+        ? "set_hotkey_recorder_active"
+        : "set_save_and_name_hotkey_recorder_active";
+      const state = await invoke<HotkeyState>(command, { active: true });
+      if (target === "saveReplay") setHotkey(state);
+      else setSaveAndNameHotkey(state);
       setHotkeyDraft("Press a shortcut…");
-      setRecordingHotkey(true);
+      setRecordingHotkey(target);
     } catch (error) {
-      setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false });
+      const message = { text: error instanceof Error ? error.message : String(error), success: false };
+      if (target === "saveReplay") setHotkeyMessage(message);
+      else setSaveAndNameHotkeyMessage(message);
     }
   }
 
@@ -362,38 +403,74 @@ export function SettingsPage() {
   }
 
   async function stopHotkeyRecording() {
-    setRecordingHotkey(false);
+    const target = recordingHotkey;
+    if (!target) return;
+    setRecordingHotkey(null);
     setHotkeyDraft("Press a shortcut…");
     try {
-      const state = await invoke<HotkeyState>("set_hotkey_recorder_active", { active: false });
-      setHotkey(state);
+      const command = target === "saveReplay"
+        ? "set_hotkey_recorder_active"
+        : "set_save_and_name_hotkey_recorder_active";
+      const state = await invoke<HotkeyState>(command, { active: false });
+      if (target === "saveReplay") setHotkey(state);
+      else setSaveAndNameHotkey(state);
     } catch (error) {
-      setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false });
+      const message = { text: error instanceof Error ? error.message : String(error), success: false };
+      if (target === "saveReplay") setHotkeyMessage(message);
+      else setSaveAndNameHotkeyMessage(message);
     }
   }
 
-  async function submitHotkey(combination: string) {
+  async function submitHotkey(target: RecordingHotkey, combination: string) {
     if (hotkeyPending) return;
     setHotkeyPending(true);
-    setHotkeyMessage(null);
+    if (target === "saveReplay") setHotkeyMessage(null);
+    else setSaveAndNameHotkeyMessage(null);
     try {
-      const result = await invoke<HotkeyCommandResult>("set_save_replay_hotkey", { combination });
-      setHotkey(result.state);
-      setRecordingHotkey(false);
-      setHotkeyMessage({
+      const command = target === "saveReplay" ? "set_save_replay_hotkey" : "set_save_and_name_hotkey";
+      const result = await invoke<HotkeyCommandResult>(command, { combination });
+      if (target === "saveReplay") setHotkey(result.state);
+      else setSaveAndNameHotkey(result.state);
+      setRecordingHotkey(null);
+      const message = {
         text: result.success
           ? isBareAlphanumericShortcut(result.state.currentCombination)
-            ? `Save Replay hotkey changed to ${result.state.currentCombination}. Single-key shortcuts can trigger while typing in other applications.`
-            : `Save Replay hotkey changed to ${result.state.currentCombination}.`
+            ? `${target === "saveReplay" ? "Save Replay" : "Save & Name"} hotkey changed to ${result.state.currentCombination}. Single-key shortcuts can trigger while typing in other applications.`
+            : `${target === "saveReplay" ? "Save Replay" : "Save & Name"} hotkey changed to ${result.state.currentCombination}.`
           : result.errorMessage ?? "The global hotkey could not be registered.",
+        success: result.success,
+      };
+      if (target === "saveReplay") setHotkeyMessage(message);
+      else setSaveAndNameHotkeyMessage(message);
+    } catch (error) {
+      setRecordingHotkey(null);
+      const message = { text: error instanceof Error ? error.message : String(error), success: false };
+      if (target === "saveReplay") setHotkeyMessage(message);
+      else setSaveAndNameHotkeyMessage(message);
+      const recorderCommand = target === "saveReplay"
+        ? "set_hotkey_recorder_active"
+        : "set_save_and_name_hotkey_recorder_active";
+      await invoke<HotkeyState>(recorderCommand, { active: false })
+        .then((state) => target === "saveReplay" ? setHotkey(state) : setSaveAndNameHotkey(state))
+        .catch(() => undefined);
+    } finally {
+      setHotkeyPending(false);
+    }
+  }
+
+  async function disableSaveAndNameHotkey() {
+    if (hotkeyPending) return;
+    setHotkeyPending(true);
+    setSaveAndNameHotkeyMessage(null);
+    try {
+      const result = await invoke<HotkeyCommandResult>("clear_save_and_name_hotkey");
+      setSaveAndNameHotkey(result.state);
+      setSaveAndNameHotkeyMessage({
+        text: result.success ? "Save & Name hotkey disabled." : result.errorMessage ?? "The hotkey could not be disabled.",
         success: result.success,
       });
     } catch (error) {
-      setRecordingHotkey(false);
-      setHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false });
-      await invoke<HotkeyState>("set_hotkey_recorder_active", { active: false })
-        .then(setHotkey)
-        .catch(() => undefined);
+      setSaveAndNameHotkeyMessage({ text: error instanceof Error ? error.message : String(error), success: false });
     } finally {
       setHotkeyPending(false);
     }
@@ -401,30 +478,63 @@ export function SettingsPage() {
 
   return (
     <div className="page settings-page">
-      <header className="page-header">
+      <header className="page-header settings-page-header">
         <div>
+          <span className="settings-page-eyebrow">SlickClip control center</span>
           <h1>Settings</h1>
-          <p>Configure SlickClip for your setup.</p>
+          <p>Set your capture defaults once. SlickClip remembers the rest.</p>
+        </div>
+        <div className="settings-header-status" aria-label="Settings status">
+          <span><i className="settings-live-dot" />Saved automatically</span>
+          <span>Local to this PC</span>
         </div>
       </header>
 
-      <div className="settings-grid">
-        <SettingsCategory title="General" description="Windows startup and background behavior." defaultOpen>
+      <div className="settings-workbench">
+        <aside className="settings-index" aria-label="Settings sections">
+          <div className="settings-index-heading">
+            <span>Quick access</span>
+            <strong>Your setup</strong>
+            <small>Jump straight to the setting you need.</small>
+          </div>
+          <nav>
+            <SettingsIndexItem number="01" title="General" detail="Startup & background" targetId="settings-general" />
+            <SettingsIndexItem number="02" title="Capture" detail={`${replayDurationLabel(preferences.replayDurationSeconds)} · ${preferences.replayFrameRate} FPS`} targetId="settings-capture" />
+            <SettingsIndexItem number="03" title="Hotkeys" detail={saveAndNameHotkey.registered ? "2 shortcuts ready" : "1 shortcut ready"} targetId="settings-hotkeys" />
+            <SettingsIndexItem number="04" title="Storage" detail={`${storageQuotaInput || preferences.storageQuotaGib} GB quota`} targetId="settings-storage" />
+            <SettingsIndexItem number="05" title="Game Detection" detail={preferences.gameDetectionEnabled ? (preferences.gameAutoArm ? "Automatic capture on" : "Detection only") : "Off"} targetId="settings-game-detection" />
+            <SettingsIndexItem number="06" title="Advanced" detail="Tests & updates" targetId="settings-advanced" />
+          </nav>
+          <div className="settings-index-note">
+            <span>Standalone by design</span>
+            <small>FFmpeg ships inside SlickClip. Your friends install nothing else.</small>
+          </div>
+        </aside>
+
+        <main className="settings-grid">
+        <SettingsCategory id="settings-general" number="01" title="General" description="Windows startup and background behavior." status="3 essentials" defaultOpen>
           <SettingsToggle label="Start SlickClip with Windows" description="Launches quietly in the system tray after sign-in." checked={preferences.startWithWindows} disabled={desktopSettingsPending} onChange={(value) => void setStartWithWindows(value)} />
           <SettingsToggle label="Close or minimize to tray" description="Keeps active replay capture running in the background." checked={preferences.closeToTray} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ closeToTray: value })} />
           <SettingsToggle label="Show Replay Saved overlay" description="Shows a brief notification without taking focus." checked={preferences.saveOverlayEnabled} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ saveOverlayEnabled: value })} />
           {desktopSettingsMessage && <span className={desktopSettingsMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{desktopSettingsMessage.text}</span>}
         </SettingsCategory>
 
-        <SettingsCategory title="Capture" description="Defaults used when configuring replay capture.">
-          <SettingSelect label="Default Capture Mode" value={captureMode} onChange={setCaptureMode} options={["Game", "Desktop", "Window"]} />
-          <SettingSelect label="Default Clip Length" value={clipLength} onChange={setClipLength} options={["30 Seconds", "1 Minute", "2 Minutes", "3 Minutes", "5 Minutes"]} />
-          <SettingSelect label="Resolution" value={resolution} onChange={setResolution} options={["720p", "1080p", "1440p"]} />
-          <SettingSelect label="Frame Rate" value={frameRate} onChange={setFrameRate} options={["30 FPS", "60 FPS"]} />
-          <SettingSelect label="Preferred Encoder" value={encoder} onChange={setEncoder} options={["NVIDIA NVENC AV1", "NVIDIA NVENC HEVC", "NVIDIA NVENC H.264", "Automatic"]} />
+        <SettingsCategory id="settings-capture" number="02" title="Capture" description="Defaults used when configuring replay capture." status={`${replayDurationLabel(preferences.replayDurationSeconds)} · ${preferences.replayFrameRate} FPS`}>
+          <div className="settings-row">
+            <div>
+              <span className="concept-heading">Video capture <InfoTip label="About video capture">SlickClip uses its bundled FFmpeg engine to capture the physical display containing the detected game and keeps that same display for the whole Replay session, including while you Alt-Tab. No separate FFmpeg installation is needed.</InfoTip></span>
+              <small>Bundled FFmpeg display capture</small>
+            </div>
+            <strong>Display Capture</strong>
+          </div>
+          <SettingSelect label="Default Clip Length" value={replayDurationLabel(preferences.replayDurationSeconds)} onChange={(value) => void updateDesktopPreference({ replayDurationSeconds: replayDurationFromLabel(value) })} options={["30 Seconds", "1 Minute", "2 Minutes", "3 Minutes", "5 Minutes"]} />
+          <div className="settings-row"><div><span>Output Resolution</span><small>Replay records the selected physical display at its native dimensions.</small></div><strong>Display native</strong></div>
+          <SettingSelect label="Frame Rate" value={`${preferences.replayFrameRate} FPS`} onChange={(value) => void updateDesktopPreference({ replayFrameRate: value.startsWith("30") ? 30 : 60 })} options={["30 FPS", "60 FPS"]} />
+          <SettingSelect label="Video Quality" value={preferences.replayQuality === "smallerFiles" ? "Smaller Files" : preferences.replayQuality === "high" ? "High" : "Balanced"} onChange={(value) => void updateDesktopPreference({ replayQuality: value === "High" ? "high" : value === "Smaller Files" ? "smallerFiles" : "balanced" })} options={["High", "Balanced", "Smaller Files"]} />
+          <SettingSelect label="Preferred Encoder" value={preferences.replayEncoder === "hevc" ? "HEVC" : preferences.replayEncoder === "h264" ? "H.264" : "Automatic"} onChange={(value) => void updateDesktopPreference({ replayEncoder: value === "HEVC" ? "hevc" : value === "H.264" ? "h264" : "automatic" })} options={["Automatic", "HEVC", "H.264"]} />
         </SettingsCategory>
 
-        <SettingsCategory title="Hotkeys" description="Global controls that work while SlickClip is in the background.">
+        <SettingsCategory id="settings-hotkeys" number="03" title="Hotkeys" description="Global controls that work while SlickClip is in the background." status={saveAndNameHotkey.registered ? "2 ready" : "1 ready"}>
           <div className="hotkey-setting">
             <div className="hotkey-setting-copy">
               <span>Save Replay Hotkey</span>
@@ -435,29 +545,59 @@ export function SettingsPage() {
               </div>
             </div>
             <div className="hotkey-setting-controls">
-              <kbd className={recordingHotkey ? "hotkey-recording" : undefined}>
-                {recordingHotkey ? hotkeyDraft : hotkey.currentCombination}
+              <kbd className={recordingHotkey === "saveReplay" ? "hotkey-recording" : undefined}>
+                {recordingHotkey === "saveReplay" ? hotkeyDraft : hotkey.currentCombination}
               </kbd>
               <button
                 className="secondary-button"
                 type="button"
-                disabled={hotkeyPending}
-                onClick={recordingHotkey ? stopHotkeyRecording : startHotkeyRecording}
+                disabled={hotkeyPending || recordingHotkey === "saveAndName"}
+                onClick={recordingHotkey === "saveReplay" ? stopHotkeyRecording : () => void startHotkeyRecording("saveReplay")}
               >
-                {recordingHotkey ? "Cancel" : hotkeyPending ? "Registering..." : "Change"}
+                {recordingHotkey === "saveReplay" ? "Cancel" : hotkeyPending ? "Registering..." : "Change"}
               </button>
-              <button className="secondary-button" type="button" disabled={!hotkey.registered || recordingHotkey || hotkeyPending || hotkey.testing} onClick={() => void testHotkey()}>{hotkey.testing ? "Listening…" : "Test Hotkey"}</button>
+              <button className="secondary-button" type="button" disabled={!hotkey.registered || Boolean(recordingHotkey) || hotkeyPending || hotkey.testing} onClick={() => void testHotkey()}>{hotkey.testing ? "Listening…" : "Test Hotkey"}</button>
             </div>
           </div>
-          {recordingHotkey && <small className="hotkey-recorder-help">Press the shortcut you want. Escape cancels. Bare letter and number keys are allowed but may trigger while typing.</small>}
+          {recordingHotkey === "saveReplay" && <small className="hotkey-recorder-help">Press the shortcut you want. Escape cancels. Bare letter and number keys are allowed but may trigger while typing.</small>}
           {(hotkeyMessage || hotkey.lastRegistrationError) && (
             <span className={hotkeyMessage?.success && !hotkey.lastRegistrationError ? "hotkey-message-success" : "hotkey-message-error"} role="status">
               {hotkeyMessage?.text ?? hotkey.lastRegistrationError}
             </span>
           )}
+          <div className="hotkey-setting">
+            <div className="hotkey-setting-copy">
+              <span>Save &amp; Name Hotkey</span>
+              <small>Optional. Saves normally, then brings SlickClip forward to name the indexed clip.</small>
+              <div className="hotkey-registration-status">
+                <span className={`hotkey-status-dot ${saveAndNameHotkey.registered ? "hotkey-status-registered" : ""}`} />
+                {saveAndNameHotkey.registered ? "Registered" : "Not configured"}
+              </div>
+            </div>
+            <div className="hotkey-setting-controls">
+              <kbd className={recordingHotkey === "saveAndName" ? "hotkey-recording" : undefined}>
+                {recordingHotkey === "saveAndName" ? hotkeyDraft : saveAndNameHotkey.currentCombination || "Not configured"}
+              </kbd>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={hotkeyPending || recordingHotkey === "saveReplay"}
+                onClick={recordingHotkey === "saveAndName" ? stopHotkeyRecording : () => void startHotkeyRecording("saveAndName")}
+              >
+                {recordingHotkey === "saveAndName" ? "Cancel" : hotkeyPending ? "Registering..." : saveAndNameHotkey.registered ? "Change" : "Set Hotkey"}
+              </button>
+              {saveAndNameHotkey.registered && <button className="secondary-button" type="button" disabled={hotkeyPending || Boolean(recordingHotkey)} onClick={() => void disableSaveAndNameHotkey()}>Disable</button>}
+            </div>
+          </div>
+          {recordingHotkey === "saveAndName" && <small className="hotkey-recorder-help">Press the shortcut you want. Escape cancels. This action intentionally brings SlickClip forward after the clip is safely indexed.</small>}
+          {(saveAndNameHotkeyMessage || saveAndNameHotkey.lastRegistrationError) && (
+            <span className={saveAndNameHotkeyMessage?.success && !saveAndNameHotkey.lastRegistrationError ? "hotkey-message-success" : "hotkey-message-error"} role="status">
+              {saveAndNameHotkeyMessage?.text ?? saveAndNameHotkey.lastRegistrationError}
+            </span>
+          )}
         </SettingsCategory>
 
-        <SettingsCategory title="Storage" description="Clip location, quota, and safety-reviewed cleanup.">
+        <SettingsCategory id="settings-storage" number="04" title="Storage" description="Clip location, quota, and safety-reviewed cleanup." status={`${storageQuotaInput || preferences.storageQuotaGib} GB`}>
           <div className="settings-row">
             <div><span>Save Location</span><small>Where completed clips will be stored</small></div>
             <div className="path-value">Videos\SlickClip\Clips</div>
@@ -481,26 +621,40 @@ export function SettingsPage() {
           {storageMessage && <span className={storageMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{storageMessage.text}</span>}
         </SettingsCategory>
 
-        <SettingsCategory title="Game Detection" description="Conservative process approval and auto-arm controls.">
-          <SettingsToggle label="Detect likely games" description="Uses install, launcher, and window evidence to suggest games. Detection alone never starts capture." checked={preferences.gameDetectionEnabled} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ gameDetectionEnabled: value, gameAutoArm: value ? preferences.gameAutoArm : false })} />
-          <SettingsToggle label="Auto-arm approved games" help="Automatically starts Replay when an approved game launches." description="Starts only when exactly one explicitly approved game window is live; suggestions are never auto-armed." checked={preferences.gameAutoArm} disabled={desktopSettingsPending || !preferences.gameDetectionEnabled} onChange={(value) => void updateDesktopPreference({ gameAutoArm: value })} />
+        <SettingsCategory id="settings-game-detection" number="05" title="Game Detection" description="Automatically get Replay ready when a game opens." status={preferences.gameDetectionEnabled ? (preferences.gameAutoArm ? "Auto capture" : "Observing") : "Off"}>
+          <SettingsToggle label="Game Detection" description="Watches capturable windows for strong game signals while SlickClip runs in the tray." checked={preferences.gameDetectionEnabled} disabled={desktopSettingsPending} onChange={(value) => void updateDesktopPreference({ gameDetectionEnabled: value, gameAutoArm: value ? preferences.gameAutoArm : false })} />
+          <SettingsToggle label="Automatically start Replay for detected games" help="A game must remain the best matching target for multiple scans before Replay starts." description="Turn this off to observe detected games without ever starting Replay automatically." checked={preferences.gameAutoArm} disabled={desktopSettingsPending || !preferences.gameDetectionEnabled} onChange={(value) => void updateDesktopPreference({ gameAutoArm: value })} />
+          <label className="setting-row">
+            <span><span className="setting-label">Detection Mode</span><small>Use approvals only when you want a strict allowlist.</small></span>
+            <select value={preferences.gameDetectionMode} disabled={desktopSettingsPending || !preferences.gameDetectionEnabled} onChange={(event) => void updateDesktopPreference({ gameDetectionMode: event.target.value as UiPreferences["gameDetectionMode"] })}>
+              <option value="anyDetectedGame">Any detected game</option>
+              <option value="approvedGamesOnly">Approved games only</option>
+            </select>
+          </label>
+          <SettingsToggle label="Stop Replay when the game closes" description="Stops the automatically started buffer safely. Closing a game never saves a clip." checked={preferences.gameStopReplayOnClose} disabled={desktopSettingsPending || !preferences.gameDetectionEnabled} onChange={(value) => void updateDesktopPreference({ gameStopReplayOnClose: value })} />
+          <SettingsToggle label="Show Replay Ready notification" description="Shows one small non-focus-stealing notice when automatic capture becomes ready." checked={preferences.gameReadyNotificationEnabled} disabled={desktopSettingsPending || !preferences.gameDetectionEnabled} onChange={(value) => void updateDesktopPreference({ gameReadyNotificationEnabled: value })} />
           <div className="game-detection-rules">
-            <div className="game-detection-heading"><div><span>Process rules</span><small>Exclusions override approvals. Executable names are matched without case or .exe.</small></div><button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={addApprovedProcess}>+ Approve Process</button></div>
-            <ProcessRuleList label="Approved for auto-arm" values={preferences.gameDetectionApprovedProcesses} onRemove={(value) => removeProcessRule(value, "approved")} />
+            <div className="game-detection-heading"><div><span>Excluded applications</span><small>Exclusions always win and can never become automatic targets.</small></div><button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={addExcludedProcess}>+ Exclude App</button></div>
             <ProcessRuleList label="Excluded" values={preferences.gameDetectionExcludedProcesses} onRemove={(value) => removeProcessRule(value, "excluded")} />
+            <details className="game-detection-advanced">
+              <summary>Advanced approved-game controls</summary>
+              <div className="game-detection-heading"><div><span>Approved applications</span><small>Used as an allowlist only in Approved games only mode. Existing approvals are preserved.</small></div><button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={addApprovedProcess}>+ Approve Process</button></div>
+              <ProcessRuleList label="Approved" values={preferences.gameDetectionApprovedProcesses} onRemove={(value) => removeProcessRule(value, "approved")} />
+            </details>
           </div>
           <div className="game-detection-live">
-            <div className="game-detection-heading"><div><span>Live candidates</span><small>{preferences.gameDetectionEnabled ? "Review every process before allowing auto-arm." : "Enable detection to scan capturable windows."}</small></div>{gameDetection.autoArmedTargetId && <span className="game-auto-armed-status"><span className="status-dot status-dot-active" />Auto-armed</span>}</div>
+            <div className="game-detection-heading"><div><span>Detected games</span><small>{preferences.gameDetectionEnabled ? (preferences.gameAutoArm ? "The best stable match starts automatically unless excluded." : "Detection is observing only; automatic Replay start is off.") : "Enable detection to scan capturable windows."}</small></div>{preferences.gameDetectionEnabled && (gameDetection.autoArmedTargetId || gameDetection.candidates.length > 0) && <span className={`game-auto-armed-status game-auto-armed-status-${gameDetection.replayState}`}><span className="status-dot status-dot-active" />{detectedReplayLabel(gameDetection.replayState)}</span>}</div>
+            {gameDetection.manualOverrideActive && <p className="game-detection-empty">Manual capture override is active. Game Detection will not replace it.</p>}
             {gameDetection.errorMessage && <span className="hotkey-message-error" role="alert">{gameDetection.errorMessage}</span>}
             {preferences.gameDetectionEnabled && !gameDetection.errorMessage && gameDetection.candidates.length === 0 && <p className="game-detection-empty">No likely game windows are visible.</p>}
             {gameDetection.candidates.map((candidate) => <article className="game-candidate" key={candidate.targetId}>
-              <div><strong>{candidate.processName}</strong><span>{candidate.title}</span><small>{candidate.width}×{candidate.height} · PID {candidate.processId} · {candidate.reason}</small></div>
-              <div>{candidate.approved ? <span className="game-approved-badge">Approved</span> : <button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={() => approveProcess(candidate.processName)}>Approve</button>}<button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={() => excludeProcess(candidate.processName)}>Exclude</button></div>
+              <div><strong>{candidate.title}</strong><span>{candidate.processName}</span><small>{candidate.width}×{candidate.height} · PID {candidate.processId}{candidate.foreground ? " · Foreground" : ""} · {candidate.reason}</small></div>
+              <div>{showCandidateApprovalControls(preferences.gameDetectionMode) && (candidate.approved ? <span className="game-approved-badge">Approved</span> : <button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={() => approveProcess(candidate.processName)}>Approve</button>)}<button className="secondary-button" type="button" disabled={desktopSettingsPending} onClick={() => excludeProcess(candidate.processName)}>Exclude</button></div>
             </article>)}
           </div>
         </SettingsCategory>
 
-        <SettingsCategory title="Advanced" description="Diagnostics, hardware checks, and signed application updates.">
+        <SettingsCategory id="settings-advanced" number="06" title="Advanced" description="Diagnostics, hardware checks, and signed application updates." status="On demand">
           <div className="advanced-settings-group">
             <div className="advanced-settings-heading"><h3>Audio Capture Test</h3><p>Inspect device and process-audio support without changing capture preferences.</p></div>
             <AudioCaptureTest />
@@ -519,17 +673,45 @@ export function SettingsPage() {
             {updateMessage && <span className={updateMessage.success ? "hotkey-message-success" : "hotkey-message-error"} role="status">{updateMessage.text}</span>}
           </div>
         </SettingsCategory>
+        </main>
       </div>
     </div>
   );
 }
 
-function SettingsCategory({ title, description, children, defaultOpen = false }: { title: string; description: string; children: React.ReactNode; defaultOpen?: boolean }) {
+function replayDurationLabel(seconds: UiPreferences["replayDurationSeconds"]) {
+  return ({ 30: "30 Seconds", 60: "1 Minute", 120: "2 Minutes", 180: "3 Minutes", 300: "5 Minutes" } as const)[seconds];
+}
+
+function replayDurationFromLabel(label: string): UiPreferences["replayDurationSeconds"] {
+  return ({ "30 Seconds": 30, "1 Minute": 60, "2 Minutes": 120, "3 Minutes": 180, "5 Minutes": 300 } as const)[label as "30 Seconds" | "1 Minute" | "2 Minutes" | "3 Minutes" | "5 Minutes"] ?? 120;
+}
+
+function openSettingsCategory(targetId: string) {
+  const category = document.getElementById(targetId);
+  if (!(category instanceof HTMLDetailsElement)) return;
+  category.open = true;
+  category.scrollIntoView({ behavior: "smooth", block: "start" });
+  window.setTimeout(() => category.querySelector<HTMLElement>("summary")?.focus({ preventScroll: true }), 250);
+}
+
+function SettingsIndexItem({ number, title, detail, targetId }: { number: string; title: string; detail: string; targetId: string }) {
   return (
-    <details className="settings-category" open={defaultOpen || undefined}>
+    <button type="button" onClick={() => openSettingsCategory(targetId)}>
+      <span>{number}</span>
+      <strong>{title}</strong>
+      <small>{detail}</small>
+      <b aria-hidden="true">→</b>
+    </button>
+  );
+}
+
+function SettingsCategory({ id, number, title, description, status, children, defaultOpen = false }: { id: string; number: string; title: string; description: string; status: string; children: React.ReactNode; defaultOpen?: boolean }) {
+  return (
+    <details className="settings-category" id={id} open={defaultOpen || undefined}>
       <summary>
-        <div><h2>{title}</h2><p>{description}</p></div>
-        <span className="settings-category-chevron" aria-hidden="true">⌄</span>
+        <div className="settings-category-heading"><span>{number}</span><div><h2>{title}</h2><p>{description}</p></div></div>
+        <div className="settings-category-meta"><span>{status}</span><i className="settings-category-chevron" aria-hidden="true">⌄</i></div>
       </summary>
       <div className="settings-section-body">{children}</div>
     </details>

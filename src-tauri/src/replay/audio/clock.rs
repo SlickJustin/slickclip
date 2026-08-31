@@ -5,7 +5,7 @@ use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerforma
 
 const HUNDRED_NS_PER_SECOND: i128 = 10_000_000;
 
-/// One calibration shared by WGC and every WASAPI track. WGC SystemRelativeTime
+/// One calibration shared by display video and every WASAPI track. Display frame deadlines
 /// and WASAPI's GetBuffer QPC position are both QPC-based 100 ns values. The
 /// raw counter/frequency are retained as the authoritative calibration.
 #[derive(Clone, Debug)]
@@ -13,6 +13,7 @@ pub struct ReplaySessionClock {
     pub session_start_qpc: i64,
     pub qpc_frequency: i64,
     pub session_start_qpc_100ns: i64,
+    #[allow(dead_code)]
     pub started: Instant,
 }
 
@@ -70,7 +71,7 @@ impl ReplaySessionClock {
             session_start_qpc: Some(self.session_start_qpc),
             qpc_frequency: Some(self.qpc_frequency),
             session_start_qpc_100ns: Some(self.session_start_qpc_100ns),
-            timing_domain: "Windows QPC; WGC SystemRelativeTime and WASAPI qpcPosition are normalized QPC in 100-ns units".to_string(),
+            timing_domain: "Windows QPC; display video deadlines and every WASAPI qpcPosition are normalized into one monotonic 100-ns Replay timeline".to_string(),
         }
     }
 }

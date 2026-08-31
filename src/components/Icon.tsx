@@ -1,4 +1,5 @@
 export type IconName =
+  | "home"
   | "replay"
   | "watchParty"
   | "clips"
@@ -37,6 +38,7 @@ export function Icon({ name, size = 18, className }: IconProps) {
 }
 
 const iconPaths: Record<IconName, React.ReactNode> = {
+  home: <><path d="m3 11 9-8 9 8" /><path d="M5 10v10h14V10M9 20v-6h6v6" /></>,
   replay: <><path d="M4.8 8.2A8 8 0 1 1 4 14" /><path d="M4.8 4.7v3.5h3.5" /><path d="m10 9 5 3-5 3Z" /></>,
   watchParty: <><rect x="3" y="5" width="12" height="14" rx="2" /><path d="m15 10 5-3v10l-5-3" /></>,
   clips: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 5v14M17 5v14M3 9h4m10 0h4M3 15h4m10 0h4" /></>,

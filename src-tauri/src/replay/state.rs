@@ -49,6 +49,16 @@ pub struct ReplayBufferStatus {
     pub target_label: Option<String>,
     pub requested_encoder: Option<String>,
     pub actual_encoder: Option<String>,
+    pub requested_capture_mode: String,
+    pub active_capture_mode: Option<String>,
+    pub presentation: Option<String>,
+    pub video_backend: String,
+    pub backend_selection_reason: Option<String>,
+    pub capture_health: String,
+    pub capture_fallback_reason: Option<String>,
+    pub last_recovery_message: Option<String>,
+    pub recovery_elapsed_ms: Option<f64>,
+    pub recovery_recreation_attempts: u64,
     pub replay_duration_seconds: u32,
     pub expected_segment_duration_seconds: f64,
     pub frame_rate: u32,
@@ -118,6 +128,11 @@ pub struct ReplayBufferStatus {
     pub scheduler_catch_up_frames: u64,
     pub scheduler_rotation_catch_up_frames: u64,
     pub scheduler_save_pending_catch_up_frames: u64,
+    pub scheduler_discontinuities: u64,
+    pub scheduler_rebases: u64,
+    pub dxgi_duplication_recreations: u64,
+    pub ffmpeg_capture_restarts: u64,
+    pub dxgi_startup: DxgiStartupStatus,
     pub queue_full_retry_attempts: u64,
     pub recovered_queue_full_frames: u64,
     pub last_rotation_lateness_before_ms: Option<f64>,
@@ -126,19 +141,62 @@ pub struct ReplayBufferStatus {
     pub held_output_frames: u64,
     pub superseded_source_updates: u64,
     pub missed_realtime_output_frames: u64,
+    pub source_frames_detached: u64,
+    pub source_frames_rate_limited: u64,
     pub source_frame_update_rate: Option<f64>,
     pub output_cfr_rate: Option<f64>,
     pub frame_pool_creation_method: String,
     pub frame_pool_buffer_count: u32,
+    pub native_resources: ReplayNativeResourceStatus,
     pub rotation_lifecycle: RotationLifecycleTrace,
     pub recent_segments: Vec<CompletedSegment>,
     pub audio: AudioReplayStatus,
+}
+
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DxgiStartupStatus {
+    pub output_identity: Option<String>,
+    pub adapter_identity: Option<String>,
+    pub desktop_x: Option<i32>,
+    pub desktop_y: Option<i32>,
+    pub output_width: Option<u32>,
+    pub output_height: Option<u32>,
+    pub acquire_results: u64,
+    pub acquired_frames: u64,
+    pub timeouts: u64,
+    pub access_losses: u64,
+    pub invalid_textures: u64,
+    pub cpu_readbacks: u64,
+    pub last_cpu_readback_ms: Option<f64>,
+    pub valid_samples: u64,
+    pub last_acquire_result: Option<String>,
+    pub last_valid_frame_elapsed_ms: Option<f64>,
+}
+
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayNativeResourceStatus {
+    pub logical_replay_sessions: u64,
+    pub wgc_capture_sessions: u64,
+    pub dxgi_duplication_sessions: u64,
+    pub d3d11_devices: u64,
+    pub d3d11_device_contexts: u64,
+    pub frame_pools: u64,
+    pub media_foundation_encoders: u64,
+    pub ffmpeg_capture_processes: u64,
+    pub video_workers: u64,
+    pub audio_workers: u64,
+    pub system_cursor_visible: Option<bool>,
+    pub system_cursor_suppressed: Option<bool>,
+    pub capture_cursor_mode: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplayCommandResult {
     pub success: bool,
+    pub started_new_session: bool,
     pub status: ReplayBufferStatus,
     pub error_message: Option<String>,
 }
@@ -147,6 +205,16 @@ impl ReplayCommandResult {
     pub fn success(status: ReplayBufferStatus) -> Self {
         Self {
             success: true,
+            started_new_session: false,
+            status,
+            error_message: None,
+        }
+    }
+
+    pub fn started(status: ReplayBufferStatus) -> Self {
+        Self {
+            success: true,
+            started_new_session: true,
             status,
             error_message: None,
         }
@@ -155,6 +223,7 @@ impl ReplayCommandResult {
     pub fn failure(status: ReplayBufferStatus, error: impl Into<String>) -> Self {
         Self {
             success: false,
+            started_new_session: false,
             status,
             error_message: Some(error.into()),
         }

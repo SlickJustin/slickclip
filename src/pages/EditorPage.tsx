@@ -1006,18 +1006,19 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
     <div className="page editor-page">
       <header className="page-header editor-page-header">
         <div className="editor-title-block">
-          <button className="editor-back-button" type="button" onClick={onBackToClips}>← Clips</button>
-          <div><h1>Editor</h1><p>{session.source.displayName}</p></div>
+          <button className="editor-back-button" type="button" onClick={onBackToClips}><span aria-hidden="true">←</span> Library</button>
+          <div><span className="editor-title-eyebrow">Clip editor</span><h1>{session.source.displayName}</h1><p>Cut the moment, balance each stem, then export a new clip.</p></div>
         </div>
         <div className="editor-header-status">
-          {editorDirty && <span className="editor-dirty-state">Unsaved edits</span>}
-          <span className="editor-source-safety">Original preserved</span>
+          <div className="editor-header-facts" aria-label="Source summary"><span>{session.source.width}×{session.source.height}</span><span>{formatEditorTimeUs(authoritativeEditedDurationUs)}</span><span>{mixer.tracks.length} audio stem{mixer.tracks.length === 1 ? "" : "s"}</span></div>
+          {editorDirty && <span className="editor-dirty-state"><i aria-hidden="true" /> Unsaved edits</span>}
+          <span className="editor-source-safety"><span aria-hidden="true">✓</span> Original safe</span>
           <button
             className="primary-button editor-export-button"
             type="button"
             disabled={exportActive || session.segments.length === 0}
             onClick={() => void startEditorExport()}
-          >{exportActive ? "Exporting..." : "Export Clip"}</button>
+          >{exportActive ? "Exporting…" : "Export new clip"}</button>
         </div>
       </header>
 
@@ -1054,7 +1055,7 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
 
       <div className="editor-workspace">
         <section className="editor-preview-panel" ref={previewPanelRef} aria-label="Editor video preview">
-          <div className="editor-preview-heading"><span>Preview</span><small>{source?.kind ?? "Resolving source"}</small></div>
+          <div className="editor-preview-heading"><span><i className="editor-live-dot" aria-hidden="true" /> Preview</span><small>{source?.kind ?? "Resolving source"}</small></div>
           <div className="editor-preview-stage" onClick={(event) => { if (event.target === event.currentTarget || event.target === videoRef.current) togglePlayback(); }}>
             {source && <video
               key={`${source.kind}:${source.path}:${source.revision}`}
@@ -1099,6 +1100,7 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
             />}
             {mediaStatus === "loading" && <div className="editor-media-message"><span className="player-spinner" />Loading source clip...</div>}
             {mediaStatus === "preparingProxy" && <div className="editor-media-message"><span className="player-spinner" />Preparing H.264 editor preview...</div>}
+            {mediaStatus === "ready" && session.playbackState !== "playing" && <button className="editor-stage-play" type="button" onClick={(event) => { event.stopPropagation(); togglePlayback(); }} aria-label="Play edited preview"><EditorTransportIcon name="play" /><span>Play preview</span></button>}
             {mediaStatus === "error" && <div className="editor-media-message editor-media-error" role="alert">
               <strong>Editor preview unavailable</strong><span>{mediaError}</span>
               <div><button type="button" disabled={exportActive} onClick={() => void preparePreview(true)}>Retry Preview</button><button type="button" onClick={onBackToClips}>Return to Clips</button></div>
@@ -1141,8 +1143,8 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
 
         <aside className="editor-source-panel" aria-labelledby="editor-source-heading">
           <div className="editor-inspector-heading">
-            <div><h2 id="editor-source-heading">Source inspector</h2><span>Clip details</span></div>
-            <span className="editor-inspector-state">Non-destructive</span>
+            <div><span className="eyebrow">SOURCE</span><h2 id="editor-source-heading">Clip details</h2></div>
+            <span className="editor-inspector-state">Read only</span>
           </div>
           <dl className="editor-source-details">
             <div><dt>Name</dt><dd>{session.source.displayName}</dd></div>
@@ -1158,7 +1160,7 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
 
         <section className="editor-mixer-panel" aria-labelledby="editor-mixer-heading">
           <div className="editor-mixer-heading">
-            <div><span className="eyebrow">AUDIO MIXER</span><h2 id="editor-mixer-heading">Editor stems</h2></div>
+            <div><span className="eyebrow">AUDIO</span><h2 id="editor-mixer-heading">Mix every saved stem</h2><p>Mute, solo, or rebalance a track without changing the source clip.</p></div>
             <div className="editor-mixer-actions">
               <span className={allAudioTracksFailed ? "editor-mixer-status editor-mixer-status-error" : "editor-mixer-status"}>{mixerStatus}</span>
               <button
@@ -1171,7 +1173,7 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
           </div>
 
           {mixer.tracks.length > 0 ? <div className="editor-mixer-tracks">
-            {mixer.tracks.map((track) => <div className="editor-mixer-track" key={track.id}>
+            {mixer.tracks.map((track) => <div className="editor-mixer-track" data-track-role={track.role} key={track.id}>
               <div className="editor-mixer-track-name">
                 <strong>{track.title}</strong>
                 {track.role === "CombinedFallback" && <small>Combined fallback</small>}
@@ -1197,7 +1199,7 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
                   onClick={() => updateMixer((current) => toggleEditorTrackSolo(current, track.id))}
                 >S</button>
               </div>
-              <label className={track.gainPercent > 100 ? "editor-mixer-gain amplified" : "editor-mixer-gain"}>
+              <label className={track.gainPercent > 100 ? "editor-mixer-gain amplified" : "editor-mixer-gain"} style={{ "--editor-gain": `${Math.min(100, track.gainPercent / 3)}%` } as CSSProperties}>
                 <span className="visually-hidden">{track.title} volume</span>
                 <input
                   type="range"
@@ -1238,17 +1240,17 @@ function ActiveEditor({ clip, onBackToClips, onPlayExport, onDirtyChange, onToas
 
         <section className="editor-timeline-panel" aria-labelledby="editor-timeline-heading">
           <div className="editor-timeline-heading">
-            <div><span className="eyebrow">EDIT DECISION LIST</span><h2 id="editor-timeline-heading">Edited timeline</h2></div>
-            <code>{formatEditorTimeUs(session.playheadUs)}</code>
+            <div><span className="eyebrow">TIMELINE</span><h2 id="editor-timeline-heading">Shape the final clip</h2><p>Split around the moment, delete the rest, or drag either edge to trim.</p></div>
+            <code><span>{formatEditorTimeUs(session.playheadUs)}</span><i>/</i><span>{formatEditorTimeUs(authoritativeEditedDurationUs)}</span></code>
           </div>
 
           <div className="editor-toolbar" aria-label="Timeline editing actions">
-            <button type="button" onClick={() => applyEdit(undoEditorEdit(sessionRef.current))} disabled={exportActive || session.undoStack.length === 0} title="Undo (Ctrl+Z)">Undo</button>
-            <button type="button" onClick={() => applyEdit(redoEditorEdit(sessionRef.current))} disabled={exportActive || session.redoStack.length === 0} title="Redo (Ctrl+Shift+Z or Ctrl+Y)">Redo</button>
+            <button type="button" onClick={() => applyEdit(undoEditorEdit(sessionRef.current))} disabled={exportActive || session.undoStack.length === 0} title="Undo (Ctrl+Z)"><span aria-hidden="true">↶</span> Undo</button>
+            <button type="button" onClick={() => applyEdit(redoEditorEdit(sessionRef.current))} disabled={exportActive || session.redoStack.length === 0} title="Redo (Ctrl+Shift+Z or Ctrl+Y)"><span aria-hidden="true">↷</span> Redo</button>
             <span className="editor-toolbar-divider" aria-hidden="true" />
-            <button type="button" onClick={() => applyEdit(splitAtPlayhead(sessionRef.current))} disabled={exportActive || !splitEnabled} title="Split at playhead (S)">Split</button>
-            <button className="editor-delete-segment" type="button" onClick={() => applyEdit(deleteSelectedSegment(sessionRef.current))} disabled={exportActive || !deleteEnabled} title="Delete selected segment (Delete)">Delete Segment</button>
-            <button type="button" onClick={confirmReset} disabled={exportActive || !session.dirty}>Reset</button>
+            <button className="editor-split-segment" type="button" onClick={() => applyEdit(splitAtPlayhead(sessionRef.current))} disabled={exportActive || !splitEnabled} title="Split at playhead (S)"><span aria-hidden="true">✂</span> Split <kbd>S</kbd></button>
+            <button className="editor-delete-segment" type="button" onClick={() => applyEdit(deleteSelectedSegment(sessionRef.current))} disabled={exportActive || !deleteEnabled} title="Delete selected segment (Delete)"><span aria-hidden="true">✕</span> Delete</button>
+            <button className="editor-reset-edits" type="button" onClick={confirmReset} disabled={exportActive || !session.dirty}>Reset edits</button>
             <div className="editor-duration-status" aria-label="Timeline duration">
               <span>Original <strong>{formatEditorTimeUs(session.source.durationUs)}</strong></span>
               <span>Edited <strong>{formatEditorTimeUs(authoritativeEditedDurationUs)}</strong></span>

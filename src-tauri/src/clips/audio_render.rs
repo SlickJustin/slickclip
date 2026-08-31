@@ -46,20 +46,14 @@ pub fn render_audio_tracks(
 
     let mut rendered = Vec::with_capacity(ordered.len());
     for track in ordered {
-        rendered.push(render_track(
-            track,
-            timeline.clip_capture_start_qpc_100ns,
-            timeline.clip_playback_duration_100ns,
-            workspace,
-        )?);
+        rendered.push(render_track(track, timeline, workspace)?);
     }
     Ok(rendered)
 }
 
 fn render_track(
     track: &AudioSnapshotTrack,
-    clip_start_qpc_100ns: i64,
-    clip_duration_100ns: i64,
+    timeline: &SavedReplayTimeline,
     workspace: &Path,
 ) -> Result<RenderedAudioTrack, String> {
     let first = track.segments.first().ok_or_else(|| {
@@ -77,7 +71,8 @@ fn render_track(
         ));
     }
 
-    let target_frames = duration_to_frames(clip_duration_100ns, format.sample_rate)?;
+    let target_frames =
+        duration_to_frames(timeline.clip_playback_duration_100ns, format.sample_rate)?;
     let target_bytes = usize::try_from(
         u128::from(target_frames)
             .checked_mul(u128::from(format.block_align))
@@ -176,7 +171,9 @@ fn render_track(
         source_frames_available = source_frames_available.saturating_add(segment_frames);
 
         let segment_start_frame = time_delta_to_frames(
-            segment.start_qpc_100ns.saturating_sub(clip_start_qpc_100ns),
+            segment
+                .start_qpc_100ns
+                .saturating_sub(timeline.clip_capture_start_qpc_100ns),
             format.sample_rate,
         )?;
         if let Some(previous_end) = previous_source_end_frame {
@@ -209,22 +206,39 @@ fn render_track(
             ));
         }
 
-        let source_start = if segment_start_frame < 0 {
-            u64::try_from(segment_start_frame.saturating_neg()).unwrap_or(u64::MAX)
-        } else {
-            0
-        }
-        .min(segment_frames);
-        frames_trimmed_before = frames_trimmed_before.saturating_add(source_start);
-        let destination_start = u64::try_from(segment_start_frame.max(0)).unwrap_or(u64::MAX);
-        let available_frames = segment_frames.saturating_sub(source_start);
-        let destination_capacity =
-            target_frames.saturating_sub(destination_start.min(target_frames));
-        let copied_frames = available_frames.min(destination_capacity);
-        frames_trimmed_after =
-            frames_trimmed_after.saturating_add(available_frames.saturating_sub(copied_frames));
-
-        if copied_frames > 0 {
+        let segment_duration_100ns = frames_to_duration(segment_frames, format.sample_rate)?;
+        let segment_end_qpc_100ns = segment
+            .start_qpc_100ns
+            .saturating_add(segment_duration_100ns);
+        let mut copied_from_segment = 0u64;
+        for video in &timeline.segment_maps {
+            let intersection_start = segment.start_qpc_100ns.max(video.session_start_qpc_100ns);
+            let intersection_end = segment_end_qpc_100ns.min(video.session_end_qpc_100ns);
+            if intersection_end <= intersection_start {
+                continue;
+            }
+            let source_start = duration_to_frames(
+                intersection_start.saturating_sub(segment.start_qpc_100ns),
+                format.sample_rate,
+            )?
+            .min(segment_frames);
+            let destination_start = duration_to_frames(
+                video.clip_start_100ns.saturating_add(
+                    intersection_start.saturating_sub(video.session_start_qpc_100ns),
+                ),
+                format.sample_rate,
+            )?
+            .min(target_frames);
+            let intersection_frames = duration_to_frames(
+                intersection_end.saturating_sub(intersection_start),
+                format.sample_rate,
+            )?;
+            let copied_frames = intersection_frames
+                .min(segment_frames.saturating_sub(source_start))
+                .min(target_frames.saturating_sub(destination_start));
+            if copied_frames == 0 {
+                continue;
+            }
             let block_align = usize::from(format.block_align);
             let source_byte_start = usize::try_from(source_start)
                 .ok()
@@ -240,6 +254,7 @@ fn render_track(
                 .ok_or_else(|| "Rendered WAV copy size overflowed.".to_string())?;
             output_bytes[destination_byte_start..destination_byte_start + byte_count]
                 .copy_from_slice(&parsed.data[source_byte_start..source_byte_start + byte_count]);
+            copied_from_segment = copied_from_segment.saturating_add(copied_frames);
             first_written_frame = Some(
                 first_written_frame
                     .map(|value| value.min(destination_start))
@@ -252,6 +267,20 @@ fn render_track(
                     .unwrap_or(written_end),
             );
         }
+        let not_copied = segment_frames.saturating_sub(copied_from_segment.min(segment_frames));
+        let before_end = segment_end_qpc_100ns.min(timeline.clip_capture_start_qpc_100ns);
+        let before_frames = if before_end > segment.start_qpc_100ns {
+            duration_to_frames(
+                before_end.saturating_sub(segment.start_qpc_100ns),
+                format.sample_rate,
+            )?
+            .min(not_copied)
+        } else {
+            0
+        };
+        frames_trimmed_before = frames_trimmed_before.saturating_add(before_frames);
+        frames_trimmed_after =
+            frames_trimmed_after.saturating_add(not_copied.saturating_sub(before_frames));
     }
 
     let leading_silence_frames = first_written_frame
@@ -341,6 +370,16 @@ fn duration_to_frames(duration_100ns: i64, sample_rate: u32) -> Result<u64, Stri
     }
     u64::try_from(round_time_product(i128::from(duration_100ns), sample_rate))
         .map_err(|_| "Audio render frame count overflowed.".to_string())
+}
+
+fn frames_to_duration(frames: u64, sample_rate: u32) -> Result<i64, String> {
+    if sample_rate == 0 {
+        return Err("Audio sample rate cannot be zero.".to_string());
+    }
+    Ok(
+        ((i128::from(frames) * MEDIA_TIME_BASE) / i128::from(sample_rate))
+            .clamp(0, i128::from(i64::MAX)) as i64,
+    )
 }
 
 fn time_delta_to_frames(delta_100ns: i64, sample_rate: u32) -> Result<i64, String> {
@@ -535,7 +574,8 @@ mod tests {
     fn exact_front_trim_and_final_frame_count() {
         let directory = test_directory("front-trim");
         let segment = write_segment(&directory, 1, -10_000_000, 96_000);
-        let rendered = render_track(&snapshot(vec![segment]), 0, 10_000_000, &directory).unwrap();
+        let timeline = SavedReplayTimeline::test_interval(0, 10_000_000);
+        let rendered = render_track(&snapshot(vec![segment]), &timeline, &directory).unwrap();
         assert_eq!(rendered.diagnostics.frames_trimmed_before, 48_000);
         assert_eq!(rendered.diagnostics.rendered_frame_count, 48_000);
         assert_eq!(rendered.diagnostics.leading_silence_frames, 0);
@@ -549,7 +589,8 @@ mod tests {
     fn late_start_and_early_end_become_silence() {
         let directory = test_directory("silence");
         let segment = write_segment(&directory, 1, 2_500_000, 24_000);
-        let rendered = render_track(&snapshot(vec![segment]), 0, 10_000_000, &directory).unwrap();
+        let timeline = SavedReplayTimeline::test_interval(0, 10_000_000);
+        let rendered = render_track(&snapshot(vec![segment]), &timeline, &directory).unwrap();
         assert_eq!(rendered.diagnostics.leading_silence_frames, 12_000);
         assert_eq!(rendered.diagnostics.trailing_silence_frames, 12_000);
         assert_eq!(rendered.diagnostics.rendered_frame_count, 48_000);
@@ -561,12 +602,37 @@ mod tests {
         let directory = test_directory("multiple");
         let first = write_segment(&directory, 1, 0, 24_000);
         let second = write_segment(&directory, 2, 5_000_000, 24_000);
-        let rendered =
-            render_track(&snapshot(vec![first, second]), 0, 10_000_000, &directory).unwrap();
+        let timeline = SavedReplayTimeline::test_interval(0, 10_000_000);
+        let rendered = render_track(&snapshot(vec![first, second]), &timeline, &directory).unwrap();
         let parsed = parse_wav(&rendered.path).unwrap();
         assert_eq!(&parsed.data[0..4], &[1, 1, 1, 1]);
         assert_eq!(&parsed.data[24_000 * 4..24_000 * 4 + 4], &[2, 2, 2, 2]);
         assert!(rendered.diagnostics.warnings.is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn ffmpeg_restart_gap_is_removed_from_native_audio_on_the_same_timeline() {
+        let directory = test_directory("restart-gap");
+        let audio = write_segment(&directory, 1, 0, 144_000);
+        let mut timeline = SavedReplayTimeline::test_interval(0, 10_000_000);
+        let mut second = timeline.segment_maps[0].clone();
+        second.sequence_number = 2;
+        second.session_start_qpc_100ns = 20_000_000;
+        second.session_end_qpc_100ns = 30_000_000;
+        second.source_start_qpc_100ns = 20_000_000;
+        second.source_last_frame_qpc_100ns = 30_000_000;
+        second.clip_start_100ns = 10_000_000;
+        second.clip_end_100ns = 20_000_000;
+        timeline.segment_maps.push(second);
+        timeline.clip_capture_end_qpc_100ns = 30_000_000;
+        timeline.clip_playback_end_100ns = 20_000_000;
+        timeline.clip_playback_duration_100ns = 20_000_000;
+        let rendered = render_track(&snapshot(vec![audio]), &timeline, &directory).unwrap();
+        assert_eq!(rendered.diagnostics.rendered_frame_count, 96_000);
+        assert_eq!(rendered.diagnostics.frames_trimmed_after, 48_000);
+        assert_eq!(rendered.diagnostics.leading_silence_frames, 0);
+        assert_eq!(rendered.diagnostics.trailing_silence_frames, 0);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -605,7 +671,8 @@ mod tests {
         let first = write_segment(&directory, 1, 0, 24_000);
         let mut second = write_segment(&directory, 2, 5_000_000, 24_000);
         second.format.sample_rate = 44_100;
-        assert!(render_track(&snapshot(vec![first, second]), 0, 10_000_000, &directory).is_err());
+        let timeline = SavedReplayTimeline::test_interval(0, 10_000_000);
+        assert!(render_track(&snapshot(vec![first, second]), &timeline, &directory).is_err());
         fs::remove_dir_all(directory).unwrap();
     }
 }

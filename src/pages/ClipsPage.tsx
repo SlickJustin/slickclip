@@ -498,8 +498,8 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
     items[nextIndex].focus();
   }
 
-  return <div className="page">
-    <header className="page-header clips-page-header"><div><h1>Clips</h1><p>Your persistent local replay library.</p></div><button className="secondary-button" type="button" disabled={reconciliationActive} onClick={refreshLibrary}>{reconciliationActive ? "Refreshing..." : "Refresh Clips"}</button></header>
+  return <div className="page page-clips">
+    <header className="page-header clips-page-header"><div><span className="clips-page-eyebrow">Local Library</span><h1>Clips</h1><p>Find, organize, play, and edit every saved moment.</p></div><button className="secondary-button" type="button" disabled={reconciliationActive} onClick={refreshLibrary}>{reconciliationActive ? "Refreshing..." : "Refresh Clips"}</button></header>
     <section className="clips-panel" aria-label="Clips library">
       <div className="clips-toolbar">
         <label className="search-field"><span className="visually-hidden">Search clips</span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg><input value={preferences.clipsSearchQuery} onChange={(event) => setPreferences((current) => ({ ...current, clipsSearchQuery: event.target.value }))} placeholder="Search names, files, or capture targets..." /></label>
@@ -570,7 +570,11 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
               setSelection((current) => selectClip(current, visibleClipIds, clip.id, { toggle: true }));
             }}
           ><span aria-hidden="true">{selected ? "✓" : ""}</span></button>
-          <ClipThumbnail clip={clip} onPlay={() => setPlayingClip(clip)} /><div className="clip-card-body">
+          <div className="clip-card-media">
+            <ClipThumbnail clip={clip} onPlay={() => setPlayingClip(clip)} />
+            <span className="clip-card-duration">{formatDuration100ns(clip.duration100ns)}</span>
+            <button className={`favorite-button${clip.favorite ? " active" : ""}`} type="button" aria-label={clip.favorite ? "Remove favorite" : "Add favorite"} title={clip.favorite ? "Remove favorite" : "Add favorite"} onClick={() => void setFavorite(clip)}>{clip.favorite ? "★" : "☆"}</button>
+          </div><div className="clip-card-body">
           <div className="clip-card-heading">
             <div>
               <button className="clip-title-button" type="button" onClick={() => setPlayingClip(clip)}>{clip.displayName}</button>
@@ -579,7 +583,6 @@ export function ClipsPage({ onEditClip, playClip, onPlayClipConsumed, onToast }:
                 {clip.lastWatchedAtMs && <span title={new Date(clip.lastWatchedAtMs).toLocaleString()}> • {formatLastWatched(clip.lastWatchedAtMs)}</span>}
               </small>
             </div>
-            <button className={`favorite-button${clip.favorite ? " active" : ""}`} type="button" aria-label={clip.favorite ? "Remove favorite" : "Add favorite"} title={clip.favorite ? "Remove favorite" : "Add favorite"} onClick={() => void setFavorite(clip)}>{clip.favorite ? "★" : "☆"}</button>
           </div>
           <div className="clip-card-facts">
             <span>{formatDuration100ns(clip.duration100ns)}</span>

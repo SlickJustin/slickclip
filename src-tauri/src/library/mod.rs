@@ -1140,13 +1140,19 @@ pub async fn execute_storage_cleanup(
 
 #[tauri::command]
 pub async fn rename_clip_display_name(
+    app: AppHandle,
     manager: State<'_, ClipLibraryManager>,
     request: RenameClipRequest,
 ) -> Result<ClipMutationResponse, String> {
+    let clip_id = request.clip_id.clone();
     let manager = manager.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.rename(request))
+    let result = tauri::async_runtime::spawn_blocking(move || manager.rename(request))
         .await
-        .map_err(|error| format!("The clip rename worker failed: {error}"))
+        .map_err(|error| format!("The clip rename worker failed: {error}"))?;
+    if result.success {
+        let _ = app.emit("clip-library-changed", clip_id);
+    }
+    Ok(result)
 }
 
 #[tauri::command]

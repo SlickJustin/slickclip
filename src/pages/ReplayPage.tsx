@@ -121,6 +121,13 @@ type FinalMuxDiagnostics = { ffmpegDurationMs: number; ffmpegExitStatus: string;
 
 type TargetTab = "monitor" | "window";
 type SelectedTarget = { targetType: TargetTab; id: string };
+type GameDetectionStatus = {
+  autoArmedTargetId: string | null;
+  replayReady: boolean;
+  pendingTargetId: string | null;
+  manualOverrideActive: boolean;
+  candidates: { targetId: string; title: string; processName: string }[];
+};
 type CaptureTestStatus = "idle" | "preparing" | "recording" | "success" | "error";
 
 type ReplayLifecycleState = "stopped" | "starting" | "running" | "stopping" | "error";
@@ -172,6 +179,16 @@ type ReplayBufferStatus = {
   targetLabel: string | null;
   requestedEncoder: string | null;
   actualEncoder: string | null;
+  requestedCaptureMode: string;
+  activeCaptureMode: string | null;
+  presentation: string | null;
+  videoBackend: string;
+  backendSelectionReason: string | null;
+  captureHealth: string;
+  captureFallbackReason: string | null;
+  lastRecoveryMessage: string | null;
+  recoveryElapsedMs: number | null;
+  recoveryRecreationAttempts: number;
   replayDurationSeconds: number;
   expectedSegmentDurationSeconds: number;
   frameRate: number;
@@ -239,6 +256,28 @@ type ReplayBufferStatus = {
   schedulerCatchUpFrames: number;
   schedulerRotationCatchUpFrames: number;
   schedulerSavePendingCatchUpFrames: number;
+  schedulerDiscontinuities: number;
+  schedulerRebases: number;
+  dxgiDuplicationRecreations: number;
+  ffmpegCaptureRestarts: number;
+  dxgiStartup: {
+    outputIdentity: string | null;
+    adapterIdentity: string | null;
+    desktopX: number | null;
+    desktopY: number | null;
+    outputWidth: number | null;
+    outputHeight: number | null;
+    acquireResults: number;
+    acquiredFrames: number;
+    timeouts: number;
+    accessLosses: number;
+    invalidTextures: number;
+    cpuReadbacks: number;
+    lastCpuReadbackMs: number | null;
+    validSamples: number;
+    lastAcquireResult: string | null;
+    lastValidFrameElapsedMs: number | null;
+  };
   queueFullRetryAttempts: number;
   recoveredQueueFullFrames: number;
   lastRotationLatenessBeforeMs: number | null;
@@ -247,10 +286,27 @@ type ReplayBufferStatus = {
   heldOutputFrames: number;
   supersededSourceUpdates: number;
   missedRealtimeOutputFrames: number;
+  sourceFramesDetached: number;
+  sourceFramesRateLimited: number;
   sourceFrameUpdateRate: number | null;
   outputCfrRate: number | null;
   framePoolCreationMethod: string;
   framePoolBufferCount: number;
+  nativeResources: {
+    logicalReplaySessions: number;
+    wgcCaptureSessions: number;
+    dxgiDuplicationSessions: number;
+    d3d11Devices: number;
+    d3d11DeviceContexts: number;
+    framePools: number;
+    mediaFoundationEncoders: number;
+    ffmpegCaptureProcesses: number;
+    videoWorkers: number;
+    audioWorkers: number;
+    systemCursorVisible: boolean | null;
+    systemCursorSuppressed: boolean | null;
+    captureCursorMode: string;
+  };
   rotationLifecycle: {
     activeSequenceNumber: number | null;
     nextSequenceNumber: number | null;
@@ -271,6 +327,7 @@ type ReplayBufferStatus = {
 
 type ReplayCommandResult = {
   success: boolean;
+  startedNewSession: boolean;
   status: ReplayBufferStatus;
   errorMessage: string | null;
 };
@@ -328,6 +385,12 @@ type SaveReplayCommandResult = {
   errorMessage: string | null;
 };
 
+type SaveReplayCompletionFeedback = {
+  success: boolean;
+  message: string;
+  saveState: SaveJobState;
+};
+
 const replayDurationOptions = [
   { label: "30 Seconds", value: 30 },
   { label: "1 Minute", value: 60 },
@@ -343,6 +406,16 @@ const initialReplayStatus: ReplayBufferStatus = {
   targetLabel: null,
   requestedEncoder: null,
   actualEncoder: null,
+  requestedCaptureMode: "Auto",
+  activeCaptureMode: null,
+  presentation: null,
+  videoBackend: "FFmpeg ddagrab",
+  backendSelectionReason: null,
+  captureHealth: "Idle",
+  captureFallbackReason: null,
+  lastRecoveryMessage: null,
+  recoveryElapsedMs: null,
+  recoveryRecreationAttempts: 0,
   replayDurationSeconds: 0,
   expectedSegmentDurationSeconds: 2,
   frameRate: 0,
@@ -410,6 +483,28 @@ const initialReplayStatus: ReplayBufferStatus = {
   schedulerCatchUpFrames: 0,
   schedulerRotationCatchUpFrames: 0,
   schedulerSavePendingCatchUpFrames: 0,
+  schedulerDiscontinuities: 0,
+  schedulerRebases: 0,
+  dxgiDuplicationRecreations: 0,
+  ffmpegCaptureRestarts: 0,
+  dxgiStartup: {
+    outputIdentity: null,
+    adapterIdentity: null,
+    desktopX: null,
+    desktopY: null,
+    outputWidth: null,
+    outputHeight: null,
+    acquireResults: 0,
+    acquiredFrames: 0,
+    timeouts: 0,
+    accessLosses: 0,
+    invalidTextures: 0,
+    cpuReadbacks: 0,
+    lastCpuReadbackMs: null,
+    validSamples: 0,
+    lastAcquireResult: null,
+    lastValidFrameElapsedMs: null,
+  },
   queueFullRetryAttempts: 0,
   recoveredQueueFullFrames: 0,
   lastRotationLatenessBeforeMs: null,
@@ -418,10 +513,27 @@ const initialReplayStatus: ReplayBufferStatus = {
   heldOutputFrames: 0,
   supersededSourceUpdates: 0,
   missedRealtimeOutputFrames: 0,
+  sourceFramesDetached: 0,
+  sourceFramesRateLimited: 0,
   sourceFrameUpdateRate: null,
   outputCfrRate: null,
-  framePoolCreationMethod: "CreateFreeThreaded",
-  framePoolBufferCount: 2,
+  framePoolCreationMethod: "FFmpeg-owned D3D11 frames",
+  framePoolBufferCount: 0,
+  nativeResources: {
+    logicalReplaySessions: 0,
+    wgcCaptureSessions: 0,
+    dxgiDuplicationSessions: 0,
+    d3d11Devices: 0,
+    d3d11DeviceContexts: 0,
+    framePools: 0,
+    mediaFoundationEncoders: 0,
+    ffmpegCaptureProcesses: 0,
+    videoWorkers: 0,
+    audioWorkers: 0,
+    systemCursorVisible: null,
+    systemCursorSuppressed: null,
+    captureCursorMode: "systemDefaultCapturedOutputOnly",
+  },
   rotationLifecycle: {
     activeSequenceNumber: null,
     nextSequenceNumber: null,
@@ -479,10 +591,13 @@ export function ReplayPage() {
   const [replayDuration, setReplayDuration] = useState(120);
   const [saveReplayHotkey, setSaveReplayHotkey] = useState(defaultUiPreferences.saveReplayHotkey);
   const [frameRate, setFrameRate] = useState(60);
+  const [replayQuality, setReplayQuality] = useState<"high" | "balanced" | "smallerFiles">("balanced");
   const [replayEncoder, setReplayEncoder] = useState<Exclude<EncoderId, "av1">>("automatic");
   const [replayStatus, setReplayStatus] = useState<ReplayBufferStatus>(initialReplayStatus);
+  const [replayStatusLoaded, setReplayStatusLoaded] = useState(false);
   const [replayCommandActive, setReplayCommandActive] = useState(false);
   const [replayCommandError, setReplayCommandError] = useState<string | null>(null);
+  const [replayStatusFetchError, setReplayStatusFetchError] = useState<string | null>(null);
   const [saveReplayStatus, setSaveReplayStatus] = useState<SaveReplayStatus>(initialSaveReplayStatus);
   const [saveReplayCommandError, setSaveReplayCommandError] = useState<string | null>(null);
   const [captureTestActive, setCaptureTestActive] = useState(false);
@@ -497,6 +612,7 @@ export function ReplayPage() {
   const [monitors, setMonitors] = useState<MonitorTarget[]>([]);
   const [windows, setWindows] = useState<WindowTarget[]>([]);
   const [selectedTarget, setSelectedTarget] = useState<SelectedTarget | null>(null);
+  const [gameDetectionStatus, setGameDetectionStatus] = useState<GameDetectionStatus | null>(null);
   const [targetsLoading, setTargetsLoading] = useState(true);
   const [targetsError, setTargetsError] = useState<string | null>(null);
   const [captureTestEncoder, setCaptureTestEncoder] = useState<EncoderId>("automatic");
@@ -519,6 +635,7 @@ export function ReplayPage() {
     void refreshSaveReplayStatus();
     void refreshAudioSources();
     void refreshPreferences();
+    void refreshGameDetectionStatus();
   }, []);
 
   useEffect(() => {
@@ -539,11 +656,48 @@ export function ReplayPage() {
   }, []);
 
   useEffect(() => {
-    if (!isReplayActive(replayStatus.state)) return;
+    let unlisten: UnlistenFn | undefined;
+    let disposed = false;
+    void listen<SaveReplayCompletionFeedback>("save-replay-completed", (event) => {
+      setSaveReplayCommandError(event.payload.success ? null : event.payload.message);
+      void refreshSaveReplayStatus();
+      void refreshReplayStatus();
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
-    const timer = window.setInterval(() => void refreshReplayStatus(), 1_000);
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let disposed = false;
+    void listen<ReplayBufferStatus>("replay-buffer-status-changed", (event) => {
+      setReplayStatus(event.payload);
+      setReplayStatusLoaded(true);
+      setReplayStatusFetchError(null);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => void refreshReplayStatus(), 500);
     return () => window.clearInterval(timer);
-  }, [replayStatus.state]);
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => void refreshGameDetectionStatus(), 2_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!isSaveJobActive(saveReplayStatus.state)) return;
@@ -577,11 +731,10 @@ export function ReplayPage() {
     try {
       const status = await invoke<ReplayBufferStatus>("get_replay_buffer_status");
       setReplayStatus(status);
-      if (status.state === "error") {
-        setReplayCommandError(status.errorMessage ?? "The replay buffer entered an unknown error state.");
-      }
+      setReplayStatusLoaded(true);
+      setReplayStatusFetchError(null);
     } catch (error) {
-      setReplayCommandError(error instanceof Error ? error.message : String(error));
+      setReplayStatusFetchError(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -597,12 +750,59 @@ export function ReplayPage() {
     }
   }
 
+  async function refreshGameDetectionStatus() {
+    try {
+      setGameDetectionStatus(await invoke<GameDetectionStatus>("get_game_detection_status"));
+    } catch {
+      // Replay controls remain usable when detector diagnostics are unavailable.
+    }
+  }
+
+  async function selectManualTarget(target: SelectedTarget) {
+    if (isReplayActive(replayStatus.state)) {
+      setReplayCommandError("Stop Replay before choosing a capture source for the next session.");
+      return;
+    }
+    setSelectedTarget(target);
+    try {
+      const status = await invoke<GameDetectionStatus>("set_game_detection_manual_override", { targetId: target.id });
+      setGameDetectionStatus(status);
+    } catch (error) {
+      setReplayCommandError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function resumeAutomaticDetection() {
+    try {
+      const status = await invoke<GameDetectionStatus>("set_game_detection_manual_override", { targetId: null });
+      setGameDetectionStatus(status);
+      setSelectedTarget(null);
+    } catch (error) {
+      setReplayCommandError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function refreshPreferences() {
     try {
       const response = await invoke<UiPreferencesResponse>("get_ui_preferences");
-      if (response.success) setSaveReplayHotkey(response.preferences.saveReplayHotkey);
+      if (response.success) {
+        setSaveReplayHotkey(response.preferences.saveReplayHotkey);
+        setReplayDuration(response.preferences.replayDurationSeconds);
+        setFrameRate(response.preferences.replayFrameRate);
+        setReplayQuality(response.preferences.replayQuality);
+        setReplayEncoder(response.preferences.replayEncoder);
+      }
     } catch {
       // Keep the known-safe default if preferences cannot be read during startup.
+    }
+  }
+
+  async function persistReplayDefaults(patch: Record<string, number | string>) {
+    try {
+      const response = await invoke<UiPreferencesResponse>("update_ui_preferences", { patch });
+      if (!response.success) throw new Error(response.errorMessage ?? "The Replay default could not be saved.");
+    } catch (error) {
+      setReplayCommandError(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -631,9 +831,13 @@ export function ReplayPage() {
       const result = await invoke<ReplayCommandResult>("start_replay_buffer", {
         request: {
           target: selectedTarget,
+          // Legacy request field retained for wire compatibility. The backend always resolves
+          // the target once to a physical display and uses the persistent display pipeline.
+          captureMode: "auto",
           encoder: replayEncoder,
           replayDurationSeconds: replayDuration,
           frameRate,
+          quality: replayQuality,
           audio: {
             tracks: [
               ...(gameEnabled ? [{ role: "game", enabled: true, sourceKind: "process", processId: Number(gameProcessId), sourceLabel: audioApplications.find((app) => String(app.processId) === gameProcessId)?.processName ?? null }] : []),
@@ -754,6 +958,7 @@ export function ReplayPage() {
     if (baselineActive || isReplayActive(replayStatus.state)) return;
     setTargetTab(tab);
     setSelectedTarget(null);
+    void resumeAutomaticDetection();
     setTargetsError(null);
   }
 
@@ -861,6 +1066,7 @@ export function ReplayPage() {
   const saveJobActive = isSaveJobActive(saveReplayStatus.state);
   const saveReplayAvailable =
     replayStatus.state === "running" &&
+    replayStatus.captureHealth === "Healthy" &&
     replayStatus.completedSegmentCount > 0 &&
     !saveJobActive;
   const audioConfigurationValid =
@@ -869,16 +1075,18 @@ export function ReplayPage() {
     (!microphoneEnabled || microphoneId !== "") &&
     (!gameEnabled || !voiceEnabled || gameProcessId !== voiceProcessId);
   const selectedTargetLabel = getSelectedTargetLabel(selectedTarget, monitors, windows);
+  const automaticallyDetectedGame = gameDetectionStatus?.candidates.find((candidate) => candidate.targetId === gameDetectionStatus.autoArmedTargetId);
   const replayWindowSeconds = replayStatus.replayDurationSeconds || replayDuration;
 
   return (
     <div className="page page-replay">
-      <header className="page-header">
+      <header className="page-header replay-page-header">
         <div>
+          <span className="replay-page-eyebrow">Capture workspace</span>
           <h1>Replay</h1>
           <p>Capture the moments you actually want to keep.</p>
         </div>
-        <span className="demo-badge">Replay Buffer</span>
+        <span className={`demo-badge replay-page-badge${replayActive ? " active" : ""}`}>{replayActive ? "Replay active" : "Display Capture"}</span>
       </header>
 
       <details className="panel replay-diagnostics replay-capture-test-diagnostics" aria-labelledby="native-capture-test-heading">
@@ -984,8 +1192,8 @@ export function ReplayPage() {
           <section className="panel" aria-labelledby="capture-heading">
           <div className="section-heading">
             <div>
-              <h2 id="capture-heading">Capture source</h2>
-              <p className="section-description">Choose the display or application SlickClip should retain.</p>
+              <h2 id="capture-heading">Manual capture fallback</h2>
+              <p className="section-description">Automatic game detection chooses the game&apos;s display. Use this only to select a display or derive one from a window manually.</p>
             </div>
             <button className="secondary-button capture-target-refresh" type="button" disabled={targetsLoading || replayActive} onClick={refreshVisibleTargets}>
               {targetsLoading ? "Refreshing..." : "Refresh Sources"}
@@ -997,7 +1205,7 @@ export function ReplayPage() {
               Displays <span>{monitors.length}</span>
             </button>
             <button className={targetTab === "window" ? "capture-target-tab-active" : ""} type="button" aria-pressed={targetTab === "window"} disabled={replayActive} onClick={() => changeTargetTab("window")}>
-              Windows <span>{windows.length}</span>
+              Game / app windows <span>{windows.length}</span>
             </button>
           </div>
 
@@ -1008,14 +1216,14 @@ export function ReplayPage() {
               <div className="capture-target-empty capture-target-load-error">{targetsError}</div>
             ) : targetTab === "monitor" ? (
               monitors.length > 0 ? monitors.map((monitor) => (
-                <button className={`capture-target-card${selectedTarget?.id === monitor.id ? " capture-target-selected" : ""}`} type="button" aria-pressed={selectedTarget?.id === monitor.id} disabled={replayActive} key={monitor.id} onClick={() => setSelectedTarget({ targetType: "monitor", id: monitor.id })}>
+                <button className={`capture-target-card${selectedTarget?.id === monitor.id ? " capture-target-selected" : ""}`} type="button" aria-pressed={selectedTarget?.id === monitor.id} disabled={replayActive} key={monitor.id} onClick={() => void selectManualTarget({ targetType: "monitor", id: monitor.id })}>
                   <span className="capture-target-card-title">Display {monitor.displayIndex}{monitor.primary && <span className="capture-target-primary">Primary</span>}</span>
                   <span className="capture-target-friendly-name">{monitor.friendlyName}</span>
                   <span className="capture-target-details">{monitor.width} × {monitor.height}{monitor.refreshRate && <span>{monitor.refreshRate} Hz</span>}</span>
                 </button>
               )) : <div className="capture-target-empty">No capturable displays were detected.</div>
             ) : windows.length > 0 ? windows.map((window) => (
-              <button className={`capture-window-row${selectedTarget?.id === window.id ? " capture-target-selected" : ""}`} type="button" aria-pressed={selectedTarget?.id === window.id} disabled={replayActive} key={window.id} onClick={() => setSelectedTarget({ targetType: "window", id: window.id })}>
+              <button className={`capture-window-row${selectedTarget?.id === window.id ? " capture-target-selected" : ""}`} type="button" aria-pressed={selectedTarget?.id === window.id} disabled={replayActive} key={window.id} onClick={() => void selectManualTarget({ targetType: "window", id: window.id })}>
                 <span className="capture-window-app">{window.processName ?? `Process ${window.processId}`}</span>
                 <span className="capture-window-title">{window.title}</span>
                 <span className="capture-window-size">{window.width} × {window.height}</span>
@@ -1027,12 +1235,27 @@ export function ReplayPage() {
             <span>Selected source</span>
             <strong>{selectedTargetLabel ?? "Choose a source to continue"}</strong>
           </div>
+          {replayActive && (
+            <p className="capture-config-note" role="status">
+              Replay owns the current source. Stop Replay before choosing a source for the next session.
+            </p>
+          )}
+          {gameDetectionStatus?.manualOverrideActive && !replayActive && (
+            <div className="capture-selection-summary">
+              <span>Manual override active</span>
+              <button className="secondary-button" type="button" onClick={() => void resumeAutomaticDetection()}>Use Automatic Game Detection</button>
+            </div>
+          )}
           <label className="setting-row">
             <span className="setting-label">Replay Duration</span>
             <select
               value={replayDuration}
               disabled={replayActive}
-              onChange={(event) => setReplayDuration(Number(event.target.value))}
+              onChange={(event) => {
+                const value = Number(event.target.value) as 30 | 60 | 120 | 180 | 300;
+                setReplayDuration(value);
+                void persistReplayDefaults({ replayDurationSeconds: value });
+              }}
             >
               {replayDurationOptions.map((option) => (
                 <option value={option.value} key={option.value}>{option.label}</option>
@@ -1044,10 +1267,30 @@ export function ReplayPage() {
             <select
               value={frameRate}
               disabled={replayActive}
-              onChange={(event) => setFrameRate(Number(event.target.value))}
+              onChange={(event) => {
+                const value = Number(event.target.value) as 30 | 60;
+                setFrameRate(value);
+                void persistReplayDefaults({ replayFrameRate: value });
+              }}
             >
               <option value={30}>30 FPS</option>
               <option value={60}>60 FPS</option>
+            </select>
+          </label>
+          <label className="setting-row">
+            <span className="setting-label">Video Quality</span>
+            <select
+              value={replayQuality}
+              disabled={replayActive}
+              onChange={(event) => {
+                const value = event.target.value as "high" | "balanced" | "smallerFiles";
+                setReplayQuality(value);
+                void persistReplayDefaults({ replayQuality: value });
+              }}
+            >
+              <option value="high">High</option>
+              <option value="balanced">Balanced</option>
+              <option value="smallerFiles">Smaller Files</option>
             </select>
           </label>
           <div className="setting-row">
@@ -1059,7 +1302,11 @@ export function ReplayPage() {
               id="replay-encoder"
               value={replayEncoder}
               disabled={replayActive || encodersLoading}
-              onChange={(event) => setReplayEncoder(event.target.value as Exclude<EncoderId, "av1">)}
+              onChange={(event) => {
+                const value = event.target.value as Exclude<EncoderId, "av1">;
+                setReplayEncoder(value);
+                void persistReplayDefaults({ replayEncoder: value });
+              }}
             >
               <option value="automatic">Automatic</option>
               <option value="hevc" disabled={!isEncoderAvailable(encoderCapabilities, "hevc")}>HEVC</option>
@@ -1067,7 +1314,7 @@ export function ReplayPage() {
             </select>
           </div>
           <p className="capture-config-note">
-            Video remains at the target's native dimensions. Enabled audio sources are retained as independent rolling WAV tracks.
+            Video remains at the target's native dimensions and uses the selected quality. Enabled audio sources are retained as independent rolling WAV tracks.
           </p>
           </section>
 
@@ -1112,7 +1359,11 @@ export function ReplayPage() {
               </div>
               <div className={`replay-state replay-state-${replayStatus.state}`}>
                 <span className="status-dot" aria-hidden="true" />
-                {replayStatus.state === "running"
+                {!replayStatusLoaded
+                  ? "Checking Replay status"
+                  : replayStatus.captureHealth === "Recovering"
+                    ? "Recovering capture"
+                    : replayStatus.state === "running"
                   ? saveReplayAvailable ? "Ready" : "Preparing replay history"
                   : formatReplayState(replayStatus.state)}
               </div>
@@ -1123,16 +1374,18 @@ export function ReplayPage() {
                 </div>
               )}
               <div className="replay-status-summary">
+                {automaticallyDetectedGame && <span>Detected game <strong>{automaticallyDetectedGame.title}</strong></span>}
                 <span>Target <strong>{replayStatus.targetLabel ?? selectedTargetLabel ?? "Not selected"}</strong></span>
+                <span>Capture <strong>{replayStatus.activeCaptureMode ?? "Display Capture"}</strong></span>
                 <span>Encoder <strong>{replayStatus.actualEncoder ?? "—"}</strong></span>
                 <span>Window <strong>{formatDuration(replayWindowSeconds)}</strong></span>
                 <span>Retained <strong>{replayStatus.retainedDurationSeconds.toFixed(1)} s</strong></span>
                 <span>Segments <strong>{replayStatus.completedSegmentCount}</strong></span>
                 <span>Buffer <strong>{formatBytes(replayStatus.retainedBytes)}</strong></span>
               </div>
-              {(replayCommandError || replayStatus.errorMessage) && (
+              {(replayCommandError || replayStatusFetchError || replayStatus.errorMessage) && (
                 <p className="replay-buffer-error" role="alert">
-                  {replayCommandError ?? replayStatus.errorMessage}
+                  {replayCommandError ?? replayStatusFetchError ?? replayStatus.errorMessage}
                 </p>
               )}
             </div>
@@ -1154,13 +1407,16 @@ export function ReplayPage() {
                 aria-pressed={replayActive}
                 disabled={
                   replayCommandActive ||
+                  !replayStatusLoaded ||
                   baselineActive ||
                   replayStatus.state === "stopping" ||
                   (!replayActive && (!selectedTarget || encodersLoading || !replayEncoderAvailable || !audioConfigurationValid))
                 }
                 onClick={replayActive ? stopReplayBuffer : startReplayBuffer}
               >
-                {replayStatus.state === "starting"
+                {!replayStatusLoaded
+                  ? "Checking Replay..."
+                  : replayStatus.state === "starting"
                   ? "Starting..."
                   : replayStatus.state === "stopping"
                     ? "Stopping..."
@@ -1181,21 +1437,31 @@ export function ReplayPage() {
             </summary>
             <div className="replay-diagnostics-content">
             <dl className="diagnostic-grid">
+              <Diagnostic label="Video lifecycle" value={replayStatus.requestedCaptureMode} />
+              <Diagnostic label="Active capture mode" value={replayStatus.activeCaptureMode ?? "—"} />
+              <Diagnostic label="Initial game presentation (diagnostic only)" value={replayStatus.presentation ?? "—"} />
+              <Diagnostic label="Actual backend" value={formatVideoBackend(replayStatus.videoBackend)} />
+              <Diagnostic label="Display selection" value={replayStatus.backendSelectionReason ?? "—"} />
+              <Diagnostic label="Capture health" value={replayStatus.captureHealth} />
+              <Diagnostic label="Recovery detail" value={replayStatus.captureFallbackReason ?? "—"} />
+              <Diagnostic label="Recovery elapsed" value={replayStatus.recoveryElapsedMs == null ? "—" : `${replayStatus.recoveryElapsedMs.toFixed(0)} ms`} />
+              <Diagnostic label="Recovery recreation attempts" value={String(replayStatus.recoveryRecreationAttempts)} />
+              <Diagnostic label="Last recovery" value={replayStatus.lastRecoveryMessage ?? "—"} />
               <Diagnostic label="Expected segment" value={`${replayStatus.expectedSegmentDurationSeconds.toFixed(2)} s`} />
               <Diagnostic label="Last segment" value={formatOptionalMetric(replayStatus.lastSegmentDurationSeconds, "s")} />
               <Diagnostic label="Output CFR interval" value={formatOptionalMetric(replayStatus.normalFrameIntervalMs, "ms")} />
-              <Diagnostic label="Last WGC delivery gap" value={formatOptionalMetric(replayStatus.lastSourceFrameGapMs, "ms")} />
-              <Diagnostic label="Worst WGC delivery gap" value={formatOptionalMetric(replayStatus.worstSourceFrameGapMs, "ms")} />
-              <Diagnostic label="Average WGC delivery gap" value={formatOptionalMetric(replayStatus.averageSourceFrameGapMs, "ms")} />
+              <Diagnostic label="Last source-frame gap" value={formatOptionalMetric(replayStatus.lastSourceFrameGapMs, "ms")} />
+              <Diagnostic label="Worst source-frame gap" value={formatOptionalMetric(replayStatus.worstSourceFrameGapMs, "ms")} />
+              <Diagnostic label="Average source-frame gap" value={formatOptionalMetric(replayStatus.averageSourceFrameGapMs, "ms")} />
               <Diagnostic label="Last encoder creation" value={formatOptionalMetric(replayStatus.lastEncoderCreationMs, "ms")} />
               <Diagnostic label="Worst encoder creation" value={formatOptionalMetric(replayStatus.worstEncoderCreationMs, "ms")} />
               <Diagnostic label="Average encoder creation" value={formatOptionalMetric(replayStatus.averageEncoderCreationMs, "ms")} />
               <Diagnostic label="Last finalize time" value={formatOptionalMetric(replayStatus.lastFinalizeTimeMs, "ms")} />
               <Diagnostic label="Rotation count" value={String(replayStatus.rotationCount)} />
-              <Diagnostic label="WGC source updates" value={String(replayStatus.framesObserved)} />
+              <Diagnostic label="Source frames observed" value={String(replayStatus.framesObserved)} />
               <Diagnostic label="Last estimated capture intervals skipped" value={formatOptionalCount(replayStatus.lastEstimatedFramesMissed)} />
               <Diagnostic label="Estimated capture intervals skipped" value={String(replayStatus.estimatedFramesMissedTotal)} />
-              <Diagnostic label="Material WGC delivery gaps" value={String(replayStatus.materialSourceGapCount)} />
+              <Diagnostic label="Material source-frame gaps" value={String(replayStatus.materialSourceGapCount)} />
               <Diagnostic label="Video timeline start QPC" value={formatOptionalCount(replayStatus.videoTimelineStartQpc100ns)} />
               <Diagnostic label="CFR output / expected index" value={`${formatOptionalCount(replayStatus.schedulerCurrentOutputFrameIndex)} / ${formatOptionalCount(replayStatus.schedulerExpectedOutputFrameIndex)}`} />
               <Diagnostic label="Scheduler late current / worst" value={formatMetricPair(replayStatus.schedulerCurrentLatenessMs, replayStatus.schedulerWorstLatenessMs)} />
@@ -1203,11 +1469,23 @@ export function ReplayPage() {
               <Diagnostic label="Scheduler catch-up frames" value={String(replayStatus.schedulerCatchUpFrames)} />
               <Diagnostic label="Catch-up during rotation" value={String(replayStatus.schedulerRotationCatchUpFrames)} />
               <Diagnostic label="Catch-up while Save pending" value={String(replayStatus.schedulerSavePendingCatchUpFrames)} />
+              <Diagnostic label="Scheduler discontinuities / rebases" value={`${replayStatus.schedulerDiscontinuities} / ${replayStatus.schedulerRebases}`} />
+              <Diagnostic label="FFmpeg child restarts" value={String(replayStatus.ffmpegCaptureRestarts)} />
+              <Diagnostic label="Screen output / adapter" value={`${replayStatus.dxgiStartup.outputIdentity ?? "—"} / ${replayStatus.dxgiStartup.adapterIdentity ?? "—"}`} />
+              <Diagnostic label="Screen desktop origin / resolution" value={replayStatus.dxgiStartup.desktopX == null ? "—" : `${replayStatus.dxgiStartup.desktopX}, ${replayStatus.dxgiStartup.desktopY} / ${replayStatus.dxgiStartup.outputWidth}×${replayStatus.dxgiStartup.outputHeight}`} />
               <Diagnostic label="Rotation late before / after" value={formatMetricPair(replayStatus.lastRotationLatenessBeforeMs, replayStatus.lastRotationLatenessAfterMs)} />
               <Diagnostic label="Fresh / held output frames" value={`${replayStatus.freshOutputFrames} / ${replayStatus.heldOutputFrames}`} />
-              <Diagnostic label="Superseded WGC updates" value={String(replayStatus.supersededSourceUpdates)} />
+              <Diagnostic label="Superseded source updates" value={String(replayStatus.supersededSourceUpdates)} />
               <Diagnostic label="Missed realtime outputs" value={String(replayStatus.missedRealtimeOutputFrames)} />
+              <Diagnostic label="Detached / rate-limited source frames" value={`${replayStatus.sourceFramesDetached} / ${replayStatus.sourceFramesRateLimited}`} />
               <Diagnostic label="Source / output rate" value={`${formatOptionalMetric(replayStatus.sourceFrameUpdateRate, "FPS")} / ${formatOptionalMetric(replayStatus.outputCfrRate, "FPS")}`} />
+              <Diagnostic label="Logical Replay / WGC / Rust DXGI sessions" value={`${replayStatus.nativeResources.logicalReplaySessions} / ${replayStatus.nativeResources.wgcCaptureSessions} / ${replayStatus.nativeResources.dxgiDuplicationSessions}`} />
+              <Diagnostic label="D3D11 devices / contexts" value={`${replayStatus.nativeResources.d3d11Devices} / ${replayStatus.nativeResources.d3d11DeviceContexts}`} />
+              <Diagnostic label="Frame pools / MF encoders" value={`${replayStatus.nativeResources.framePools} / ${replayStatus.nativeResources.mediaFoundationEncoders}`} />
+              <Diagnostic label="Owned FFmpeg capture children" value={String(replayStatus.nativeResources.ffmpegCaptureProcesses)} />
+              <Diagnostic label="Video / audio workers" value={`${replayStatus.nativeResources.videoWorkers} / ${replayStatus.nativeResources.audioWorkers}`} />
+              <Diagnostic label="System cursor visible / suppressed" value={`${formatOptionalBoolean(replayStatus.nativeResources.systemCursorVisible)} / ${formatOptionalBoolean(replayStatus.nativeResources.systemCursorSuppressed)}`} />
+              <Diagnostic label="Capture cursor mode" value={replayStatus.nativeResources.captureCursorMode} />
               <Diagnostic label="Next encoder" value={formatEncoderPreparation(replayStatus)} />
               <Diagnostic label="Callback avg / worst" value={formatMetricPair(replayStatus.averageCallbackDurationMs, replayStatus.worstCallbackDurationMs)} />
               <Diagnostic label="Scheduled submit avg / worst" value={formatMetricPair(replayStatus.averageSendFrameDurationMs, replayStatus.worstSendFrameDurationMs)} />
@@ -1223,7 +1501,7 @@ export function ReplayPage() {
               <Diagnostic label="Encoder queue capacity" value={String(replayStatus.encoderQueueCapacity)} />
               <Diagnostic label="Queue refusals / retry attempts" value={`${replayStatus.encoderQueueFullEvents} / ${replayStatus.queueFullRetryAttempts}`} />
               <Diagnostic label="Recovered queue-full frames" value={String(replayStatus.recoveredQueueFullFrames)} />
-              <Diagnostic label="WGC frame pool" value={`${replayStatus.framePoolCreationMethod} · ${replayStatus.framePoolBufferCount} buffers`} />
+              <Diagnostic label="Capture frame pool" value={`${replayStatus.framePoolCreationMethod} · ${replayStatus.framePoolBufferCount} buffers`} />
               <Diagnostic label="send_frame > 16.67 / 33.33 ms" value={`${replayStatus.sendFrameOver16_67Ms} / ${replayStatus.sendFrameOver33_33Ms}`} />
               <Diagnostic label="send_frame > 50 / 100 ms" value={`${replayStatus.sendFrameOver50Ms} / ${replayStatus.sendFrameOver100Ms}`} />
               <Diagnostic label="Pending finalizations" value={String(replayStatus.pendingFinalizations)} />
@@ -1443,7 +1721,7 @@ export function ReplayPage() {
                 <div className="timeline-consistency-report">
                   <small>Saved-replay timeline consistency</small>
                   <code>Immutable Save QPC anchor {saveReplayStatus.saveRequestQpc100ns ?? "n/a"}</code>
-                  <code>Raw WGC QPC {saveReplayStatus.videoTimeline.rawCaptureStartQpc100ns}→{saveReplayStatus.videoTimeline.rawCaptureEndQpc100ns} ({format100nsSeconds(saveReplayStatus.videoTimeline.rawCaptureSpan100ns)} s)</code>
+                  <code>Raw capture QPC {saveReplayStatus.videoTimeline.rawCaptureStartQpc100ns}→{saveReplayStatus.videoTimeline.rawCaptureEndQpc100ns} ({format100nsSeconds(saveReplayStatus.videoTimeline.rawCaptureSpan100ns)} s)</code>
                   <code>Realtime video QPC {saveReplayStatus.videoTimeline.clipCaptureStartQpc100ns}→{saveReplayStatus.videoTimeline.clipCaptureEndQpc100ns}</code>
                   <code>Final playback 0.000→{format100nsSeconds(saveReplayStatus.videoTimeline.clipPlaybackDuration100ns)} s · source delivery gaps preserved by held CFR frames</code>
                   <code>Internal / ffprobe {formatOptionalMetric(saveReplayStatus.internalEncodedDurationSeconds, "s")} / {formatOptionalMetric(saveReplayStatus.ffprobeDurationSeconds, "s")} · difference {formatOptionalMetric(saveReplayStatus.internalFfprobeDifferenceMs, "ms")}</code>
@@ -1491,6 +1769,10 @@ function formatEncoderId(encoder: EncoderId) {
   };
 
   return labels[encoder];
+}
+
+function formatVideoBackend(backend: string) {
+  return backend;
 }
 
 function isReplayActive(state: ReplayLifecycleState) {
@@ -1586,6 +1868,10 @@ function formatOptionalMetric(value: number | null, unit: string) {
 
 function formatOptionalCount(value: number | null) {
   return value === null ? "—" : String(value);
+}
+
+function formatOptionalBoolean(value: boolean | null) {
+  return value === null ? "—" : value ? "yes" : "no";
 }
 
 function formatEncoderPreparation(status: ReplayBufferStatus) {

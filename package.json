@@ -1,13 +1,14 @@
 {
   "name": "slickclip",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.0.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "prepare:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/generate-installer-assets.ps1",
     "prepare:ffmpeg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-ffmpeg.ps1",
-    "bundle": "npm run prepare:ffmpeg && tauri build --bundles nsis",
+    "bundle": "npm run prepare:installer && npm run prepare:ffmpeg && tauri build --bundles nsis",
     "bundle:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
     "test": "node --test tests/playerControls.test.ts tests/editorSession.test.ts tests/editorMixer.test.ts tests/editorExport.test.ts tests/watchProgress.test.ts tests/libraryPreferences.test.ts tests/replayRoulette.test.ts tests/hotkeyShortcut.test.ts tests/clipSelection.test.ts tests/usabilityGuidance.test.ts",
     "preview": "vite preview",

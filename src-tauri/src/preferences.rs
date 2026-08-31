@@ -13,7 +13,17 @@ use windows::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
-const UI_PREFERENCES_SCHEMA_VERSION: u32 = 5;
+use crate::capture::compatibility::CaptureMode;
+
+const UI_PREFERENCES_SCHEMA_VERSION: u32 = 9;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GameDetectionMode {
+    #[default]
+    AnyDetectedGame,
+    ApprovedGamesOnly,
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -32,9 +42,18 @@ pub struct UiPreferences {
     pub close_to_tray: bool,
     pub save_overlay_enabled: bool,
     pub save_replay_hotkey: String,
+    pub save_and_name_hotkey: Option<String>,
     pub storage_quota_gib: u32,
+    pub capture_mode: CaptureMode,
+    pub replay_duration_seconds: u32,
+    pub replay_frame_rate: u32,
+    pub replay_quality: String,
+    pub replay_encoder: String,
     pub game_detection_enabled: bool,
     pub game_auto_arm: bool,
+    pub game_detection_mode: GameDetectionMode,
+    pub game_stop_replay_on_close: bool,
+    pub game_ready_notification_enabled: bool,
     pub game_detection_approved_processes: Vec<String>,
     pub game_detection_excluded_processes: Vec<String>,
 }
@@ -56,9 +75,18 @@ impl Default for UiPreferences {
             close_to_tray: true,
             save_overlay_enabled: true,
             save_replay_hotkey: crate::hotkey::DEFAULT_SAVE_REPLAY_HOTKEY.to_string(),
+            save_and_name_hotkey: None,
             storage_quota_gib: 50,
-            game_detection_enabled: false,
-            game_auto_arm: false,
+            capture_mode: CaptureMode::Auto,
+            replay_duration_seconds: 120,
+            replay_frame_rate: 60,
+            replay_quality: "balanced".into(),
+            replay_encoder: "automatic".into(),
+            game_detection_enabled: true,
+            game_auto_arm: true,
+            game_detection_mode: GameDetectionMode::AnyDetectedGame,
+            game_stop_replay_on_close: true,
+            game_ready_notification_enabled: true,
             game_detection_approved_processes: Vec::new(),
             game_detection_excluded_processes: Vec::new(),
         }
@@ -102,6 +130,26 @@ impl UiPreferences {
         }
         self.clips_search_query.truncate(500);
         self.storage_quota_gib = self.storage_quota_gib.clamp(1, 10 * 1024);
+        if !matches!(self.replay_duration_seconds, 30 | 60 | 120 | 180 | 300) {
+            self.replay_duration_seconds = 120;
+        }
+        if !matches!(self.replay_frame_rate, 30 | 60) {
+            self.replay_frame_rate = 60;
+        }
+        if !matches!(
+            self.replay_quality.as_str(),
+            "high" | "balanced" | "smallerFiles"
+        ) {
+            self.replay_quality = "balanced".into();
+        }
+        if !matches!(self.replay_encoder.as_str(), "automatic" | "hevc" | "h264") {
+            self.replay_encoder = "automatic".into();
+        }
+        self.save_and_name_hotkey = self
+            .save_and_name_hotkey
+            .take()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         self.selected_collection_id = self
             .selected_collection_id
             .take()
@@ -168,9 +216,19 @@ pub struct UiPreferencesPatch {
     pub close_to_tray: Option<bool>,
     pub save_overlay_enabled: Option<bool>,
     pub save_replay_hotkey: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_nullable_field")]
+    pub save_and_name_hotkey: Option<Option<String>>,
     pub storage_quota_gib: Option<u32>,
+    pub capture_mode: Option<CaptureMode>,
+    pub replay_duration_seconds: Option<u32>,
+    pub replay_frame_rate: Option<u32>,
+    pub replay_quality: Option<String>,
+    pub replay_encoder: Option<String>,
     pub game_detection_enabled: Option<bool>,
     pub game_auto_arm: Option<bool>,
+    pub game_detection_mode: Option<GameDetectionMode>,
+    pub game_stop_replay_on_close: Option<bool>,
+    pub game_ready_notification_enabled: Option<bool>,
     pub game_detection_approved_processes: Option<Vec<String>>,
     pub game_detection_excluded_processes: Option<Vec<String>>,
 }
@@ -224,6 +282,11 @@ impl UiPreferencesManager {
         }
     }
 
+    pub(crate) fn with_current<R>(&self, callback: impl FnOnce(&UiPreferences) -> R) -> R {
+        let preferences = self.lock();
+        callback(&preferences)
+    }
+
     pub fn save_replay_hotkey(&self, combination: String) -> Result<(), String> {
         let response = self.update(UiPreferencesPatch {
             save_replay_hotkey: Some(combination),
@@ -234,6 +297,20 @@ impl UiPreferencesManager {
         } else {
             Err(response.error_message.unwrap_or_else(|| {
                 "The Save Replay hotkey preference could not be saved.".to_string()
+            }))
+        }
+    }
+
+    pub fn save_and_name_hotkey(&self, combination: Option<String>) -> Result<(), String> {
+        let response = self.update(UiPreferencesPatch {
+            save_and_name_hotkey: Some(combination),
+            ..Default::default()
+        });
+        if response.success {
+            Ok(())
+        } else {
+            Err(response.error_message.unwrap_or_else(|| {
+                "The Save & Name hotkey preference could not be saved.".to_string()
             }))
         }
     }
@@ -303,14 +380,41 @@ fn apply_patch(mut value: UiPreferences, patch: UiPreferencesPatch) -> UiPrefere
     if let Some(next) = patch.save_replay_hotkey {
         value.save_replay_hotkey = next;
     }
+    if let Some(next) = patch.save_and_name_hotkey {
+        value.save_and_name_hotkey = next;
+    }
     if let Some(next) = patch.storage_quota_gib {
         value.storage_quota_gib = next;
+    }
+    if let Some(next) = patch.capture_mode {
+        value.capture_mode = next;
+    }
+    if let Some(next) = patch.replay_duration_seconds {
+        value.replay_duration_seconds = next;
+    }
+    if let Some(next) = patch.replay_frame_rate {
+        value.replay_frame_rate = next;
+    }
+    if let Some(next) = patch.replay_quality {
+        value.replay_quality = next;
+    }
+    if let Some(next) = patch.replay_encoder {
+        value.replay_encoder = next;
     }
     if let Some(next) = patch.game_detection_enabled {
         value.game_detection_enabled = next;
     }
     if let Some(next) = patch.game_auto_arm {
         value.game_auto_arm = next;
+    }
+    if let Some(next) = patch.game_detection_mode {
+        value.game_detection_mode = next;
+    }
+    if let Some(next) = patch.game_stop_replay_on_close {
+        value.game_stop_replay_on_close = next;
+    }
+    if let Some(next) = patch.game_ready_notification_enabled {
+        value.game_ready_notification_enabled = next;
     }
     if let Some(next) = patch.game_detection_approved_processes {
         value.game_detection_approved_processes = next;
@@ -323,12 +427,53 @@ fn apply_patch(mut value: UiPreferences, patch: UiPreferencesPatch) -> UiPrefere
 
 fn load_preferences(path: &Path) -> Result<UiPreferences, String> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<UiPreferences>(&bytes)
-            .map(UiPreferences::normalized)
-            .map_err(|error| format!("Could not parse '{}': {error}", path.display())),
+        Ok(bytes) => {
+            let mut document = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .map_err(|error| format!("Could not parse '{}': {error}", path.display()))?;
+            preserve_legacy_game_detection_defaults(&mut document);
+            serde_json::from_value::<UiPreferences>(document)
+                .map(UiPreferences::normalized)
+                .map_err(|error| format!("Could not parse '{}': {error}", path.display()))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(UiPreferences::default()),
         Err(error) => Err(format!("Could not read '{}': {error}", path.display())),
     }
+}
+
+fn preserve_legacy_game_detection_defaults(document: &mut serde_json::Value) {
+    let Some(object) = document.as_object_mut() else {
+        return;
+    };
+    let legacy_detection_enabled = object
+        .get("gameDetectionEnabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let legacy_auto_arm = object
+        .get("gameAutoArm")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    object
+        .entry("gameDetectionEnabled")
+        .or_insert(serde_json::Value::Bool(false));
+    object
+        .entry("gameAutoArm")
+        .or_insert(serde_json::Value::Bool(false));
+    object.entry("gameDetectionMode").or_insert_with(|| {
+        serde_json::Value::String(
+            if legacy_detection_enabled && legacy_auto_arm {
+                "anyDetectedGame"
+            } else {
+                "approvedGamesOnly"
+            }
+            .into(),
+        )
+    });
+    object
+        .entry("gameStopReplayOnClose")
+        .or_insert(serde_json::Value::Bool(true));
+    object
+        .entry("gameReadyNotificationEnabled")
+        .or_insert(serde_json::Value::Bool(true));
 }
 
 fn wide_null(value: &OsStr) -> Vec<u16> {
@@ -386,6 +531,7 @@ pub fn update_ui_preferences(
     patch.start_with_windows = None;
     // The hotkey preference changes only after the global registration succeeds.
     patch.save_replay_hotkey = None;
+    patch.save_and_name_hotkey = None;
     manager.update(patch)
 }
 
@@ -402,7 +548,16 @@ mod tests {
     fn absent_malformed_and_unknown_fields_are_safe() {
         let root = directory("load");
         let path = root.join("ui-preferences.json");
-        assert_eq!(load_preferences(&path).unwrap(), UiPreferences::default());
+        let fresh = load_preferences(&path).unwrap();
+        assert_eq!(fresh, UiPreferences::default());
+        assert!(fresh.game_detection_enabled);
+        assert!(fresh.game_auto_arm);
+        assert_eq!(
+            fresh.game_detection_mode,
+            GameDetectionMode::AnyDetectedGame
+        );
+        assert!(fresh.game_stop_replay_on_close);
+        assert!(fresh.game_ready_notification_enabled);
         fs::create_dir_all(&root).unwrap();
         fs::write(&path, b"not json").unwrap();
         assert!(load_preferences(&path).is_err());
@@ -421,12 +576,133 @@ mod tests {
             upgraded.save_replay_hotkey,
             crate::hotkey::DEFAULT_SAVE_REPLAY_HOTKEY
         );
+        assert_eq!(upgraded.save_and_name_hotkey, None);
         assert_eq!(upgraded.storage_quota_gib, 50);
+        assert_eq!(upgraded.capture_mode, CaptureMode::Auto);
+        assert_eq!(upgraded.replay_duration_seconds, 120);
+        assert_eq!(upgraded.replay_frame_rate, 60);
+        assert_eq!(upgraded.replay_quality, "balanced");
+        assert_eq!(upgraded.replay_encoder, "automatic");
         assert!(!upgraded.game_detection_enabled);
         assert!(!upgraded.game_auto_arm);
+        assert_eq!(
+            upgraded.game_detection_mode,
+            GameDetectionMode::ApprovedGamesOnly
+        );
+        assert!(upgraded.game_stop_replay_on_close);
+        assert!(upgraded.game_ready_notification_enabled);
         assert!(upgraded.game_detection_approved_processes.is_empty());
         assert!(upgraded.game_detection_excluded_processes.is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_enabled_automatic_profile_migrates_to_any_detected_game() {
+        let root = directory("game-detection-migration");
+        let path = root.join("ui-preferences.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &path,
+            br#"{"schemaVersion":5,"gameDetectionEnabled":true,"gameAutoArm":true,"gameDetectionApprovedProcesses":["KeptGame.exe"],"gameDetectionExcludedProcesses":["NeverCapture.exe"]}"#,
+        )
+        .unwrap();
+        let loaded = load_preferences(&path).unwrap();
+        assert!(loaded.game_detection_enabled);
+        assert!(loaded.game_auto_arm);
+        assert_eq!(
+            loaded.game_detection_mode,
+            GameDetectionMode::AnyDetectedGame
+        );
+        assert_eq!(loaded.game_detection_approved_processes, vec!["KeptGame"]);
+        assert_eq!(
+            loaded.game_detection_excluded_processes,
+            vec!["NeverCapture"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_auto_arm_off_remains_off() {
+        let root = directory("game-auto-arm-off-migration");
+        let path = root.join("ui-preferences.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &path,
+            br#"{"schemaVersion":5,"gameDetectionEnabled":true,"gameAutoArm":false}"#,
+        )
+        .unwrap();
+        let loaded = load_preferences(&path).unwrap();
+        assert!(loaded.game_detection_enabled);
+        assert!(!loaded.game_auto_arm);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_detection_off_remains_off() {
+        let root = directory("game-detection-off-migration");
+        let path = root.join("ui-preferences.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &path,
+            br#"{"schemaVersion":5,"gameDetectionEnabled":false,"gameAutoArm":true}"#,
+        )
+        .unwrap();
+        let loaded = load_preferences(&path).unwrap();
+        assert!(!loaded.game_detection_enabled);
+        assert!(!loaded.game_auto_arm);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_v6_detection_modes_survive_later_launches() {
+        for (name, serialized_mode, expected_mode) in [
+            ("any", "anyDetectedGame", GameDetectionMode::AnyDetectedGame),
+            (
+                "strict",
+                "approvedGamesOnly",
+                GameDetectionMode::ApprovedGamesOnly,
+            ),
+        ] {
+            let root = directory(&format!("explicit-v6-mode-{name}"));
+            let path = root.join("ui-preferences.json");
+            fs::create_dir_all(&root).unwrap();
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"schemaVersion":6,"gameDetectionEnabled":true,"gameAutoArm":true,"gameDetectionMode":"{serialized_mode}"}}"#
+                ),
+            )
+            .unwrap();
+            let first_launch = load_preferences(&path).unwrap();
+            assert_eq!(first_launch.game_detection_mode, expected_mode);
+            save_preferences(&path, &first_launch).unwrap();
+            let later_launch = load_preferences(&path).unwrap();
+            assert_eq!(later_launch.game_detection_mode, expected_mode);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn capture_mode_defaults_to_auto_and_explicit_choices_round_trip() {
+        for (name, serialized_mode, expected_mode) in [
+            ("auto", "auto", CaptureMode::Auto),
+            ("game", "gameCapture", CaptureMode::GameCapture),
+            ("screen", "screenCapture", CaptureMode::ScreenCapture),
+        ] {
+            let root = directory(&format!("capture-mode-{name}"));
+            let path = root.join("ui-preferences.json");
+            fs::create_dir_all(&root).unwrap();
+            fs::write(
+                &path,
+                format!(r#"{{"schemaVersion":7,"captureMode":"{serialized_mode}"}}"#),
+            )
+            .unwrap();
+            let loaded = load_preferences(&path).unwrap();
+            assert_eq!(loaded.capture_mode, expected_mode);
+            save_preferences(&path, &loaded).unwrap();
+            assert_eq!(load_preferences(&path).unwrap().capture_mode, expected_mode);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -448,9 +724,18 @@ mod tests {
             close_to_tray: Some(false),
             save_overlay_enabled: Some(false),
             save_replay_hotkey: Some("Shift + Numpad0".into()),
+            save_and_name_hotkey: Some(Some("Ctrl + Shift + F11".into())),
             storage_quota_gib: Some(12_000),
+            capture_mode: Some(CaptureMode::ScreenCapture),
+            replay_duration_seconds: Some(300),
+            replay_frame_rate: Some(30),
+            replay_quality: Some("high".into()),
+            replay_encoder: Some("hevc".into()),
             game_detection_enabled: Some(true),
             game_auto_arm: Some(true),
+            game_detection_mode: Some(GameDetectionMode::AnyDetectedGame),
+            game_stop_replay_on_close: Some(false),
+            game_ready_notification_enabled: Some(false),
             game_detection_approved_processes: Some(vec![
                 " Game.exe ".into(),
                 "game".into(),
@@ -472,9 +757,24 @@ mod tests {
         assert!(!loaded.close_to_tray);
         assert!(!loaded.save_overlay_enabled);
         assert_eq!(loaded.save_replay_hotkey, "Shift + Numpad0");
+        assert_eq!(
+            loaded.save_and_name_hotkey.as_deref(),
+            Some("Ctrl + Shift + F11")
+        );
         assert_eq!(loaded.storage_quota_gib, 10 * 1024);
+        assert_eq!(loaded.capture_mode, CaptureMode::ScreenCapture);
+        assert_eq!(loaded.replay_duration_seconds, 300);
+        assert_eq!(loaded.replay_frame_rate, 30);
+        assert_eq!(loaded.replay_quality, "high");
+        assert_eq!(loaded.replay_encoder, "hevc");
         assert!(loaded.game_detection_enabled);
         assert!(loaded.game_auto_arm);
+        assert_eq!(
+            loaded.game_detection_mode,
+            GameDetectionMode::AnyDetectedGame
+        );
+        assert!(!loaded.game_stop_replay_on_close);
+        assert!(!loaded.game_ready_notification_enabled);
         assert_eq!(loaded.game_detection_approved_processes, vec!["Game"]);
         assert_eq!(loaded.game_detection_excluded_processes, vec!["other"]);
         assert_eq!(
@@ -543,6 +843,33 @@ mod tests {
 
         let restarted = UiPreferencesManager::initialize(path);
         assert_eq!(restarted.get().preferences.save_replay_hotkey, "F8");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn optional_save_and_name_hotkey_persists_and_can_be_disabled() {
+        let root = directory("save-and-name-hotkey");
+        let path = root.join("ui-preferences.json");
+        let manager = UiPreferencesManager::initialize(path.clone());
+        manager
+            .save_and_name_hotkey(Some("Ctrl + Shift + F11".to_string()))
+            .unwrap();
+        drop(manager);
+
+        let restarted = UiPreferencesManager::initialize(path.clone());
+        assert_eq!(
+            restarted.get().preferences.save_and_name_hotkey.as_deref(),
+            Some("Ctrl + Shift + F11")
+        );
+        restarted.save_and_name_hotkey(None).unwrap();
+        drop(restarted);
+        assert_eq!(
+            UiPreferencesManager::initialize(path)
+                .get()
+                .preferences
+                .save_and_name_hotkey,
+            None
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

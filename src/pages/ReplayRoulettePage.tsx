@@ -117,28 +117,34 @@ export function ReplayRoulettePage({ onToast }: Props) {
   const filterDescription = [favoritesOnly ? "favorites" : "all clips", selectedCollection ? `in ${selectedCollection.name}` : null].filter(Boolean).join(" ");
 
   return <div className="page roulette-page">
-    <header className="page-header"><div><h1>Replay Roulette</h1><p>Rediscover something worth replaying.</p></div></header>
+    <header className="page-header roulette-page-header">
+      <div><span className="roulette-page-eyebrow">Library wildcard</span><h1>Replay Roulette</h1><p>Let SlickClip dig up a moment you forgot about.</p></div>
+      <div className="roulette-header-facts"><span>Weighted picks</span><span>Recent repeats avoided</span></div>
+    </header>
     <section className="roulette-panel" aria-label="Replay Roulette">
       <div className="roulette-toolbar">
-        <div><span className="roulette-eyebrow">Choose from</span><strong>{loading ? "Loading your Library..." : `${clips.length} eligible clip${clips.length === 1 ? "" : "s"}`}</strong></div>
-        <label className="roulette-favorite-filter"><input type="checkbox" checked={favoritesOnly} onChange={(event) => { setFavoritesOnly(event.target.checked); setSelectedClip(null); }} /><span>Favorites only</span></label>
-        <label><span className="visually-hidden">Replay Roulette collection</span><select value={collectionId ?? ""} onChange={(event) => { setCollectionId(event.target.value || null); setSelectedClip(null); }}><option value="">All Collections</option>{collections.map((collection) => <option value={collection.id} key={collection.id}>{collection.name} ({collection.clipCount})</option>)}</select></label>
+        <div className="roulette-pool-summary"><span className="roulette-eyebrow">Current pool</span><strong>{loading ? "Loading your Library..." : `${clips.length} eligible clip${clips.length === 1 ? "" : "s"}`}</strong><small>{filterDescription}</small></div>
+        <div className="roulette-filter-controls">
+          <label className="roulette-collection-filter"><span>Collection</span><select value={collectionId ?? ""} onChange={(event) => { setCollectionId(event.target.value || null); setSelectedClip(null); }}><option value="">All Collections</option>{collections.map((collection) => <option value={collection.id} key={collection.id}>{collection.name} ({collection.clipCount})</option>)}</select></label>
+          <label className={`roulette-favorite-filter${favoritesOnly ? " active" : ""}`}><input type="checkbox" checked={favoritesOnly} onChange={(event) => { setFavoritesOnly(event.target.checked); setSelectedClip(null); }} /><span aria-hidden="true">★</span><strong>Favorites only</strong></label>
+        </div>
       </div>
 
       {error ? <div className="roulette-state roulette-error" role="alert"><strong>Roulette is unavailable</strong><span>{error}</span><button className="secondary-button" type="button" onClick={() => void loadClips()}>Try Again</button></div>
         : loading ? <div className="roulette-state" role="status"><span className="player-spinner" /><strong>Shuffling your Library...</strong></div>
           : clips.length === 0 ? <div className="roulette-state"><div className="roulette-mark" aria-hidden="true">↻</div><strong>No clips match these filters</strong><span>Try another collection or include non-favorites.</span></div>
             : selectedClip ? <article className="roulette-result" key={`${selectedClip.id}:${selectionRevision}`} aria-live="polite">
-              <div className="roulette-result-visual"><ClipThumbnail clip={selectedClip} onPlay={() => setPlayingClip(selectedClip)} /></div>
+              <div className="roulette-result-visual"><span className="roulette-card-shadow roulette-card-shadow-one" aria-hidden="true" /><span className="roulette-card-shadow roulette-card-shadow-two" aria-hidden="true" /><ClipThumbnail clip={selectedClip} onPlay={() => setPlayingClip(selectedClip)} /></div>
               <div className="roulette-result-copy">
-                <span className="roulette-eyebrow">Tonight's replay</span>
+                <div className="roulette-result-kicker"><span className="roulette-eyebrow">Your Library picked</span>{selectedClip.favorite && <span className="roulette-picked-favorite">★ Favorite</span>}</div>
                 <h2>{selectedClip.displayName}</h2>
                 <p>{selectedClip.captureTargetLabel ?? "Saved replay"}</p>
                 <div className="roulette-facts"><span>{formatDuration100ns(selectedClip.duration100ns)}</span><span>{selectedClip.width}×{selectedClip.height}</span><span>{selectedClip.playCount === 0 ? "Never watched" : `${selectedClip.playCount} play${selectedClip.playCount === 1 ? "" : "s"}`}</span>{selectedClip.lastWatchedAtMs !== null && <span>{formatLastWatched(selectedClip.lastWatchedAtMs)}</span>}</div>
-                <div className="roulette-actions"><button className="primary-button" type="button" onClick={() => setPlayingClip(selectedClip)}>Play Replay</button><button className="secondary-button" type="button" onClick={chooseClip}>Spin Again</button></div>
+                <div className="roulette-actions"><button className="primary-button" type="button" onClick={() => setPlayingClip(selectedClip)}>▶ Play Replay</button><button className="secondary-button" type="button" onClick={chooseClip}>↻ Pick Another</button><button className="roulette-copy-button" type="button" onClick={() => void copyClip(selectedClip)}>Copy Clip</button></div>
+                <small className="roulette-selection-note">Picks favor clips you watch less and avoid the last few results.</small>
               </div>
             </article>
-              : <div className="roulette-landing"><div className="roulette-mark" aria-hidden="true">↻</div><span className="roulette-eyebrow">Ready when you are</span><h2>Let the Library choose.</h2><p>Roulette favors clips you have watched less and keeps recent picks out of the way.</p><button className="primary-button roulette-spin-button" type="button" onClick={chooseClip}>Find a Replay</button><small>Choosing from {filterDescription}.</small></div>}
+              : <div className="roulette-landing"><div className="roulette-mark" aria-hidden="true"><span>↻</span></div><span className="roulette-eyebrow">Ready when you are</span><h2>Let the Library choose.</h2><p>SlickClip favors forgotten moments and keeps recent picks out of the way.</p><div className="roulette-promise"><span>Less-watched first</span><span>No immediate repeats</span><span>Your filters respected</span></div><button className="primary-button roulette-spin-button" type="button" onClick={chooseClip}>Pick My Replay</button><small>Choosing from {filterDescription}.</small></div>}
     </section>
     {playingClip && preferencesLoaded && <ClipPlayer clip={playingClip} preferences={preferences} onPreferencesChange={persistPreferences} onClipUpdated={replaceClip} onCopy={() => void copyClip(playingClip)} onClose={() => setPlayingClip(null)} />}
   </div>;

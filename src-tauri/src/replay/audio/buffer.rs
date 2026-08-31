@@ -869,13 +869,20 @@ mod tests {
                     tracks: roles
                         .iter()
                         .enumerate()
-                        .map(|(index, role)| AudioTrackConfiguration {
-                            role: *role,
-                            enabled: true,
-                            source_kind: AudioSourceKind::Process,
-                            process_id: Some(index as u32 + 1),
-                            endpoint_id: None,
-                            source_label: Some(format!("{role:?}")),
+                        .map(|(index, role)| {
+                            let microphone = *role == AudioTrackRole::Microphone;
+                            AudioTrackConfiguration {
+                                role: *role,
+                                enabled: true,
+                                source_kind: if microphone {
+                                    AudioSourceKind::Microphone
+                                } else {
+                                    AudioSourceKind::Process
+                                },
+                                process_id: (!microphone).then_some(index as u32 + 1),
+                                endpoint_id: microphone.then(|| "test-microphone".to_string()),
+                                source_label: Some(format!("{role:?}")),
+                            }
                         })
                         .collect(),
                 },
@@ -959,6 +966,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(shared.enabled_tracks().len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn monotonic_av_timeline_preserves_game_voice_microphone_and_other_tracks() {
+        let root =
+            std::env::temp_dir().join(format!("replay-audio-all-roles-{}", uuid::Uuid::new_v4()));
+        let roles = [
+            AudioTrackRole::Game,
+            AudioTrackRole::VoiceChat,
+            AudioTrackRole::Microphone,
+            AudioTrackRole::Other,
+        ];
+        let shared = test_shared(&root, &roles, 120);
+        let tracks = shared.enabled_tracks();
+        assert_eq!(tracks.len(), 4);
+        for (index, track) in tracks.iter().enumerate() {
+            complete_test_segment(track, 1, 10_000_000, 30_000_000 + index as i64);
+        }
+
+        let (plans, pins) = shared.plan_and_pin(&test_timeline(15_000_000, 25_000_000));
+        assert_eq!(plans.len(), 4);
+        assert_eq!(
+            plans.iter().map(|plan| plan.track_role).collect::<Vec<_>>(),
+            roles
+        );
+        assert!(plans.iter().all(|plan| {
+            plan.clip_capture_start_qpc_100ns == 15_000_000
+                && plan.clip_capture_end_qpc_100ns == 25_000_000
+        }));
+        drop(pins);
         let _ = std::fs::remove_dir_all(root);
     }
 

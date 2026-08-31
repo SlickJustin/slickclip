@@ -369,6 +369,7 @@ fn run_recording(
         width: main_width,
         height: main_height,
         process_id: main_process_id,
+        ..
     } = resolve_target(&request.main_target)?;
     let ResolvedCaptureTarget {
         target: reaction_target,
@@ -376,6 +377,7 @@ fn run_recording(
         width: reaction_width,
         height: reaction_height,
         process_id: reaction_process_id,
+        ..
     } = resolve_discord_window(&request.reaction_window_id)?;
     validate_required_audio(
         &request.audio,
